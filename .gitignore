@@ -1,0 +1,43 @@
+## Ignoring Visual Studio, JetBrains, and other editors
+*.vs/
+.vs/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+## Ignoring Build Folders
+bin/
+obj/
+[Ee]xternal/
+_ReSharper*/
+
+## Ignoring Environment Variables and Secrets
+.env
+*.usersecrets
+
+## Ignoring OS & Debug files
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+*.bak
+*.tmp
+*.log
+
+## Ignoring Docker and other build tools
+.dockerignore
+node_modules/
+dist/
+
+## Generic C# / .NET / VS Code
+*.pfx
+*.publishsettings
+TestResults/
+[Bb]uild/
+[Rr]elease/
+[Dd]ebug/
+publish/
+[Ll]og/
+[Cc]ache/
