@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: reader-nest-db
+    environment:
+      POSTGRES_DB: reader_nest
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      # Host port 5433: many dev machines run a native PostgreSQL on 5432
+      - "5433:5432"
+    volumes:
+      - reader_nest_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d reader_nest"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  reader_nest_pgdata:
