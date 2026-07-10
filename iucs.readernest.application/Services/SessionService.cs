@@ -17,15 +17,25 @@ namespace iucs.readernest.application.Services
             SessionStatus.Completed,
             SessionStatus.Cancelled,
             SessionStatus.Rescheduled,
+            SessionStatus.TeacherNoShow,
+            SessionStatus.StudentNoShow,
         ];
 
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
+        private readonly IPayoutService _payoutService;
+        private readonly INotificationService _notificationService;
 
-        public SessionService(IUnitOfWork unitOfWork, IAuditLogService auditLog)
+        public SessionService(
+            IUnitOfWork unitOfWork,
+            IAuditLogService auditLog,
+            IPayoutService payoutService,
+            INotificationService notificationService)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
+            _payoutService = payoutService;
+            _notificationService = notificationService;
         }
 
         public async Task<IReadOnlyList<ClassSessionDto>> ListAsync(
@@ -175,7 +185,10 @@ namespace iucs.readernest.application.Services
             return await GetAsync(session.Id, cancellationToken);
         }
 
-        public async Task<ClassSessionDto> CompleteAsync(Guid id, CancellationToken cancellationToken = default)
+        public async Task<ClassSessionDto> CompleteAsync(
+            Guid id,
+            CompleteSessionRequest? request = null,
+            CancellationToken cancellationToken = default)
         {
             var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(id, cancellationToken)
                 ?? throw new NotFoundException(nameof(ClassSession), id);
@@ -188,16 +201,121 @@ namespace iucs.readernest.application.Services
             session.Status = SessionStatus.Completed;
             session.ActualStartAtUtc ??= session.ScheduledStartAtUtc;
             session.ActualEndAtUtc ??= DateTime.UtcNow;
+            if (!string.IsNullOrWhiteSpace(request?.Summary))
+            {
+                session.Summary = request.Summary.Trim();
+            }
 
             if (session.BatchId.HasValue)
             {
                 await MoveBatchToDormantIfCourseCompletedAsync(session, cancellationToken);
             }
 
+            // Auto payout calculation post-class: the earning accrues in the same unit of work
+            await _payoutService.AccrueForSessionAsync(
+                session, PayoutItemType.SessionEarning,
+                session.Type == SessionType.Demo ? "Demo session" : null,
+                cancellationToken);
+
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return await GetAsync(session.Id, cancellationToken);
+        }
+
+        public async Task<ClassSessionDto> MarkNoShowAsync(
+            Guid id,
+            MarkNoShowRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(id, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), id);
+
+            if (TerminalStatuses.Contains(session.Status))
+            {
+                throw new DomainValidationException($"A session in status '{session.Status}' cannot be marked as a no-show.");
+            }
+
+            session.Status = request.Party == NoShowParty.Teacher
+                ? SessionStatus.TeacherNoShow
+                : SessionStatus.StudentNoShow;
+
+            // The missed class is never lost: a carried-forward session is placed one week
+            // later at the same slot, keeping the traceability link for calendar and payouts.
+            var carriedForward = new ClassSession
+            {
+                BatchId = session.BatchId,
+                TeacherProfileId = session.TeacherProfileId,
+                Type = session.Type,
+                Status = SessionStatus.CarriedForward,
+                ScheduledStartAtUtc = session.ScheduledStartAtUtc.AddDays(7),
+                ScheduledEndAtUtc = session.ScheduledEndAtUtc.AddDays(7),
+                MeetingRoomId = session.MeetingRoomId,
+                CarriedForwardFromSessionId = session.Id,
+            };
+            await _unitOfWork.Repository<ClassSession>().AddAsync(carriedForward, cancellationToken);
+
+            if (request.Party == NoShowParty.Student)
+            {
+                // Teacher waited for the student: the waiting amount still accrues
+                await _payoutService.AccrueForSessionAsync(
+                    session, PayoutItemType.StudentNoShowWaiting,
+                    request.Note ?? "Student no-show waiting amount", cancellationToken);
+            }
+            else
+            {
+                await _payoutService.AccrueForSessionAsync(
+                    session, PayoutItemType.TeacherNoShowDeduction,
+                    request.Note ?? "Teacher no-show deduction", cancellationToken);
+                await NotifyAdminsOfTeacherNoShowAsync(session, cancellationToken);
+            }
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
+                changesJson: $"{{\"noShow\":\"{request.Party}\",\"carriedForwardTo\":\"{carriedForward.Id}\"}}",
+                cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return await GetAsync(carriedForward.Id, cancellationToken);
+        }
+
+        public async Task<SessionRecordingDto> AddRecordingAsync(
+            Guid sessionId,
+            RegisterRecordingRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var sessionExists = await _unitOfWork.Repository<ClassSession>()
+                .ExistsAsync(s => s.Id == sessionId, cancellationToken);
+            if (!sessionExists)
+            {
+                throw new NotFoundException(nameof(ClassSession), sessionId);
+            }
+
+            var recording = new SessionRecording
+            {
+                ClassSessionId = sessionId,
+                StorageUrl = request.StorageUrl,
+                DurationSeconds = request.DurationSeconds,
+                // Parent access is view-only for 15 days; the expiry job hides it afterwards
+                ExpiresAtUtc = DateTime.UtcNow.AddDays(15),
+            };
+            await _unitOfWork.Repository<SessionRecording>().AddAsync(recording, cancellationToken);
+            await _auditLog.StageAsync(AuditAction.Create, nameof(SessionRecording), recording.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return ToRecordingDto(recording);
+        }
+
+        public async Task<IReadOnlyList<SessionRecordingDto>> ListRecordingsAsync(
+            Guid sessionId,
+            CancellationToken cancellationToken = default)
+        {
+            var now = DateTime.UtcNow;
+            var recordings = await _unitOfWork.Repository<SessionRecording>().Query()
+                .Where(r => r.ClassSessionId == sessionId && (r.ExpiresAtUtc == null || r.ExpiresAtUtc > now))
+                .OrderByDescending(r => r.CreatedAtUtc)
+                .ToListAsync(cancellationToken);
+
+            return recordings.Select(ToRecordingDto).ToList();
         }
 
         public async Task<IReadOnlyList<ClassSessionDto>> GenerateScheduleAsync(
@@ -292,6 +410,38 @@ namespace iucs.readernest.application.Services
                 batch.Status = BatchStatus.Dormant;
                 batch.CompletedAtUtc = DateTime.UtcNow;
             }
+        }
+
+        private async Task NotifyAdminsOfTeacherNoShowAsync(ClassSession session, CancellationToken cancellationToken)
+        {
+            var admins = await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.Role == UserRole.Admin && u.Status == UserStatus.Active)
+                .ToListAsync(cancellationToken);
+
+            foreach (var admin in admins)
+            {
+                await _notificationService.SendEmailAsync(
+                    admin.Id,
+                    admin.Email,
+                    NotificationType.NoShowAlert,
+                    "Teacher no-show reported",
+                    $"The teacher did not attend the session scheduled at {session.ScheduledStartAtUtc:u}. " +
+                    "A deduction was applied and the session was carried forward.",
+                    cancellationToken);
+            }
+        }
+
+        private static SessionRecordingDto ToRecordingDto(SessionRecording recording)
+        {
+            return new SessionRecordingDto
+            {
+                Id = recording.Id,
+                ClassSessionId = recording.ClassSessionId,
+                StorageUrl = recording.StorageUrl,
+                DurationSeconds = recording.DurationSeconds,
+                ExpiresAtUtc = recording.ExpiresAtUtc,
+                CreatedAtUtc = recording.CreatedAtUtc,
+            };
         }
 
         private IQueryable<ClassSession> BaseQuery()

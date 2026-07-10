@@ -78,12 +78,52 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _sessionService.CancelAsync(id, request, cancellationToken));
         }
 
-        /// <summary>Marks a session completed; auto-moves the batch to Dormant when the course finishes.</summary>
+        /// <summary>
+        /// Marks a session completed with an optional class summary;
+        /// auto-moves the batch to Dormant when the course finishes.
+        /// </summary>
         [HttpPost("{id:guid}/complete")]
         [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
-        public async Task<ActionResult<ClassSessionDto>> Complete(Guid id, CancellationToken cancellationToken)
+        public async Task<ActionResult<ClassSessionDto>> Complete(
+            Guid id,
+            [FromBody(EmptyBodyBehavior = Microsoft.AspNetCore.Mvc.ModelBinding.EmptyBodyBehavior.Allow)] CompleteSessionRequest? request,
+            CancellationToken cancellationToken)
         {
-            return Ok(await _sessionService.CompleteAsync(id, cancellationToken));
+            return Ok(await _sessionService.CompleteAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>
+        /// Marks a teacher/student no-show: the payout impact accrues and a
+        /// carried-forward replacement session is returned.
+        /// </summary>
+        [HttpPost("{id:guid}/no-show")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<ActionResult<ClassSessionDto>> MarkNoShow(
+            Guid id,
+            MarkNoShowRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.MarkNoShowAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>Registers a finished recording; parent visibility expires after 15 days.</summary>
+        [HttpPost("{id:guid}/recordings")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<ActionResult<SessionRecordingDto>> AddRecording(
+            Guid id,
+            RegisterRecordingRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.AddRecordingAsync(id, request, cancellationToken));
+        }
+
+        [HttpGet("{id:guid}/recordings")]
+        [Authorize]
+        public async Task<ActionResult<IReadOnlyList<SessionRecordingDto>>> ListRecordings(
+            Guid id,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.ListRecordingsAsync(id, cancellationToken));
         }
     }
 }

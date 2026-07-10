@@ -111,6 +111,121 @@ namespace iucs.readernest.application.Services
             return await GetAsync(booking.Id, cancellationToken);
         }
 
+        public async Task<DemoFeedbackDto> SubmitFeedbackAsync(
+            Guid demoBookingId,
+            Guid teacherUserId,
+            SubmitDemoFeedbackRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var booking = await _unitOfWork.Repository<DemoBooking>().GetByIdAsync(demoBookingId, cancellationToken)
+                ?? throw new NotFoundException(nameof(DemoBooking), demoBookingId);
+
+            var teacher = await _unitOfWork.Repository<TeacherProfile>()
+                .FirstOrDefaultAsync(t => t.UserId == teacherUserId, cancellationToken)
+                ?? throw new NotFoundException("No teacher profile is linked to the current account.");
+
+            var alreadySubmitted = await _unitOfWork.Repository<DemoFeedback>()
+                .ExistsAsync(f => f.DemoBookingId == demoBookingId, cancellationToken);
+            if (alreadySubmitted)
+            {
+                throw new DomainValidationException("Feedback has already been submitted for this demo.");
+            }
+
+            var feedback = new DemoFeedback
+            {
+                DemoBookingId = booking.Id,
+                TeacherProfileId = teacher.Id,
+                AcademicLevel = request.AcademicLevel.Trim(),
+                Strengths = request.Strengths.Trim(),
+                ImprovementAreas = request.ImprovementAreas.Trim(),
+                RecommendedCourseId = request.RecommendedCourseId,
+                SuggestedBatchType = request.SuggestedBatchType,
+                Remarks = request.Remarks,
+                SubmittedAtUtc = DateTime.UtcNow,
+            };
+            await _unitOfWork.Repository<DemoFeedback>().AddAsync(feedback, cancellationToken);
+
+            // Feedback closes the demo stage; the booking enters the conversion pipeline
+            if (booking.ConversionStatus == ConversionStatus.DemoScheduled)
+            {
+                booking.ConversionStatus = ConversionStatus.DemoCompleted;
+            }
+
+            await _auditLog.StageAsync(AuditAction.Create, nameof(DemoFeedback), feedback.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            var saved = await FeedbackQuery().FirstAsync(f => f.Id == feedback.Id, cancellationToken);
+            return ToFeedbackDto(saved);
+        }
+
+        public async Task<IReadOnlyList<DemoFeedbackDto>> ListFeedbackAsync(CancellationToken cancellationToken = default)
+        {
+            var feedbacks = await FeedbackQuery()
+                .OrderByDescending(f => f.SubmittedAtUtc)
+                .ToListAsync(cancellationToken);
+            return feedbacks.Select(ToFeedbackDto).ToList();
+        }
+
+        public async Task<IReadOnlyList<DemoBookingDto>> ListForTeacherUserAsync(
+            Guid userId,
+            CancellationToken cancellationToken = default)
+        {
+            var teacher = await GetTeacherAsync(userId, cancellationToken);
+            var bookings = await BaseQuery()
+                .Where(b => b.ClassSession != null && b.ClassSession.TeacherProfileId == teacher.Id)
+                .OrderByDescending(b => b.CreatedAtUtc)
+                .ToListAsync(cancellationToken);
+            return bookings.Select(b => b.ToDto()).ToList();
+        }
+
+        public async Task<IReadOnlyList<DemoFeedbackDto>> ListFeedbackForTeacherUserAsync(
+            Guid userId,
+            CancellationToken cancellationToken = default)
+        {
+            var teacher = await GetTeacherAsync(userId, cancellationToken);
+            var feedbacks = await FeedbackQuery()
+                .Where(f => f.TeacherProfileId == teacher.Id)
+                .OrderByDescending(f => f.SubmittedAtUtc)
+                .ToListAsync(cancellationToken);
+            return feedbacks.Select(ToFeedbackDto).ToList();
+        }
+
+        private async Task<TeacherProfile> GetTeacherAsync(Guid userId, CancellationToken cancellationToken)
+        {
+            return await _unitOfWork.Repository<TeacherProfile>()
+                .FirstOrDefaultAsync(t => t.UserId == userId, cancellationToken)
+                ?? throw new NotFoundException("No teacher profile is linked to the current account.");
+        }
+
+        private IQueryable<DemoFeedback> FeedbackQuery()
+        {
+            return _unitOfWork.Repository<DemoFeedback>().Query()
+                .Include(f => f.DemoBooking)
+                .Include(f => f.RecommendedCourse)
+                .Include(f => f.TeacherProfile).ThenInclude(t => t.User);
+        }
+
+        private static DemoFeedbackDto ToFeedbackDto(DemoFeedback feedback)
+        {
+            return new DemoFeedbackDto
+            {
+                Id = feedback.Id,
+                DemoBookingId = feedback.DemoBookingId,
+                ChildName = feedback.DemoBooking.ChildName,
+                ParentName = feedback.DemoBooking.ParentName,
+                TeacherProfileId = feedback.TeacherProfileId,
+                TeacherName = $"{feedback.TeacherProfile.User.FirstName} {feedback.TeacherProfile.User.LastName}",
+                AcademicLevel = feedback.AcademicLevel,
+                Strengths = feedback.Strengths,
+                ImprovementAreas = feedback.ImprovementAreas,
+                RecommendedCourseId = feedback.RecommendedCourseId,
+                RecommendedCourseName = feedback.RecommendedCourse?.Name,
+                SuggestedBatchType = feedback.SuggestedBatchType,
+                Remarks = feedback.Remarks,
+                SubmittedAtUtc = feedback.SubmittedAtUtc,
+            };
+        }
+
         private IQueryable<DemoBooking> BaseQuery()
         {
             return _unitOfWork.Repository<DemoBooking>().Query()

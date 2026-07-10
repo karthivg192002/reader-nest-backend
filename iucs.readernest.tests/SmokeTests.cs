@@ -3,6 +3,7 @@ using iucs.readernest.application.Dto.Auth;
 using iucs.readernest.application.Dto.Batches;
 using iucs.readernest.application.Dto.Billing;
 using iucs.readernest.application.Dto.Courses;
+using iucs.readernest.application.Dto.Payouts;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Dto.Users;
 using iucs.readernest.application.Helper;
@@ -39,7 +40,9 @@ namespace iucs.readernest.tests
 
         private BatchService CreateBatchService() => new(_db.UnitOfWork, _auditLog);
 
-        private SessionService CreateSessionService() => new(_db.UnitOfWork, _auditLog);
+        private PayoutService CreatePayoutService() => new(_db.UnitOfWork, _auditLog, _notifications);
+
+        private SessionService CreateSessionService() => new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications);
 
         private BillingService CreateBillingService() => new(_db.UnitOfWork, _auditLog);
 
@@ -201,6 +204,51 @@ namespace iucs.readernest.tests
 
             Assert.Equal(4, sessions.Count);
             Assert.DoesNotContain(sessions, s => DateOnly.FromDateTime(s.ScheduledStartAtUtc) == new DateOnly(2026, 8, 3));
+        }
+
+        [Fact]
+        public async Task CompleteSession_AccruesPayoutEarning_AtConfiguredRate()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            await CreatePayoutService().SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = session.TeacherProfileId,
+                DurationMinutes = 45,
+                RatePerSession = 1100,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
+            });
+
+            await CreateSessionService().CompleteAsync(session.Id);
+
+            var payout = Assert.Single(_db.Context.Payouts.ToList());
+            var item = Assert.Single(_db.Context.PayoutItems.ToList());
+            Assert.Equal(PayoutItemType.SessionEarning, item.Type);
+            Assert.Equal(1100, item.Amount);
+            Assert.Equal(1100, payout.TotalAmount);
+            Assert.Equal(PayoutStatus.Pending, payout.Status);
+        }
+
+        [Fact]
+        public async Task StudentNoShow_AddsWaitingAmount_AndCarriesSessionForward()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            await CreatePayoutService().SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = session.TeacherProfileId,
+                DurationMinutes = 45,
+                RatePerSession = 1100,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
+            });
+
+            var carried = await CreateSessionService().MarkNoShowAsync(
+                session.Id, new MarkNoShowRequest { Party = NoShowParty.Student });
+
+            var original = await _db.Context.ClassSessions.FindAsync(session.Id);
+            Assert.Equal(SessionStatus.StudentNoShow, original!.Status);
+            Assert.Equal(session.ScheduledStartAtUtc.AddDays(7), carried.ScheduledStartAtUtc);
+            var item = Assert.Single(_db.Context.PayoutItems.ToList());
+            Assert.Equal(PayoutItemType.StudentNoShowWaiting, item.Type);
+            Assert.Equal(1100, item.Amount);
         }
 
         private async Task<(Batch Batch, Course Course, ClassSession Session)> SeedBatchWithSessionAsync(

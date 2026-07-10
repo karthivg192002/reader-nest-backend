@@ -71,6 +71,7 @@ namespace iucs.readernest.application.Mappings
                 MeetingRoomId = session.MeetingRoomId,
                 RescheduledFromSessionId = session.RescheduledFromSessionId,
                 CancellationReason = session.CancellationReason,
+                Summary = session.Summary,
             };
         }
     }

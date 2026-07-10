@@ -11,6 +11,7 @@ using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using Npgsql.NameTranslation;
 
 namespace iucs.readernest.domain.Data
 {
@@ -112,11 +113,46 @@ namespace iucs.readernest.domain.Data
                     {
                         if (index.IsUnique && index.GetFilter() is null)
                         {
-                            index.SetFilter("\"IsDeleted\" = FALSE");
+                            // Raw SQL: must use the final snake_case column name,
+                            // SnakeCaseDatabase cannot rewrite filter strings
+                            index.SetFilter("\"is_deleted\" = FALSE");
                         }
                     }
                 }
             }
+
+            SnakeCaseDatabase(modelBuilder);
         }
+
+        #region Private Method
+        private void SnakeCaseDatabase(ModelBuilder modelBuilder)
+        {
+            var mapper = new NpgsqlSnakeCaseNameTranslator();
+            foreach (var entity in modelBuilder.Model.GetEntityTypes())
+            {
+                entity.SetTableName(mapper.TranslateMemberName(entity.GetTableName()));
+
+                foreach (var property in entity.GetProperties())
+                {
+                    property.SetColumnName(mapper.TranslateMemberName(property.Name));
+                }
+
+                foreach (var key in entity.GetKeys())
+                {
+                    key.SetName(mapper.TranslateMemberName(key.GetName()));
+                }
+
+                foreach (var fk in entity.GetForeignKeys())
+                {
+                    fk.SetConstraintName(mapper.TranslateMemberName(fk.GetConstraintName()));
+                }
+
+                foreach (var index in entity.GetIndexes())
+                {
+                    index.SetDatabaseName(mapper.TranslateMemberName(index.GetDatabaseName()));
+                }
+            }
+        }
+        #endregion
     }
 }

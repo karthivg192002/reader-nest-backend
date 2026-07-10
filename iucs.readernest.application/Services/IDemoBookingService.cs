@@ -15,5 +15,23 @@ namespace iucs.readernest.application.Services
             Guid id,
             UpdateConversionStatusRequest request,
             CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Teacher submits the mandatory post-demo feedback; the booking moves to
+        /// DemoCompleted so the admission team can start follow-up.
+        /// </summary>
+        Task<DemoFeedbackDto> SubmitFeedbackAsync(
+            Guid demoBookingId,
+            Guid teacherUserId,
+            SubmitDemoFeedbackRequest request,
+            CancellationToken cancellationToken = default);
+
+        Task<IReadOnlyList<DemoFeedbackDto>> ListFeedbackAsync(CancellationToken cancellationToken = default);
+
+        /// <summary>Demo bookings assigned to the signed-in teacher's sessions.</summary>
+        Task<IReadOnlyList<DemoBookingDto>> ListForTeacherUserAsync(Guid userId, CancellationToken cancellationToken = default);
+
+        /// <summary>The signed-in teacher's own submitted feedback.</summary>
+        Task<IReadOnlyList<DemoFeedbackDto>> ListFeedbackForTeacherUserAsync(Guid userId, CancellationToken cancellationToken = default);
     }
 }

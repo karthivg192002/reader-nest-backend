@@ -1,7 +1,9 @@
+using System.Security.Claims;
 using iucs.readernest.api.Auth;
 using iucs.readernest.application.Dto.Admission;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace iucs.readernest.api.Controllers
@@ -51,6 +53,44 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             return Ok(await _demoBookingService.UpdateConversionStatusAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>Mandatory post-demo feedback, submitted by the teacher who ran the demo.</summary>
+        [HttpPost("{id:guid}/feedback")]
+        [Authorize(Roles = nameof(UserRole.Teacher))]
+        public async Task<ActionResult<DemoFeedbackDto>> SubmitFeedback(
+            Guid id,
+            SubmitDemoFeedbackRequest request,
+            CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _demoBookingService.SubmitFeedbackAsync(id, userId, request, cancellationToken));
+        }
+
+        /// <summary>Demo bookings assigned to the signed-in teacher.</summary>
+        [HttpGet("mine")]
+        [Authorize(Roles = nameof(UserRole.Teacher))]
+        public async Task<ActionResult<IReadOnlyList<DemoBookingDto>>> Mine(CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _demoBookingService.ListForTeacherUserAsync(userId, cancellationToken));
+        }
+
+        /// <summary>The signed-in teacher's own submitted feedback.</summary>
+        [HttpGet("feedback/mine")]
+        [Authorize(Roles = nameof(UserRole.Teacher))]
+        public async Task<ActionResult<IReadOnlyList<DemoFeedbackDto>>> MyFeedback(CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _demoBookingService.ListFeedbackForTeacherUserAsync(userId, cancellationToken));
+        }
+
+        /// <summary>Admission team review of all submitted demo feedback.</summary>
+        [HttpGet("feedback")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<DemoFeedbackDto>>> ListFeedback(CancellationToken cancellationToken)
+        {
+            return Ok(await _demoBookingService.ListFeedbackAsync(cancellationToken));
         }
     }
 }

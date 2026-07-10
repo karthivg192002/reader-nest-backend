@@ -12,11 +12,11 @@ namespace iucs.readernest.domain.Data.Configurations
             // network drop must update the existing row, not insert a duplicate.
             builder.HasIndex(a => new { a.ClassSessionId, a.ChildId })
                 .IsUnique()
-                .HasFilter("\"ChildId\" IS NOT NULL AND \"IsDeleted\" = FALSE");
+                .HasFilter("\"child_id\" IS NOT NULL AND \"is_deleted\" = FALSE");
 
             builder.HasIndex(a => new { a.ClassSessionId, a.TeacherProfileId })
                 .IsUnique()
-                .HasFilter("\"TeacherProfileId\" IS NOT NULL AND \"IsDeleted\" = FALSE");
+                .HasFilter("\"teacher_profile_id\" IS NOT NULL AND \"is_deleted\" = FALSE");
         }
     }
 }

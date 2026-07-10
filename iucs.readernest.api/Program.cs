@@ -14,6 +14,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -39,6 +40,8 @@ builder.Services.AddApplication();
 builder.Services.AddScoped<ITokenService, JwtTokenService>();
 builder.Services.AddScoped<IEmailSender, LoggingEmailSender>();
 builder.Services.AddSingleton<IFileStorage, LocalFileStorage>();
+// Auto billing: recurring invoice generation + overdue flagging
+builder.Services.AddHostedService<BillingBackgroundService>();
 
 // Authentication: JWT bearer
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
@@ -79,9 +82,14 @@ app.UseMiddleware<ExceptionHandlingMiddleware>();
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+    app.MapScalarApiReference();
 }
-
-app.UseHttpsRedirection();
+else
+{
+    // In development the SPA calls the plain-HTTP port; redirecting to HTTPS
+    // breaks CORS preflight requests, so only redirect outside development.
+    app.UseHttpsRedirection();
+}
 
 app.UseCors();
 

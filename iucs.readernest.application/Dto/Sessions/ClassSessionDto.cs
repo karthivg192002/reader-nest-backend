@@ -27,5 +27,8 @@ namespace iucs.readernest.application.Dto.Sessions
         public Guid? RescheduledFromSessionId { get; set; }
 
         public string? CancellationReason { get; set; }
+
+        /// <summary>Teacher's class summary, captured on completion for session history.</summary>
+        public string? Summary { get; set; }
     }
 }
