@@ -150,6 +150,33 @@ namespace iucs.readernest.application.Services
             return invoices.Select(i => i.ToDto()).ToList();
         }
 
+        public async Task<ResourceDto> GetResourceForDownloadAsync(
+            Guid parentUserId,
+            Guid resourceId,
+            CancellationToken cancellationToken = default)
+        {
+            var parent = await GetParentAsync(parentUserId, cancellationToken);
+
+            var suspended = await _unitOfWork.Repository<FeeSuspension>().ExistsAsync(
+                s => s.ParentProfileId == parent.Id && s.Status == SuspensionStatus.Active, cancellationToken);
+            if (suspended)
+            {
+                throw new DomainValidationException("Content access is suspended until the pending fee is settled.");
+            }
+
+            var access = await _unitOfWork.Repository<ResourceAccess>().Query()
+                .Include(a => a.Resource)
+                .FirstOrDefaultAsync(a => a.ParentProfileId == parent.Id && a.ResourceId == resourceId, cancellationToken)
+                ?? throw new NotFoundException("This resource has not been shared with your account.");
+
+            if (!access.Resource.IsDownloadable)
+            {
+                throw new DomainValidationException("This resource is view-only and cannot be downloaded.");
+            }
+
+            return access.Resource.ToDto();
+        }
+
         private async Task<ParentProfile> GetParentAsync(Guid parentUserId, CancellationToken cancellationToken)
         {
             return await _unitOfWork.Repository<ParentProfile>()

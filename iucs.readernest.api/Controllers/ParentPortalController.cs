@@ -60,6 +60,27 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _parentPortal.GetInvoicesAsync(UserId(), cancellationToken));
         }
 
+        /// <summary>Grant-checked worksheet download (books stay view-only).</summary>
+        [HttpGet("resources/{id:guid}/download")]
+        public async Task<IActionResult> DownloadResource(
+            Guid id,
+            [FromServices] IResourceService resourceService,
+            [FromServices] application.Common.Interfaces.IFileStorage fileStorage,
+            CancellationToken cancellationToken)
+        {
+            await _parentPortal.GetResourceForDownloadAsync(UserId(), id, cancellationToken);
+
+            var resource = await resourceService.GetForDownloadAsync(id, cancellationToken);
+            var absolutePath = fileStorage.GetAbsolutePath(resource.FileUrl);
+            if (!System.IO.File.Exists(absolutePath))
+            {
+                return NotFound();
+            }
+
+            var mimeType = string.IsNullOrWhiteSpace(resource.MimeType) ? "application/octet-stream" : resource.MimeType;
+            return PhysicalFile(absolutePath, mimeType, $"{resource.Title}{Path.GetExtension(resource.FileUrl)}");
+        }
+
         private Guid UserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
     }
 }

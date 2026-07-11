@@ -21,5 +21,11 @@ namespace iucs.readernest.application.Services
         Task<IReadOnlyList<ResourceDto>> GetResourcesAsync(Guid parentUserId, CancellationToken cancellationToken = default);
 
         Task<IReadOnlyList<InvoiceDto>> GetInvoicesAsync(Guid parentUserId, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Validates the grant, downloadability flag and suspension state before
+        /// handing back the resource for a parent download.
+        /// </summary>
+        Task<ResourceDto> GetResourceForDownloadAsync(Guid parentUserId, Guid resourceId, CancellationToken cancellationToken = default);
     }
 }
