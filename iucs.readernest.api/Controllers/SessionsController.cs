@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using iucs.readernest.api.Auth;
+using iucs.readernest.application.Dto.Academics;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
@@ -124,6 +125,59 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             return Ok(await _sessionService.ListRecordingsAsync(id, cancellationToken));
+        }
+
+        /// <summary>Student/teacher attendance capture (join-based; rejoin updates, never duplicates).</summary>
+        [HttpPost("{id:guid}/attendance")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<ActionResult<IReadOnlyList<SessionAttendanceDto>>> CaptureAttendance(
+            Guid id,
+            CaptureAttendanceRequest request,
+            [FromServices] IAcademicOpsService academicOps,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await academicOps.CaptureAttendanceAsync(id, request, cancellationToken));
+        }
+
+        [HttpGet("{id:guid}/attendance")]
+        [Authorize]
+        public async Task<ActionResult<IReadOnlyList<SessionAttendanceDto>>> ListAttendance(
+            Guid id,
+            [FromServices] IAcademicOpsService academicOps,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await academicOps.ListAttendanceAsync(id, cancellationToken));
+        }
+
+        /// <summary>Calendar sync: iCalendar feed of scheduled sessions for external calendars.</summary>
+        [HttpGet("calendar.ics")]
+        [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.View)]
+        public async Task<IActionResult> CalendarFeed(
+            [FromQuery] Guid? teacherProfileId,
+            [FromQuery] Guid? batchId,
+            CancellationToken cancellationToken)
+        {
+            var from = DateTime.UtcNow.AddDays(-30);
+            var to = DateTime.UtcNow.AddDays(120);
+            var sessions = await _sessionService.ListAsync(from, to, teacherProfileId, batchId, cancellationToken);
+
+            var builder = new System.Text.StringBuilder();
+            builder.AppendLine("BEGIN:VCALENDAR");
+            builder.AppendLine("VERSION:2.0");
+            builder.AppendLine("PRODID:-//Reader Nest//Sessions//EN");
+            foreach (var session in sessions)
+            {
+                builder.AppendLine("BEGIN:VEVENT");
+                builder.AppendLine($"UID:{session.Id}@reader-nest");
+                builder.AppendLine($"DTSTART:{session.ScheduledStartAtUtc:yyyyMMdd'T'HHmmss'Z'}");
+                builder.AppendLine($"DTEND:{session.ScheduledEndAtUtc:yyyyMMdd'T'HHmmss'Z'}");
+                builder.AppendLine($"SUMMARY:{session.BatchName ?? session.Type.ToString()} — {session.TeacherName}");
+                builder.AppendLine($"STATUS:{(session.Status == SessionStatus.Cancelled ? "CANCELLED" : "CONFIRMED")}");
+                builder.AppendLine("END:VEVENT");
+            }
+
+            builder.AppendLine("END:VCALENDAR");
+            return File(System.Text.Encoding.UTF8.GetBytes(builder.ToString()), "text/calendar", "reader-nest-sessions.ics");
         }
     }
 }

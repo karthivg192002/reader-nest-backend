@@ -94,6 +94,66 @@ namespace iucs.readernest.application.Dto.Billing
         public DateOnly DueDate { get; set; }
     }
 
+    public class FeeSuspensionDto
+    {
+        public Guid Id { get; set; }
+
+        public Guid ParentProfileId { get; set; }
+
+        public string ParentName { get; set; } = null!;
+
+        public Guid? InvoiceId { get; set; }
+
+        public string? InvoiceNumber { get; set; }
+
+        public string? Reason { get; set; }
+
+        public SuspensionStatus Status { get; set; }
+
+        public DateTime SuspendedAtUtc { get; set; }
+
+        public DateTime? LiftedAtUtc { get; set; }
+
+        public bool AutoRestored { get; set; }
+    }
+
+    public class RefundDto
+    {
+        public Guid Id { get; set; }
+
+        public Guid PaymentTransactionId { get; set; }
+
+        public string? InvoiceNumber { get; set; }
+
+        public decimal Amount { get; set; }
+
+        public string Reason { get; set; } = null!;
+
+        public RefundStatus Status { get; set; }
+
+        public DateTime? ProcessedAtUtc { get; set; }
+    }
+
+    public class RequestRefundRequest
+    {
+        [Required]
+        public Guid PaymentTransactionId { get; set; }
+
+        [Required]
+        [Range(0.01, 9_999_999)]
+        public decimal Amount { get; set; }
+
+        [Required]
+        [MaxLength(500)]
+        public string Reason { get; set; } = null!;
+    }
+
+    public class ReviewRefundRequest
+    {
+        [Required]
+        public bool Approve { get; set; }
+    }
+
     /// <summary>Shareable Pay Now link routed through the invoice's department account.</summary>
     public class PaymentLinkDto
     {

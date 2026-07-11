@@ -30,5 +30,18 @@ namespace iucs.readernest.application.Services
         /// routed through the invoice's department payment account.
         /// </summary>
         Task<PaymentLinkDto> CreatePaymentLinkAsync(Guid invoiceId, CancellationToken cancellationToken = default);
+
+        // Fee suspension workflow
+        Task<IReadOnlyList<FeeSuspensionDto>> ListSuspensionsAsync(SuspensionStatus? status, CancellationToken cancellationToken = default);
+
+        /// <summary>Manual admin restoration; automatic restoration happens on full payment.</summary>
+        Task<FeeSuspensionDto> LiftSuspensionAsync(Guid id, CancellationToken cancellationToken = default);
+
+        // Refund request & tracking workflow
+        Task<IReadOnlyList<RefundDto>> ListRefundsAsync(CancellationToken cancellationToken = default);
+
+        Task<RefundDto> RequestRefundAsync(RequestRefundRequest request, CancellationToken cancellationToken = default);
+
+        Task<RefundDto> ReviewRefundAsync(Guid id, ReviewRefundRequest request, CancellationToken cancellationToken = default);
     }
 }

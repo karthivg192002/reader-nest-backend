@@ -42,8 +42,10 @@ builder.Services.AddScoped<IEmailSender, LoggingEmailSender>();
 builder.Services.AddSingleton<IFileStorage, LocalFileStorage>();
 // Dual-gateway abstraction: swap for the client's provider at deployment
 builder.Services.AddSingleton<IPaymentGateway, SimulatedPaymentGateway>();
-// Auto billing: recurring invoice generation + overdue flagging
+// Auto billing: recurring invoice generation + overdue flagging + fee suspension
 builder.Services.AddHostedService<BillingBackgroundService>();
+// Session reminders, delayed-session alerts
+builder.Services.AddHostedService<SessionReminderBackgroundService>();
 
 // Authentication: JWT bearer
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));

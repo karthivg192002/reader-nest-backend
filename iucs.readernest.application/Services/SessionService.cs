@@ -109,6 +109,9 @@ namespace iucs.readernest.application.Services
                 throw new NotFoundException(nameof(TeacherProfile), request.TeacherProfileId);
             }
 
+            await EnsureTeacherIsFreeAsync(
+                request.TeacherProfileId, request.ScheduledStartAtUtc, request.ScheduledEndAtUtc, cancellationToken);
+
             var session = new ClassSession
             {
                 BatchId = request.BatchId,
@@ -122,6 +125,8 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.Repository<ClassSession>().AddAsync(session, cancellationToken);
             await _auditLog.StageAsync(AuditAction.Create, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            await SendBookingConfirmationAsync(session, cancellationToken);
 
             return await GetAsync(session.Id, cancellationToken);
         }
@@ -140,6 +145,10 @@ namespace iucs.readernest.application.Services
             {
                 throw new DomainValidationException($"A session in status '{original.Status}' cannot be rescheduled.");
             }
+
+            await EnsureTeacherIsFreeAsync(
+                original.TeacherProfileId, request.ScheduledStartAtUtc, request.ScheduledEndAtUtc,
+                cancellationToken, excludeSessionId: original.Id);
 
             original.Status = SessionStatus.Rescheduled;
 
@@ -410,6 +419,65 @@ namespace iucs.readernest.application.Services
                 batch.Status = BatchStatus.Dormant;
                 batch.CompletedAtUtc = DateTime.UtcNow;
             }
+        }
+
+        /// <summary>
+        /// Scheduling conflict / availability check: blocks double-booking a teacher across
+        /// batches, and blocks slots inside an approved leave window.
+        /// </summary>
+        private async Task EnsureTeacherIsFreeAsync(
+            Guid teacherProfileId,
+            DateTime startUtc,
+            DateTime endUtc,
+            CancellationToken cancellationToken,
+            Guid? excludeSessionId = null)
+        {
+            var conflict = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.TeacherProfileId == teacherProfileId
+                            && s.Id != excludeSessionId
+                            && (s.Status == SessionStatus.Scheduled
+                                || s.Status == SessionStatus.InProgress
+                                || s.Status == SessionStatus.CarriedForward)
+                            && s.ScheduledStartAtUtc < endUtc
+                            && s.ScheduledEndAtUtc > startUtc)
+                .OrderBy(s => s.ScheduledStartAtUtc)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (conflict is not null)
+            {
+                throw new DomainValidationException(
+                    $"The teacher already has a session from {conflict.ScheduledStartAtUtc:u} to {conflict.ScheduledEndAtUtc:u}.");
+            }
+
+            var onLeave = await _unitOfWork.Repository<LeaveRequest>().ExistsAsync(
+                l => l.TeacherProfileId == teacherProfileId
+                     && l.Status == LeaveStatus.Approved
+                     && l.StartAtUtc < endUtc
+                     && l.EndAtUtc > startUtc,
+                cancellationToken);
+            if (onLeave)
+            {
+                throw new DomainValidationException("The teacher is on approved leave during this slot.");
+            }
+        }
+
+        /// <summary>Booking confirmation email to the teacher (and demo parents get theirs via DemoBookingService).</summary>
+        private async Task SendBookingConfirmationAsync(ClassSession session, CancellationToken cancellationToken)
+        {
+            var teacher = await _unitOfWork.Repository<TeacherProfile>().Query()
+                .Include(t => t.User)
+                .FirstOrDefaultAsync(t => t.Id == session.TeacherProfileId, cancellationToken);
+            if (teacher is null)
+            {
+                return;
+            }
+
+            await _notificationService.SendEmailAsync(
+                teacher.User.Id,
+                teacher.User.Email,
+                NotificationType.BookingConfirmation,
+                "Class scheduled",
+                $"A {session.Type} session was scheduled for you: {session.ScheduledStartAtUtc:u} – {session.ScheduledEndAtUtc:u}.",
+                cancellationToken);
         }
 
         private async Task NotifyAdminsOfTeacherNoShowAsync(ClassSession session, CancellationToken cancellationToken)

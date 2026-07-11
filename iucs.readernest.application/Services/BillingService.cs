@@ -16,12 +16,18 @@ namespace iucs.readernest.application.Services
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
         private readonly IPaymentGateway _paymentGateway;
+        private readonly INotificationService _notificationService;
 
-        public BillingService(IUnitOfWork unitOfWork, IAuditLogService auditLog, IPaymentGateway paymentGateway)
+        public BillingService(
+            IUnitOfWork unitOfWork,
+            IAuditLogService auditLog,
+            IPaymentGateway paymentGateway,
+            INotificationService notificationService)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
             _paymentGateway = paymentGateway;
+            _notificationService = notificationService;
         }
 
         public async Task<IReadOnlyList<PackagePlanDto>> ListPlansAsync(CancellationToken cancellationToken = default)
@@ -170,6 +176,17 @@ namespace iucs.readernest.application.Services
             {
                 invoice.Status = InvoiceStatus.Paid;
                 invoice.PaidAtUtc = DateTime.UtcNow;
+
+                // Access restoration: full payment auto-lifts any active fee suspension
+                var suspensions = await _unitOfWork.Repository<FeeSuspension>().Query()
+                    .Where(s => s.ParentProfileId == invoice.ParentProfileId && s.Status == SuspensionStatus.Active)
+                    .ToListAsync(cancellationToken);
+                foreach (var suspension in suspensions)
+                {
+                    suspension.Status = SuspensionStatus.Lifted;
+                    suspension.LiftedAtUtc = DateTime.UtcNow;
+                    suspension.AutoRestored = true;
+                }
             }
             else
             {
@@ -180,7 +197,162 @@ namespace iucs.readernest.application.Services
                 changesJson: $"{{\"amount\":{request.Amount}}}", cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
+            await NotifyAdminsAsync(
+                NotificationType.PaymentReceived,
+                "Payment received",
+                $"Payment of {request.Amount:0.00} {invoice.Currency} recorded against invoice {invoice.InvoiceNumber} ({invoice.Status}).",
+                cancellationToken);
+
             return invoice.ToDto();
+        }
+
+        public async Task<IReadOnlyList<FeeSuspensionDto>> ListSuspensionsAsync(
+            SuspensionStatus? status,
+            CancellationToken cancellationToken = default)
+        {
+            IQueryable<FeeSuspension> query = _unitOfWork.Repository<FeeSuspension>().Query()
+                .Include(s => s.ParentProfile).ThenInclude(p => p.User)
+                .Include(s => s.Invoice);
+            if (status.HasValue)
+            {
+                query = query.Where(s => s.Status == status.Value);
+            }
+
+            var suspensions = await query.OrderByDescending(s => s.SuspendedAtUtc).ToListAsync(cancellationToken);
+            return suspensions.Select(ToDto).ToList();
+        }
+
+        public async Task<FeeSuspensionDto> LiftSuspensionAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            var suspension = await _unitOfWork.Repository<FeeSuspension>().Query()
+                .Include(s => s.ParentProfile).ThenInclude(p => p.User)
+                .Include(s => s.Invoice)
+                .FirstOrDefaultAsync(s => s.Id == id, cancellationToken)
+                ?? throw new NotFoundException(nameof(FeeSuspension), id);
+
+            if (suspension.Status != SuspensionStatus.Active)
+            {
+                throw new DomainValidationException("This suspension has already been lifted.");
+            }
+
+            suspension.Status = SuspensionStatus.Lifted;
+            suspension.LiftedAtUtc = DateTime.UtcNow;
+            suspension.AutoRestored = false;
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(FeeSuspension), suspension.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return ToDto(suspension);
+        }
+
+        public async Task<IReadOnlyList<RefundDto>> ListRefundsAsync(CancellationToken cancellationToken = default)
+        {
+            var refunds = await _unitOfWork.Repository<Refund>().Query()
+                .Include(r => r.PaymentTransaction).ThenInclude(t => t.Invoice)
+                .OrderByDescending(r => r.CreatedAtUtc)
+                .ToListAsync(cancellationToken);
+            return refunds.Select(ToDto).ToList();
+        }
+
+        public async Task<RefundDto> RequestRefundAsync(RequestRefundRequest request, CancellationToken cancellationToken = default)
+        {
+            var transaction = await _unitOfWork.Repository<PaymentTransaction>().GetByIdAsync(request.PaymentTransactionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(PaymentTransaction), request.PaymentTransactionId);
+
+            if (request.Amount > transaction.Amount)
+            {
+                throw new DomainValidationException($"Refund of {request.Amount} exceeds the transaction amount of {transaction.Amount}.");
+            }
+
+            var refund = new Refund
+            {
+                PaymentTransactionId = transaction.Id,
+                Amount = request.Amount,
+                Reason = request.Reason.Trim(),
+            };
+            await _unitOfWork.Repository<Refund>().AddAsync(refund, cancellationToken);
+            await _auditLog.StageAsync(AuditAction.Create, nameof(Refund), refund.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            var saved = await _unitOfWork.Repository<Refund>().Query()
+                .Include(r => r.PaymentTransaction).ThenInclude(t => t.Invoice)
+                .FirstAsync(r => r.Id == refund.Id, cancellationToken);
+            return ToDto(saved);
+        }
+
+        public async Task<RefundDto> ReviewRefundAsync(Guid id, ReviewRefundRequest request, CancellationToken cancellationToken = default)
+        {
+            var refund = await _unitOfWork.Repository<Refund>().Query()
+                .Include(r => r.PaymentTransaction).ThenInclude(t => t.Invoice)
+                .FirstOrDefaultAsync(r => r.Id == id, cancellationToken)
+                ?? throw new NotFoundException(nameof(Refund), id);
+
+            if (refund.Status != RefundStatus.Requested)
+            {
+                throw new DomainValidationException($"This refund is already {refund.Status}.");
+            }
+
+            if (request.Approve)
+            {
+                // Gateway disbursement follows once real accounts exist; recorded as processed here
+                refund.Status = RefundStatus.Processed;
+                refund.ProcessedAtUtc = DateTime.UtcNow;
+            }
+            else
+            {
+                refund.Status = RefundStatus.Rejected;
+            }
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(Refund), refund.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return ToDto(refund);
+        }
+
+        private async Task NotifyAdminsAsync(
+            NotificationType type,
+            string subject,
+            string body,
+            CancellationToken cancellationToken)
+        {
+            var admins = await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.Role == UserRole.Admin && u.Status == UserStatus.Active)
+                .ToListAsync(cancellationToken);
+            foreach (var admin in admins)
+            {
+                await _notificationService.SendEmailAsync(admin.Id, admin.Email, type, subject, body, cancellationToken);
+            }
+        }
+
+        private static FeeSuspensionDto ToDto(FeeSuspension suspension)
+        {
+            return new FeeSuspensionDto
+            {
+                Id = suspension.Id,
+                ParentProfileId = suspension.ParentProfileId,
+                ParentName = $"{suspension.ParentProfile.User.FirstName} {suspension.ParentProfile.User.LastName}",
+                InvoiceId = suspension.InvoiceId,
+                InvoiceNumber = suspension.Invoice?.InvoiceNumber,
+                Reason = suspension.Reason,
+                Status = suspension.Status,
+                SuspendedAtUtc = suspension.SuspendedAtUtc,
+                LiftedAtUtc = suspension.LiftedAtUtc,
+                AutoRestored = suspension.AutoRestored,
+            };
+        }
+
+        private static RefundDto ToDto(Refund refund)
+        {
+            return new RefundDto
+            {
+                Id = refund.Id,
+                PaymentTransactionId = refund.PaymentTransactionId,
+                InvoiceNumber = refund.PaymentTransaction?.Invoice?.InvoiceNumber,
+                Amount = refund.Amount,
+                Reason = refund.Reason,
+                Status = refund.Status,
+                ProcessedAtUtc = refund.ProcessedAtUtc,
+            };
         }
 
         public async Task<PaymentLinkDto> CreatePaymentLinkAsync(Guid invoiceId, CancellationToken cancellationToken = default)

@@ -1,4 +1,5 @@
 using iucs.readernest.application.Common.Exceptions;
+using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Admission;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Entities.Admission;
@@ -14,11 +15,13 @@ namespace iucs.readernest.application.Services
     {
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
+        private readonly IEmailSender _emailSender;
 
-        public DemoBookingService(IUnitOfWork unitOfWork, IAuditLogService auditLog)
+        public DemoBookingService(IUnitOfWork unitOfWork, IAuditLogService auditLog, IEmailSender emailSender)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
+            _emailSender = emailSender;
         }
 
         public async Task<IReadOnlyList<DemoBookingDto>> ListAsync(
@@ -52,17 +55,27 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("Demo end time must be after the start time.");
             }
 
-            var teacherExists = await _unitOfWork.Repository<TeacherProfile>()
-                .ExistsAsync(t => t.Id == request.TeacherProfileId, cancellationToken);
-            if (!teacherExists)
+            Guid teacherProfileId;
+            if (request.TeacherProfileId.HasValue)
             {
-                throw new NotFoundException(nameof(TeacherProfile), request.TeacherProfileId);
+                var teacherExists = await _unitOfWork.Repository<TeacherProfile>()
+                    .ExistsAsync(t => t.Id == request.TeacherProfileId.Value, cancellationToken);
+                if (!teacherExists)
+                {
+                    throw new NotFoundException(nameof(TeacherProfile), request.TeacherProfileId.Value);
+                }
+
+                teacherProfileId = request.TeacherProfileId.Value;
+            }
+            else
+            {
+                teacherProfileId = await AutoAssignTeacherAsync(request, cancellationToken);
             }
 
             // Demos are always one-time sessions, never recurring, and have no batch
             var session = new ClassSession
             {
-                TeacherProfileId = request.TeacherProfileId,
+                TeacherProfileId = teacherProfileId,
                 Type = SessionType.Demo,
                 ScheduledStartAtUtc = request.ScheduledStartAtUtc,
                 ScheduledEndAtUtc = request.ScheduledEndAtUtc,
@@ -88,7 +101,55 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Create, nameof(DemoBooking), booking.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
+            // Booking confirmation to the parent and every extra invitee (they may not
+            // have accounts yet, so this bypasses the user-bound notification log)
+            var when = $"{request.ScheduledStartAtUtc:u}";
+            var confirmation = $"Your demo class for {booking.ChildName} is confirmed for {when}. A join link follows before the session.";
+            await _emailSender.SendAsync(booking.ParentEmail, "Demo class confirmed", confirmation, cancellationToken);
+            foreach (var participant in booking.Participants)
+            {
+                await _emailSender.SendAsync(participant.Email, "Demo class confirmed", confirmation, cancellationToken);
+            }
+
             return await GetAsync(booking.Id, cancellationToken);
+        }
+
+        /// <summary>Auto-assign: the department-matched active teacher who is free at the slot with the lightest day.</summary>
+        private async Task<Guid> AutoAssignTeacherAsync(CreateDemoBookingRequest request, CancellationToken cancellationToken)
+        {
+            IQueryable<TeacherProfile> teachers = _unitOfWork.Repository<TeacherProfile>().Query()
+                .Where(t => t.User.Status == UserStatus.Active);
+            if (request.Department.HasValue)
+            {
+                teachers = teachers.Where(t => t.Department == request.Department.Value);
+            }
+
+            var dayStart = request.ScheduledStartAtUtc.Date;
+            var dayEnd = dayStart.AddDays(1);
+
+            var candidates = await teachers
+                .Select(t => new
+                {
+                    t.Id,
+                    Busy = _unitOfWork.Repository<ClassSession>().Query().Any(
+                        s => s.TeacherProfileId == t.Id
+                             && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                             && s.ScheduledStartAtUtc < request.ScheduledEndAtUtc
+                             && s.ScheduledEndAtUtc > request.ScheduledStartAtUtc),
+                    DayLoad = _unitOfWork.Repository<ClassSession>().Query().Count(
+                        s => s.TeacherProfileId == t.Id
+                             && s.ScheduledStartAtUtc >= dayStart
+                             && s.ScheduledStartAtUtc < dayEnd),
+                })
+                .ToListAsync(cancellationToken);
+
+            var chosen = candidates
+                .Where(c => !c.Busy)
+                .OrderBy(c => c.DayLoad)
+                .FirstOrDefault()
+                ?? throw new DomainValidationException("No teacher is available for this slot; pick a teacher or another time.");
+
+            return chosen.Id;
         }
 
         public async Task<DemoBookingDto> UpdateConversionStatusAsync(

@@ -21,6 +21,10 @@ namespace iucs.readernest.application
             services.AddScoped<IResourceService, ResourceService>();
             services.AddScoped<IBillingService, BillingService>();
             services.AddScoped<IPayoutService, PayoutService>();
+            services.AddScoped<IAcademicOpsService, AcademicOpsService>();
+            services.AddScoped<IEnrollmentService, EnrollmentService>();
+            services.AddScoped<IParentPortalService, ParentPortalService>();
+            services.AddScoped<IReportsService, ReportsService>();
             return services;
         }
     }

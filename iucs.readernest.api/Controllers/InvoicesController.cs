@@ -52,5 +52,46 @@ namespace iucs.readernest.api.Controllers
         {
             return Ok(await _billingService.CreatePaymentLinkAsync(id, cancellationToken));
         }
+
+        [HttpGet("suspensions")]
+        [HasPermission(PermissionModule.BillingFinance, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<FeeSuspensionDto>>> ListSuspensions(
+            [FromQuery] SuspensionStatus? status,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _billingService.ListSuspensionsAsync(status, cancellationToken));
+        }
+
+        /// <summary>Manual admin restoration of a fee-suspended account.</summary>
+        [HttpPost("suspensions/{id:guid}/lift")]
+        [HasPermission(PermissionModule.BillingFinance, PermissionAction.Approve)]
+        public async Task<ActionResult<FeeSuspensionDto>> LiftSuspension(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _billingService.LiftSuspensionAsync(id, cancellationToken));
+        }
+
+        [HttpGet("refunds")]
+        [HasPermission(PermissionModule.BillingFinance, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<RefundDto>>> ListRefunds(CancellationToken cancellationToken)
+        {
+            return Ok(await _billingService.ListRefundsAsync(cancellationToken));
+        }
+
+        [HttpPost("refunds")]
+        [HasPermission(PermissionModule.BillingFinance, PermissionAction.Create)]
+        public async Task<ActionResult<RefundDto>> RequestRefund(RequestRefundRequest request, CancellationToken cancellationToken)
+        {
+            return Ok(await _billingService.RequestRefundAsync(request, cancellationToken));
+        }
+
+        [HttpPost("refunds/{id:guid}/review")]
+        [HasPermission(PermissionModule.BillingFinance, PermissionAction.Approve)]
+        public async Task<ActionResult<RefundDto>> ReviewRefund(
+            Guid id,
+            ReviewRefundRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _billingService.ReviewRefundAsync(id, request, cancellationToken));
+        }
     }
 }

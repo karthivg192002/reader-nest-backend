@@ -1,0 +1,25 @@
+using iucs.readernest.application.Dto.Enrollment;
+using iucs.readernest.domain.Enums;
+
+namespace iucs.readernest.application.Services
+{
+    public interface IEnrollmentService
+    {
+        /// <summary>Parent submits (or resubmits after rejection) the mandatory first-login form.</summary>
+        Task<EnrollmentFormDto> SubmitAsync(Guid parentUserId, SubmitEnrollmentFormRequest request, CancellationToken cancellationToken = default);
+
+        Task<IReadOnlyList<EnrollmentFormDto>> ListForParentUserAsync(Guid parentUserId, CancellationToken cancellationToken = default);
+
+        Task<IReadOnlyList<EnrollmentFormDto>> ListAsync(EnrollmentFormStatus? status, CancellationToken cancellationToken = default);
+
+        Task<EnrollmentFormDto> GetAsync(Guid id, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Admin review: approval creates the Child record, links it to the form and
+        /// unlocks the parent dashboard (EnrollmentFormCompleted).
+        /// </summary>
+        Task<EnrollmentFormDto> ReviewAsync(Guid id, ReviewEnrollmentFormRequest request, CancellationToken cancellationToken = default);
+
+        Task<IReadOnlyList<ChildDto>> ListChildrenForParentUserAsync(Guid parentUserId, CancellationToken cancellationToken = default);
+    }
+}

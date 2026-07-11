@@ -41,8 +41,8 @@ namespace iucs.readernest.application.Dto.Admission
 
         public Department? Department { get; set; }
 
-        [Required]
-        public Guid TeacherProfileId { get; set; }
+        /// <summary>Omit to auto-assign the least-loaded available teacher (department-matched when set).</summary>
+        public Guid? TeacherProfileId { get; set; }
 
         [Required]
         public DateTime ScheduledStartAtUtc { get; set; }

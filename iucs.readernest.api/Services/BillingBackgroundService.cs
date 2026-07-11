@@ -94,12 +94,40 @@ namespace iucs.readernest.api.Services
                 invoice.Status = InvoiceStatus.Overdue;
             }
 
-            if (dueSubscriptions.Count > 0 || overdueInvoices.Count > 0)
+            // Account suspension: any parent left with an overdue invoice and no active
+            // suspension gets one; the parent portal blocks sessions/content while Active
+            var suspendedCount = 0;
+            var overdueParents = await unitOfWork.Repository<Invoice>().Query()
+                .Where(i => i.Status == InvoiceStatus.Overdue)
+                .Select(i => new { i.ParentProfileId, i.Id })
+                .ToListAsync(cancellationToken);
+            foreach (var group in overdueParents.GroupBy(o => o.ParentProfileId))
+            {
+                var hasActive = await unitOfWork.Repository<FeeSuspension>().ExistsAsync(
+                    s => s.ParentProfileId == group.Key && s.Status == SuspensionStatus.Active, cancellationToken);
+                if (hasActive)
+                {
+                    continue;
+                }
+
+                await unitOfWork.Repository<FeeSuspension>().AddAsync(
+                    new FeeSuspension
+                    {
+                        ParentProfileId = group.Key,
+                        InvoiceId = group.First().Id,
+                        Reason = "Automatic suspension: invoice overdue.",
+                        SuspendedAtUtc = now,
+                    },
+                    cancellationToken);
+                suspendedCount++;
+            }
+
+            if (dueSubscriptions.Count > 0 || overdueInvoices.Count > 0 || suspendedCount > 0)
             {
                 await unitOfWork.SaveChangesAsync(cancellationToken);
                 _logger.LogInformation(
-                    "Auto billing: generated {InvoiceCount} invoice(s), marked {OverdueCount} overdue.",
-                    dueSubscriptions.Count, overdueInvoices.Count);
+                    "Auto billing: generated {InvoiceCount} invoice(s), marked {OverdueCount} overdue, suspended {SuspendedCount} account(s).",
+                    dueSubscriptions.Count, overdueInvoices.Count, suspendedCount);
             }
         }
     }
