@@ -24,5 +24,11 @@ namespace iucs.readernest.application.Services
         /// and generates the receipt.
         /// </summary>
         Task<InvoiceDto> RecordPaymentAsync(Guid invoiceId, RecordPaymentRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Creates a shareable Pay Now link for an open invoice via the gateway,
+        /// routed through the invoice's department payment account.
+        /// </summary>
+        Task<PaymentLinkDto> CreatePaymentLinkAsync(Guid invoiceId, CancellationToken cancellationToken = default);
     }
 }

@@ -44,7 +44,7 @@ namespace iucs.readernest.tests
 
         private SessionService CreateSessionService() => new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications);
 
-        private BillingService CreateBillingService() => new(_db.UnitOfWork, _auditLog);
+        private BillingService CreateBillingService() => new(_db.UnitOfWork, _auditLog, new FakePaymentGateway());
 
         [Fact]
         public async Task Login_Succeeds_WithValidCredentials()
@@ -186,6 +186,37 @@ namespace iucs.readernest.tests
             Assert.Equal(InvoiceStatus.Paid, paid.Status);
             var transaction = Assert.Single(_db.Context.PaymentTransactions.ToList());
             Assert.StartsWith("RCP-", transaction.ReceiptNumber);
+        }
+
+        [Fact]
+        public async Task CreatePaymentLink_ReturnsShareableUrl_ForOpenInvoice()
+        {
+            var parentUser = await _db.SeedUserAsync("link@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            _db.Context.ParentProfiles.Add(parentProfile);
+            _db.Context.PaymentAccounts.Add(new PaymentAccount
+            {
+                Name = "Maths",
+                Department = Department.Maths,
+                GatewayProvider = "test",
+                GatewayAccountRef = "acc-2",
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var billing = CreateBillingService();
+            var invoice = await billing.CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = parentProfile.Id,
+                Department = Department.Maths,
+                Amount = 2500,
+                DueDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)),
+            });
+
+            var link = await billing.CreatePaymentLinkAsync(invoice.Id);
+
+            Assert.Contains(invoice.Id.ToString(), link.Url);
+            Assert.Equal(2500, link.AmountDue);
+            Assert.StartsWith("TEST-", link.GatewayReference);
         }
 
         [Fact]

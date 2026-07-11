@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using iucs.readernest.application.Common.Exceptions;
+using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Billing;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Entities.Billing;
@@ -14,11 +15,13 @@ namespace iucs.readernest.application.Services
     {
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
+        private readonly IPaymentGateway _paymentGateway;
 
-        public BillingService(IUnitOfWork unitOfWork, IAuditLogService auditLog)
+        public BillingService(IUnitOfWork unitOfWork, IAuditLogService auditLog, IPaymentGateway paymentGateway)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
+            _paymentGateway = paymentGateway;
         }
 
         public async Task<IReadOnlyList<PackagePlanDto>> ListPlansAsync(CancellationToken cancellationToken = default)
@@ -178,6 +181,35 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return invoice.ToDto();
+        }
+
+        public async Task<PaymentLinkDto> CreatePaymentLinkAsync(Guid invoiceId, CancellationToken cancellationToken = default)
+        {
+            var invoice = await _unitOfWork.Repository<Invoice>().GetByIdAsync(invoiceId, cancellationToken)
+                ?? throw new NotFoundException(nameof(Invoice), invoiceId);
+
+            if (invoice.Status is InvoiceStatus.Paid or InvoiceStatus.Cancelled)
+            {
+                throw new DomainValidationException($"Invoice '{invoice.InvoiceNumber}' is already {invoice.Status}; no payment link is needed.");
+            }
+
+            var account = await _unitOfWork.Repository<PaymentAccount>().GetByIdAsync(invoice.PaymentAccountId, cancellationToken)
+                ?? throw new NotFoundException(nameof(PaymentAccount), invoice.PaymentAccountId);
+
+            var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, cancellationToken);
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(Invoice), invoice.Id.ToString(),
+                changesJson: $"{{\"paymentLinkRef\":\"{link.GatewayReference}\"}}", cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return new PaymentLinkDto
+            {
+                InvoiceId = invoice.Id,
+                InvoiceNumber = invoice.InvoiceNumber,
+                Url = link.Url,
+                GatewayReference = link.GatewayReference,
+                AmountDue = invoice.Amount - invoice.AmountPaid,
+            };
         }
 
         private static string GenerateNumber(string prefix)

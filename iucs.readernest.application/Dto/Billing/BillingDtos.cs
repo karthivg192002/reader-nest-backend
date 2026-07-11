@@ -94,6 +94,20 @@ namespace iucs.readernest.application.Dto.Billing
         public DateOnly DueDate { get; set; }
     }
 
+    /// <summary>Shareable Pay Now link routed through the invoice's department account.</summary>
+    public class PaymentLinkDto
+    {
+        public Guid InvoiceId { get; set; }
+
+        public string InvoiceNumber { get; set; } = null!;
+
+        public string Url { get; set; } = null!;
+
+        public string GatewayReference { get; set; } = null!;
+
+        public decimal AmountDue { get; set; }
+    }
+
     public class RecordPaymentRequest
     {
         [Required]

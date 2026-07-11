@@ -44,5 +44,13 @@ namespace iucs.readernest.api.Controllers
         {
             return Ok(await _billingService.RecordPaymentAsync(id, request, cancellationToken));
         }
+
+        /// <summary>Shareable Pay Now link, routed through the invoice's department gateway account.</summary>
+        [HttpPost("{id:guid}/payment-link")]
+        [HasPermission(PermissionModule.BillingFinance, PermissionAction.Edit)]
+        public async Task<ActionResult<PaymentLinkDto>> CreatePaymentLink(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _billingService.CreatePaymentLinkAsync(id, cancellationToken));
+        }
     }
 }

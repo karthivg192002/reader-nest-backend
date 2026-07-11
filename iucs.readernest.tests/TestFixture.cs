@@ -2,6 +2,7 @@ using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.domain.Common;
 using iucs.readernest.domain.Data;
 using iucs.readernest.domain.Data.Interceptors;
+using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using iucs.readernest.domain.Repository;
@@ -23,6 +24,21 @@ namespace iucs.readernest.tests
         {
             Sent.Add((toEmail, subject, body));
             return Task.CompletedTask;
+        }
+    }
+
+    public class FakePaymentGateway : IPaymentGateway
+    {
+        public Task<PaymentLinkResult> CreatePaymentLinkAsync(
+            Invoice invoice,
+            PaymentAccount account,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new PaymentLinkResult
+            {
+                Url = $"https://pay.test/{invoice.Id}",
+                GatewayReference = $"TEST-{invoice.InvoiceNumber}",
+            });
         }
     }
 

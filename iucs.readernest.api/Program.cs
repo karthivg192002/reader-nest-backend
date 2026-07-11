@@ -40,6 +40,8 @@ builder.Services.AddApplication();
 builder.Services.AddScoped<ITokenService, JwtTokenService>();
 builder.Services.AddScoped<IEmailSender, LoggingEmailSender>();
 builder.Services.AddSingleton<IFileStorage, LocalFileStorage>();
+// Dual-gateway abstraction: swap for the client's provider at deployment
+builder.Services.AddSingleton<IPaymentGateway, SimulatedPaymentGateway>();
 // Auto billing: recurring invoice generation + overdue flagging
 builder.Services.AddHostedService<BillingBackgroundService>();
 
