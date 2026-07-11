@@ -1,0 +1,51 @@
+# Production stack: one command provisions the backend on any Docker host.
+#   docker compose -f docker-compose.prod.yml up -d --build
+# Secrets come from the environment / a .env file next to this compose file —
+# never committed. See docs/PROVISIONING.md for topology, sizing and DNS.
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: reader_nest
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+    volumes:
+      - reader_nest_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d reader_nest"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: iucs.readernest.api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_HTTP_PORTS: "8080"
+      ConnectionStrings__ReaderNestDb: >-
+        Host=postgres;Port=5432;Database=reader_nest;Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}
+      Database__MigrateOnStartup: "true"
+      Jwt__Issuer: reader-nest
+      Jwt__Audience: reader-nest-portals
+      Jwt__SigningKey: ${JWT_SIGNING_KEY:?set in .env}
+      Seed__AdminEmail: ${SEED_ADMIN_EMAIL:?set in .env}
+      Seed__AdminPassword: ${SEED_ADMIN_PASSWORD:?set in .env}
+      Seed__AdminFirstName: Reader Nest
+      Seed__AdminLastName: Admin
+      Cors__AllowedOrigins__0: ${PORTAL_ORIGIN:?set in .env}
+      Payments__PayNowBaseUrl: ${PORTAL_ORIGIN}
+    ports:
+      - "5288:8080"
+    volumes:
+      - reader_nest_uploads:/app/storage
+
+volumes:
+  reader_nest_pgdata:
+  reader_nest_uploads:
