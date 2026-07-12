@@ -94,6 +94,44 @@ namespace iucs.readernest.application.Dto.Billing
         public DateOnly DueDate { get; set; }
     }
 
+    public class SubscriptionDto
+    {
+        public Guid Id { get; set; }
+
+        public Guid ParentProfileId { get; set; }
+
+        public Guid ChildId { get; set; }
+
+        public string ChildName { get; set; } = null!;
+
+        public Guid PackagePlanId { get; set; }
+
+        public string PlanName { get; set; } = null!;
+
+        public SubscriptionStatus Status { get; set; }
+
+        public DateOnly StartDate { get; set; }
+
+        public DateTime? NextBillingAtUtc { get; set; }
+
+        public DateTime? CancelledAtUtc { get; set; }
+    }
+
+    public class CreateSubscriptionRequest
+    {
+        [Required]
+        public Guid ParentProfileId { get; set; }
+
+        [Required]
+        public Guid ChildId { get; set; }
+
+        [Required]
+        public Guid PackagePlanId { get; set; }
+
+        [Required]
+        public DateOnly StartDate { get; set; }
+    }
+
     public class FeeSuspensionDto
     {
         public Guid Id { get; set; }

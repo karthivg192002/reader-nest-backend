@@ -31,6 +31,18 @@ namespace iucs.readernest.application.Services
         /// </summary>
         Task<PaymentLinkDto> CreatePaymentLinkAsync(Guid invoiceId, CancellationToken cancellationToken = default);
 
+        // Renewal tracking workflow: subscriptions drive recurring billing and renew/lapse explicitly
+        Task<IReadOnlyList<SubscriptionDto>> ListSubscriptionsAsync(
+            SubscriptionStatus? status,
+            CancellationToken cancellationToken = default);
+
+        Task<SubscriptionDto> CreateSubscriptionAsync(CreateSubscriptionRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>Renewal conversion: reactivates a lapsed/cancelled subscription and restarts its billing cycle.</summary>
+        Task<SubscriptionDto> RenewSubscriptionAsync(Guid id, CancellationToken cancellationToken = default);
+
+        Task<SubscriptionDto> CancelSubscriptionAsync(Guid id, CancellationToken cancellationToken = default);
+
         // Fee suspension workflow
         Task<IReadOnlyList<FeeSuspensionDto>> ListSuspensionsAsync(SuspensionStatus? status, CancellationToken cancellationToken = default);
 

@@ -384,6 +384,133 @@ namespace iucs.readernest.application.Services
             };
         }
 
+        public async Task<IReadOnlyList<SubscriptionDto>> ListSubscriptionsAsync(
+            SubscriptionStatus? status,
+            CancellationToken cancellationToken = default)
+        {
+            IQueryable<Subscription> query = SubscriptionQuery();
+            if (status.HasValue)
+            {
+                query = query.Where(s => s.Status == status.Value);
+            }
+
+            var subscriptions = await query.OrderByDescending(s => s.CreatedAtUtc).ToListAsync(cancellationToken);
+            return subscriptions.Select(ToDto).ToList();
+        }
+
+        public async Task<SubscriptionDto> CreateSubscriptionAsync(
+            CreateSubscriptionRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var plan = await _unitOfWork.Repository<PackagePlan>().GetByIdAsync(request.PackagePlanId, cancellationToken)
+                ?? throw new NotFoundException(nameof(PackagePlan), request.PackagePlanId);
+            var childBelongs = await _unitOfWork.Repository<Child>().ExistsAsync(
+                c => c.Id == request.ChildId && c.ParentProfileId == request.ParentProfileId, cancellationToken);
+            if (!childBelongs)
+            {
+                throw new DomainValidationException("The child does not belong to the given parent profile.");
+            }
+
+            var duplicate = await _unitOfWork.Repository<Subscription>().ExistsAsync(
+                s => s.ChildId == request.ChildId && s.PackagePlanId == request.PackagePlanId && s.Status == SubscriptionStatus.Active,
+                cancellationToken);
+            if (duplicate)
+            {
+                throw new ConflictException("This child already has an active subscription on that plan.");
+            }
+
+            var subscription = new Subscription
+            {
+                ParentProfileId = request.ParentProfileId,
+                ChildId = request.ChildId,
+                PackagePlanId = request.PackagePlanId,
+                StartDate = request.StartDate,
+                NextBillingAtUtc = NextBillingFrom(request.StartDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc), plan.BillingCycle),
+            };
+            await _unitOfWork.Repository<Subscription>().AddAsync(subscription, cancellationToken);
+            await _auditLog.StageAsync(AuditAction.Create, nameof(Subscription), subscription.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return ToDto(await SubscriptionQuery().FirstAsync(s => s.Id == subscription.Id, cancellationToken));
+        }
+
+        public async Task<SubscriptionDto> RenewSubscriptionAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            var subscription = await SubscriptionQuery().FirstOrDefaultAsync(s => s.Id == id, cancellationToken)
+                ?? throw new NotFoundException(nameof(Subscription), id);
+
+            if (subscription.Status == SubscriptionStatus.Active)
+            {
+                throw new DomainValidationException("This subscription is already active; nothing to renew.");
+            }
+
+            subscription.Status = SubscriptionStatus.Active;
+            subscription.CancelledAtUtc = null;
+            subscription.NextBillingAtUtc = NextBillingFrom(DateTime.UtcNow, subscription.PackagePlan.BillingCycle);
+
+            // Renewal conversion is tracked in the audit trail for the renewal-rate report
+            await _auditLog.StageAsync(AuditAction.Update, nameof(Subscription), subscription.Id.ToString(),
+                changesJson: "{\"renewed\":true}", cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return ToDto(subscription);
+        }
+
+        public async Task<SubscriptionDto> CancelSubscriptionAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            var subscription = await SubscriptionQuery().FirstOrDefaultAsync(s => s.Id == id, cancellationToken)
+                ?? throw new NotFoundException(nameof(Subscription), id);
+
+            if (subscription.Status == SubscriptionStatus.Cancelled)
+            {
+                throw new DomainValidationException("This subscription is already cancelled.");
+            }
+
+            subscription.Status = SubscriptionStatus.Cancelled;
+            subscription.CancelledAtUtc = DateTime.UtcNow;
+            subscription.NextBillingAtUtc = null;
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(Subscription), subscription.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return ToDto(subscription);
+        }
+
+        private static DateTime? NextBillingFrom(DateTime fromUtc, BillingCycle cycle)
+        {
+            return cycle switch
+            {
+                BillingCycle.Monthly => fromUtc.AddMonths(1),
+                BillingCycle.Quarterly => fromUtc.AddMonths(3),
+                BillingCycle.Yearly => fromUtc.AddYears(1),
+                _ => null, // one-time plans bill once at creation
+            };
+        }
+
+        private IQueryable<Subscription> SubscriptionQuery()
+        {
+            return _unitOfWork.Repository<Subscription>().Query()
+                .Include(s => s.Child)
+                .Include(s => s.PackagePlan);
+        }
+
+        private static SubscriptionDto ToDto(Subscription subscription)
+        {
+            return new SubscriptionDto
+            {
+                Id = subscription.Id,
+                ParentProfileId = subscription.ParentProfileId,
+                ChildId = subscription.ChildId,
+                ChildName = $"{subscription.Child.FirstName} {subscription.Child.LastName}",
+                PackagePlanId = subscription.PackagePlanId,
+                PlanName = subscription.PackagePlan.Name,
+                Status = subscription.Status,
+                StartDate = subscription.StartDate,
+                NextBillingAtUtc = subscription.NextBillingAtUtc,
+                CancelledAtUtc = subscription.CancelledAtUtc,
+            };
+        }
+
         private static string GenerateNumber(string prefix)
         {
             // Date-scoped random suffix; the unique index guards the rare collision
