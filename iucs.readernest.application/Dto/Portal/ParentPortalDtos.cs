@@ -116,6 +116,12 @@ namespace iucs.readernest.application.Dto.Reports
 
         public int AverageEngagementScore { get; set; }
 
+        /// <summary>Dominant-speaker seconds captured from the live classroom (talk-time analysis).</summary>
+        public int TalkTimeSeconds { get; set; }
+
+        /// <summary>Camera-on seconds captured from the live classroom (attentiveness signal).</summary>
+        public int CameraOnSeconds { get; set; }
+
         /// <summary>Generated narrative progress insights derived from the signals above.</summary>
         public IReadOnlyList<string> Insights { get; set; } = [];
     }

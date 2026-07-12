@@ -10,5 +10,9 @@ namespace iucs.readernest.domain.Enums
         WhiteboardInteraction,
         HandRaise,
         AttentionPing,
+        /// <summary>Seconds this participant was the dominant speaker (talk-time analysis).</summary>
+        TalkTimeSeconds,
+        /// <summary>Seconds this participant kept their camera on (attentiveness signal).</summary>
+        CameraOnSeconds,
     }
 }

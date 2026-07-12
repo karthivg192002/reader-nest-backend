@@ -83,6 +83,8 @@ namespace iucs.readernest.application.Services
             var quizCorrect = events.Where(e => e.Type == EngagementEventType.QuizCorrect).Sum(e => e.Value);
             var activity = events.Where(e => e.Type is EngagementEventType.ActivityClick or EngagementEventType.ActivityCompleted).Sum(e => e.Value);
             var whiteboard = events.Where(e => e.Type == EngagementEventType.WhiteboardInteraction).Sum(e => e.Value);
+            var talkSeconds = events.Where(e => e.Type == EngagementEventType.TalkTimeSeconds).Sum(e => e.Value);
+            var cameraSeconds = events.Where(e => e.Type == EngagementEventType.CameraOnSeconds).Sum(e => e.Value);
 
             var sessionCount = Math.Max(1, events.Select(e => e.ClassSessionId).Distinct().Count());
             var avgScore = Math.Min(100,
@@ -110,6 +112,19 @@ namespace iucs.readernest.application.Services
             insights.Add(activity + whiteboard >= 10
                 ? $"{name} participates actively in board activities ({activity + whiteboard} interactions)."
                 : $"Participation in board activities is light ({activity + whiteboard} interactions) — calling {name} up for one activity per class would lift engagement.");
+            // Talk-time and camera attentiveness from the live-classroom media signals
+            if (talkSeconds > 0)
+            {
+                var talkMinutes = Math.Round(talkSeconds / 60.0, 1);
+                insights.Add(talkSeconds >= 120
+                    ? $"{name} speaks up in class (~{talkMinutes} min of talk time captured) — great verbal participation."
+                    : $"Talk time is low (~{talkMinutes} min) — reading-aloud turns would build {name}'s speaking confidence.");
+            }
+            if (cameraSeconds > 0 && talkSeconds + cameraSeconds > 0)
+            {
+                var camMinutes = Math.Round(cameraSeconds / 60.0);
+                insights.Add($"Camera attentiveness: on screen for ~{camMinutes} min across tracked classes.");
+            }
 
             return new StudentAnalyticsDto
             {
@@ -122,6 +137,8 @@ namespace iucs.readernest.application.Services
                 ActivityInteractions = activity,
                 WhiteboardInteractions = whiteboard,
                 AverageEngagementScore = avgScore,
+                TalkTimeSeconds = talkSeconds,
+                CameraOnSeconds = cameraSeconds,
                 Insights = insights,
             };
         }
