@@ -46,6 +46,11 @@ builder.Services.AddSingleton<IPaymentGateway, SimulatedPaymentGateway>();
 builder.Services.AddHostedService<BillingBackgroundService>();
 // Session reminders, delayed-session alerts
 builder.Services.AddHostedService<SessionReminderBackgroundService>();
+// CRM integration: lead webhooks, no-op until Integrations:CrmWebhookUrl is set
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton<ICrmNotifier, WebhookCrmNotifier>();
+// Automated reports: weekly KPI digest to admins
+builder.Services.AddHostedService<ReportsDigestBackgroundService>();
 
 // Authentication: JWT bearer
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));

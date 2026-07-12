@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using iucs.readernest.domain.Enums;
 
 namespace iucs.readernest.application.Dto.Sessions
 {
@@ -25,6 +26,51 @@ namespace iucs.readernest.application.Dto.Sessions
         public string StorageUrl { get; set; } = null!;
 
         public int? DurationSeconds { get; set; }
+    }
+
+    public class EngagementEntryDto
+    {
+        public Guid? ChildId { get; set; }
+
+        [Required]
+        [MaxLength(200)]
+        public string ParticipantName { get; set; } = null!;
+
+        [Required]
+        public EngagementEventType Type { get; set; }
+
+        public int Value { get; set; } = 1;
+    }
+
+    public class RecordEngagementRequest
+    {
+        [Required]
+        [MinLength(1)]
+        public List<EngagementEntryDto> Events { get; set; } = [];
+    }
+
+    /// <summary>Per-participant engagement score and learning outcome indicators for a session.</summary>
+    public class EngagementSummaryDto
+    {
+        public string ParticipantName { get; set; } = null!;
+
+        public Guid? ChildId { get; set; }
+
+        public int QuizAttempts { get; set; }
+
+        public int QuizCorrect { get; set; }
+
+        public int ActivityInteractions { get; set; }
+
+        public int WhiteboardInteractions { get; set; }
+
+        public int AttentionPings { get; set; }
+
+        /// <summary>Weighted 0-100 score across participation, accuracy and attention.</summary>
+        public int EngagementScore { get; set; }
+
+        /// <summary>on-track | needs-encouragement | needs-attention</summary>
+        public string LearningOutcome { get; set; } = "on-track";
     }
 
     public class CompleteSessionRequest

@@ -12,5 +12,11 @@ namespace iucs.readernest.application.Services
 
         /// <summary>Bulk email to all active parents, or to the parents of one batch.</summary>
         Task<BulkEmailResultDto> SendBulkEmailAsync(BulkEmailRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>Teacher performance view: sessions delivered, no-shows, attendance, summaries.</summary>
+        Task<IReadOnlyList<TeacherPerformanceDto>> GetTeacherPerformanceAsync(CancellationToken cancellationToken = default);
+
+        /// <summary>Student analytics with generated progress insights (attendance, quiz, engagement).</summary>
+        Task<StudentAnalyticsDto> GetStudentAnalyticsAsync(Guid childId, CancellationToken cancellationToken = default);
     }
 }

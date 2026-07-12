@@ -229,7 +229,37 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
+            // Performance summary: the teacher's class notes go straight to the batch's parents
+            if (!string.IsNullOrWhiteSpace(session.Summary) && session.BatchId.HasValue)
+            {
+                await SendSummaryToParentsAsync(session, cancellationToken);
+            }
+
             return await GetAsync(session.Id, cancellationToken);
+        }
+
+        private async Task SendSummaryToParentsAsync(ClassSession session, CancellationToken cancellationToken)
+        {
+            var parents = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.BatchId == session.BatchId && e.Status == EnrollmentStatus.Active)
+                .Select(e => new
+                {
+                    ChildName = e.Child.FirstName,
+                    ParentUserId = e.Child.ParentProfile.User.Id,
+                    ParentEmail = e.Child.ParentProfile.User.Email,
+                })
+                .ToListAsync(cancellationToken);
+
+            foreach (var parent in parents)
+            {
+                await _notificationService.SendEmailAsync(
+                    parent.ParentUserId,
+                    parent.ParentEmail,
+                    NotificationType.PerformanceSummary,
+                    $"Class summary — {session.ScheduledStartAtUtc:dd MMM}",
+                    $"Today's class notes for {parent.ChildName}:\n\n{session.Summary}",
+                    cancellationToken);
+            }
         }
 
         public async Task<ClassSessionDto> MarkNoShowAsync(
@@ -478,6 +508,80 @@ namespace iucs.readernest.application.Services
                 "Class scheduled",
                 $"A {session.Type} session was scheduled for you: {session.ScheduledStartAtUtc:u} – {session.ScheduledEndAtUtc:u}.",
                 cancellationToken);
+        }
+
+        public async Task RecordEngagementAsync(
+            Guid sessionId,
+            RecordEngagementRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var sessionExists = await _unitOfWork.Repository<ClassSession>()
+                .ExistsAsync(s => s.Id == sessionId, cancellationToken);
+            if (!sessionExists)
+            {
+                throw new NotFoundException(nameof(ClassSession), sessionId);
+            }
+
+            var repository = _unitOfWork.Repository<EngagementEvent>();
+            foreach (var entry in request.Events)
+            {
+                await repository.AddAsync(
+                    new EngagementEvent
+                    {
+                        ClassSessionId = sessionId,
+                        ChildId = entry.ChildId,
+                        ParticipantName = entry.ParticipantName.Trim(),
+                        Type = entry.Type,
+                        Value = entry.Value,
+                    },
+                    cancellationToken);
+            }
+
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
+        public async Task<IReadOnlyList<EngagementSummaryDto>> GetEngagementSummaryAsync(
+            Guid sessionId,
+            CancellationToken cancellationToken = default)
+        {
+            var events = await _unitOfWork.Repository<EngagementEvent>().Query()
+                .Where(e => e.ClassSessionId == sessionId)
+                .ToListAsync(cancellationToken);
+
+            return events
+                .GroupBy(e => new { e.ParticipantName, e.ChildId })
+                .Select(group =>
+                {
+                    var quizAttempts = group.Where(e => e.Type is EngagementEventType.QuizAttempt or EngagementEventType.QuizCorrect).Sum(e => e.Value);
+                    var quizCorrect = group.Where(e => e.Type == EngagementEventType.QuizCorrect).Sum(e => e.Value);
+                    var activity = group.Where(e => e.Type is EngagementEventType.ActivityClick or EngagementEventType.ActivityCompleted).Sum(e => e.Value);
+                    var whiteboard = group.Where(e => e.Type == EngagementEventType.WhiteboardInteraction).Sum(e => e.Value);
+                    var attention = group.Where(e => e.Type == EngagementEventType.AttentionPing).Sum(e => e.Value);
+
+                    // Weighted score: accuracy counts double; capped contributions keep one
+                    // hyperactive signal from masking absence everywhere else
+                    var score = Math.Min(100,
+                        Math.Min(quizCorrect * 2, 30)
+                        + Math.Min(quizAttempts, 20)
+                        + Math.Min(activity * 2, 20)
+                        + Math.Min(whiteboard, 15)
+                        + Math.Min(attention, 15));
+
+                    return new EngagementSummaryDto
+                    {
+                        ParticipantName = group.Key.ParticipantName,
+                        ChildId = group.Key.ChildId,
+                        QuizAttempts = quizAttempts,
+                        QuizCorrect = quizCorrect,
+                        ActivityInteractions = activity,
+                        WhiteboardInteractions = whiteboard,
+                        AttentionPings = attention,
+                        EngagementScore = score,
+                        LearningOutcome = score >= 60 ? "on-track" : score >= 30 ? "needs-encouragement" : "needs-attention",
+                    };
+                })
+                .OrderByDescending(s => s.EngagementScore)
+                .ToList();
         }
 
         private async Task NotifyAdminsOfTeacherNoShowAsync(ClassSession session, CancellationToken cancellationToken)

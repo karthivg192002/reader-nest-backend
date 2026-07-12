@@ -34,6 +34,22 @@ namespace iucs.readernest.api.Controllers
             var csv = await _reportsService.ExportCsvAsync(report, cancellationToken);
             return File(Encoding.UTF8.GetBytes(csv), "text/csv", $"{report}-{DateTime.UtcNow:yyyyMMdd}.csv");
         }
+
+        /// <summary>Teacher performance view: delivery, no-shows, attendance, summaries.</summary>
+        [HttpGet("teacher-performance")]
+        [HasPermission(PermissionModule.ReportsAnalytics, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<TeacherPerformanceDto>>> TeacherPerformance(CancellationToken cancellationToken)
+        {
+            return Ok(await _reportsService.GetTeacherPerformanceAsync(cancellationToken));
+        }
+
+        /// <summary>Student analytics + generated progress insights.</summary>
+        [HttpGet("student-analytics/{childId:guid}")]
+        [HasPermission(PermissionModule.ReportsAnalytics, PermissionAction.View)]
+        public async Task<ActionResult<StudentAnalyticsDto>> StudentAnalytics(Guid childId, CancellationToken cancellationToken)
+        {
+            return Ok(await _reportsService.GetStudentAnalyticsAsync(childId, cancellationToken));
+        }
     }
 
     [ApiController]

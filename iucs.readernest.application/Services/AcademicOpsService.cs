@@ -244,6 +244,30 @@ namespace iucs.readernest.application.Services
                 changesJson: $"{{\"entries\":{request.Entries.Count}}}", cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
+            // Attendance updates: parents hear about an absence the moment it is recorded
+            var absentChildIds = request.Entries
+                .Where(e => e.ChildId.HasValue && e.Status == AttendanceStatus.Absent)
+                .Select(e => e.ChildId!.Value)
+                .ToList();
+            if (absentChildIds.Count > 0)
+            {
+                var absentChildren = await _unitOfWork.Repository<Child>().Query()
+                    .Include(c => c.ParentProfile).ThenInclude(p => p.User)
+                    .Where(c => absentChildIds.Contains(c.Id))
+                    .ToListAsync(cancellationToken);
+                foreach (var child in absentChildren)
+                {
+                    var parentUser = child.ParentProfile.User;
+                    await _notificationService.SendEmailAsync(
+                        parentUser.Id,
+                        parentUser.Email,
+                        NotificationType.AttendanceUpdate,
+                        $"{child.FirstName} was marked absent today",
+                        $"{child.FirstName} missed today's class. If this was unplanned, please reach out so the session can be carried forward.",
+                        cancellationToken);
+                }
+            }
+
             return await ListAttendanceAsync(sessionId, cancellationToken);
         }
 

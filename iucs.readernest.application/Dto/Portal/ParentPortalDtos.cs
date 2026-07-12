@@ -75,6 +75,51 @@ namespace iucs.readernest.application.Dto.Reports
         public decimal Revenue { get; set; }
     }
 
+    /// <summary>Per-teacher delivery stats for the performance view.</summary>
+    public class TeacherPerformanceDto
+    {
+        public Guid TeacherProfileId { get; set; }
+
+        public string TeacherName { get; set; } = null!;
+
+        public string? Department { get; set; }
+
+        public int SessionsCompleted { get; set; }
+
+        public int TeacherNoShows { get; set; }
+
+        public int UpcomingSessions { get; set; }
+
+        public double StudentAttendancePercent { get; set; }
+
+        public int SummariesWritten { get; set; }
+    }
+
+    /// <summary>Per-child analytics with generated progress insights.</summary>
+    public class StudentAnalyticsDto
+    {
+        public Guid ChildId { get; set; }
+
+        public string ChildName { get; set; } = null!;
+
+        public double AttendancePercent { get; set; }
+
+        public int SessionsAttended { get; set; }
+
+        public int QuizAttempts { get; set; }
+
+        public int QuizCorrect { get; set; }
+
+        public int ActivityInteractions { get; set; }
+
+        public int WhiteboardInteractions { get; set; }
+
+        public int AverageEngagementScore { get; set; }
+
+        /// <summary>Generated narrative progress insights derived from the signals above.</summary>
+        public IReadOnlyList<string> Insights { get; set; } = [];
+    }
+
     public class BulkEmailRequest
     {
         [System.ComponentModel.DataAnnotations.Required]

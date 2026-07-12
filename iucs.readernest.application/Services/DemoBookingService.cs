@@ -15,13 +15,19 @@ namespace iucs.readernest.application.Services
     {
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
+        private readonly ICrmNotifier _crmNotifier;
         private readonly IEmailSender _emailSender;
 
-        public DemoBookingService(IUnitOfWork unitOfWork, IAuditLogService auditLog, IEmailSender emailSender)
+        public DemoBookingService(
+            IUnitOfWork unitOfWork,
+            IAuditLogService auditLog,
+            IEmailSender emailSender,
+            ICrmNotifier crmNotifier)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
             _emailSender = emailSender;
+            _crmNotifier = crmNotifier;
         }
 
         public async Task<IReadOnlyList<DemoBookingDto>> ListAsync(
@@ -111,6 +117,18 @@ namespace iucs.readernest.application.Services
                 await _emailSender.SendAsync(participant.Email, "Demo class confirmed", confirmation, cancellationToken);
             }
 
+            // New lead lands in the client's CRM (no-op when no webhook is configured)
+            await _crmNotifier.PushLeadEventAsync("lead.created", new
+            {
+                booking.Id,
+                booking.ParentName,
+                booking.ParentEmail,
+                booking.ParentPhone,
+                booking.ChildName,
+                Department = booking.Department?.ToString(),
+                DemoAtUtc = request.ScheduledStartAtUtc,
+            }, cancellationToken);
+
             return await GetAsync(booking.Id, cancellationToken);
         }
 
@@ -168,6 +186,15 @@ namespace iucs.readernest.application.Services
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(DemoBooking), booking.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            await _crmNotifier.PushLeadEventAsync("lead.status-changed", new
+            {
+                booking.Id,
+                booking.ParentEmail,
+                booking.ChildName,
+                ConversionStatus = booking.ConversionStatus.ToString(),
+                booking.FollowUpNotes,
+            }, cancellationToken);
 
             return await GetAsync(booking.Id, cancellationToken);
         }

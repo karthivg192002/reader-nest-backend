@@ -54,5 +54,11 @@ namespace iucs.readernest.application.Services
         Task<IReadOnlyList<SessionRecordingDto>> ListRecordingsAsync(
             Guid sessionId,
             CancellationToken cancellationToken = default);
+
+        /// <summary>Engagement tracking: batches of quiz/activity/whiteboard/attention signals from the live classroom.</summary>
+        Task RecordEngagementAsync(Guid sessionId, RecordEngagementRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>Per-participant engagement scores and learning outcome indicators.</summary>
+        Task<IReadOnlyList<EngagementSummaryDto>> GetEngagementSummaryAsync(Guid sessionId, CancellationToken cancellationToken = default);
     }
 }

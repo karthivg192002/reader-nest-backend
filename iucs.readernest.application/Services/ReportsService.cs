@@ -24,6 +24,108 @@ namespace iucs.readernest.application.Services
             _notificationService = notificationService;
         }
 
+        public async Task<IReadOnlyList<TeacherPerformanceDto>> GetTeacherPerformanceAsync(CancellationToken cancellationToken = default)
+        {
+            var teachers = await _unitOfWork.Repository<TeacherProfile>().Query()
+                .Include(t => t.User)
+                .Where(t => t.User.Status == UserStatus.Active)
+                .ToListAsync(cancellationToken);
+
+            var now = DateTime.UtcNow;
+            var result = new List<TeacherPerformanceDto>(teachers.Count);
+            foreach (var teacher in teachers)
+            {
+                var sessions = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.TeacherProfileId == teacher.Id)
+                    .Select(s => new { s.Id, s.Status, s.ScheduledStartAtUtc, HasSummary = s.Summary != null })
+                    .ToListAsync(cancellationToken);
+                var completedIds = sessions.Where(s => s.Status == SessionStatus.Completed).Select(s => s.Id).ToList();
+
+                var attendanceRows = await _unitOfWork.Repository<SessionAttendance>().Query()
+                    .Where(a => completedIds.Contains(a.ClassSessionId) && a.ParticipantType == ParticipantType.Student)
+                    .Select(a => a.Status)
+                    .ToListAsync(cancellationToken);
+
+                result.Add(new TeacherPerformanceDto
+                {
+                    TeacherProfileId = teacher.Id,
+                    TeacherName = $"{teacher.User.FirstName} {teacher.User.LastName}",
+                    Department = teacher.Department?.ToString(),
+                    SessionsCompleted = completedIds.Count,
+                    TeacherNoShows = sessions.Count(s => s.Status == SessionStatus.TeacherNoShow),
+                    UpcomingSessions = sessions.Count(s => s.Status == SessionStatus.Scheduled && s.ScheduledStartAtUtc > now),
+                    StudentAttendancePercent = attendanceRows.Count == 0
+                        ? 100
+                        : Math.Round(100.0 * attendanceRows.Count(a => a != AttendanceStatus.Absent) / attendanceRows.Count, 1),
+                    SummariesWritten = sessions.Count(s => s.HasSummary),
+                });
+            }
+
+            return result.OrderByDescending(t => t.SessionsCompleted).ToList();
+        }
+
+        public async Task<StudentAnalyticsDto> GetStudentAnalyticsAsync(Guid childId, CancellationToken cancellationToken = default)
+        {
+            var child = await _unitOfWork.Repository<Child>().GetByIdAsync(childId, cancellationToken)
+                ?? throw new NotFoundException(nameof(Child), childId);
+
+            var attendance = await _unitOfWork.Repository<SessionAttendance>().Query()
+                .Where(a => a.ChildId == childId)
+                .Select(a => a.Status)
+                .ToListAsync(cancellationToken);
+            var attended = attendance.Count(a => a != AttendanceStatus.Absent);
+            var attendancePercent = attendance.Count == 0 ? 100 : Math.Round(100.0 * attended / attendance.Count, 1);
+
+            var events = await _unitOfWork.Repository<EngagementEvent>().Query()
+                .Where(e => e.ChildId == childId)
+                .ToListAsync(cancellationToken);
+            var quizAttempts = events.Where(e => e.Type is EngagementEventType.QuizAttempt or EngagementEventType.QuizCorrect).Sum(e => e.Value);
+            var quizCorrect = events.Where(e => e.Type == EngagementEventType.QuizCorrect).Sum(e => e.Value);
+            var activity = events.Where(e => e.Type is EngagementEventType.ActivityClick or EngagementEventType.ActivityCompleted).Sum(e => e.Value);
+            var whiteboard = events.Where(e => e.Type == EngagementEventType.WhiteboardInteraction).Sum(e => e.Value);
+
+            var sessionCount = Math.Max(1, events.Select(e => e.ClassSessionId).Distinct().Count());
+            var avgScore = Math.Min(100,
+                (Math.Min(quizCorrect * 2, 30) + Math.Min(quizAttempts, 20) + Math.Min(activity * 2, 20) + Math.Min(whiteboard, 15)) / sessionCount * 2);
+
+            // Generated progress insights: rule-based narrative from the captured signals
+            var name = child.FirstName;
+            var insights = new List<string>();
+            insights.Add(attendancePercent >= 90
+                ? $"{name} attends consistently ({attendancePercent}%) — a strong routine is in place."
+                : attendancePercent >= 75
+                    ? $"{name}'s attendance is {attendancePercent}%; a steadier routine would compound progress."
+                    : $"Attendance is {attendancePercent}% — missed classes are the biggest lever for {name} right now.");
+            if (quizAttempts > 0)
+            {
+                var accuracy = Math.Round(100.0 * quizCorrect / Math.Max(1, quizAttempts));
+                insights.Add(accuracy >= 70
+                    ? $"Quiz accuracy is {accuracy}% across {quizAttempts} attempts — concepts are landing."
+                    : $"Quiz accuracy is {accuracy}%; a recap of recent topics before new material would help.");
+            }
+            else
+            {
+                insights.Add($"{name} hasn't attempted in-class quizzes yet — gentle prompting will build confidence.");
+            }
+            insights.Add(activity + whiteboard >= 10
+                ? $"{name} participates actively in board activities ({activity + whiteboard} interactions)."
+                : $"Participation in board activities is light ({activity + whiteboard} interactions) — calling {name} up for one activity per class would lift engagement.");
+
+            return new StudentAnalyticsDto
+            {
+                ChildId = child.Id,
+                ChildName = $"{child.FirstName} {child.LastName}",
+                AttendancePercent = attendancePercent,
+                SessionsAttended = attended,
+                QuizAttempts = quizAttempts,
+                QuizCorrect = quizCorrect,
+                ActivityInteractions = activity,
+                WhiteboardInteractions = whiteboard,
+                AverageEngagementScore = avgScore,
+                Insights = insights,
+            };
+        }
+
         public async Task<DashboardSummaryDto> GetDashboardSummaryAsync(CancellationToken cancellationToken = default)
         {
             var totalStudents = await _unitOfWork.Repository<Child>().Query().CountAsync(cancellationToken);

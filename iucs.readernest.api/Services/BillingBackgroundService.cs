@@ -129,6 +129,45 @@ namespace iucs.readernest.api.Services
                     "Auto billing: generated {InvoiceCount} invoice(s), marked {OverdueCount} overdue, suspended {SuspendedCount} account(s).",
                     dueSubscriptions.Count, overdueInvoices.Count, suspendedCount);
             }
+
+            // Payment reminders go out once a day (the 08:00 UTC cycle), not every hour
+            if (now.Hour == 8)
+            {
+                await SendPaymentRemindersAsync(scope.ServiceProvider, unitOfWork, today, cancellationToken);
+            }
+        }
+
+        private static async Task SendPaymentRemindersAsync(
+            IServiceProvider services,
+            IUnitOfWork unitOfWork,
+            DateOnly today,
+            CancellationToken cancellationToken)
+        {
+            var notifications = services.GetRequiredService<INotificationService>();
+            var reminderWindow = today.AddDays(3);
+
+            var dueInvoices = await unitOfWork.Repository<Invoice>().Query()
+                .Include(i => i.ParentProfile).ThenInclude(p => p.User)
+                .Where(i => (i.Status == InvoiceStatus.Pending || i.Status == InvoiceStatus.PartiallyPaid || i.Status == InvoiceStatus.Overdue)
+                            && i.DueDate <= reminderWindow)
+                .ToListAsync(cancellationToken);
+
+            foreach (var invoice in dueInvoices)
+            {
+                var user = invoice.ParentProfile.User;
+                var outstanding = invoice.Amount - invoice.AmountPaid;
+                var subject = invoice.Status == InvoiceStatus.Overdue
+                    ? $"Overdue: invoice {invoice.InvoiceNumber}"
+                    : $"Payment reminder: invoice {invoice.InvoiceNumber} due {invoice.DueDate:dd MMM}";
+                await notifications.SendEmailAsync(
+                    user.Id,
+                    user.Email,
+                    NotificationType.PaymentReminder,
+                    subject,
+                    $"{outstanding:0.00} {invoice.Currency} is outstanding on invoice {invoice.InvoiceNumber} (due {invoice.DueDate:yyyy-MM-dd}). " +
+                    "Use Pay Now on your dashboard to settle it and keep classes uninterrupted.",
+                    cancellationToken);
+            }
         }
     }
 }

@@ -127,6 +127,27 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _sessionService.ListRecordingsAsync(id, cancellationToken));
         }
 
+        /// <summary>Engagement signals from the live classroom (quiz, activity, whiteboard, attention).</summary>
+        [HttpPost("{id:guid}/engagement")]
+        [Authorize]
+        public async Task<IActionResult> RecordEngagement(
+            Guid id,
+            RecordEngagementRequest request,
+            CancellationToken cancellationToken)
+        {
+            await _sessionService.RecordEngagementAsync(id, request, cancellationToken);
+            return NoContent();
+        }
+
+        [HttpGet("{id:guid}/engagement")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<ActionResult<IReadOnlyList<EngagementSummaryDto>>> EngagementSummary(
+            Guid id,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.GetEngagementSummaryAsync(id, cancellationToken));
+        }
+
         /// <summary>Student/teacher attendance capture (join-based; rejoin updates, never duplicates).</summary>
         [HttpPost("{id:guid}/attendance")]
         [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
