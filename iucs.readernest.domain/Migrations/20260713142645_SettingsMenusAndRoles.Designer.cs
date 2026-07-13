@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using iucs.readernest.domain.Data;
@@ -11,9 +12,11 @@ using iucs.readernest.domain.Data;
 namespace iucs.readernest.domain.Migrations
 {
     [DbContext(typeof(ReaderNestDbContext))]
-    partial class ReaderNestDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260713142645_SettingsMenusAndRoles")]
+    partial class SettingsMenusAndRoles
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1476,83 +1479,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasDatabaseName("ix_notifications_recipient_user_id_status");
 
                     b.ToTable("notifications");
-                });
-
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Integrations.Integration", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
-
-                    b.Property<string>("Category")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("category");
-
-                    b.Property<string>("ConfigJson")
-                        .HasColumnType("text")
-                        .HasColumnName("config_json");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at_utc");
-
-                    b.Property<Guid?>("CreatedBy")
-                        .HasColumnType("uuid")
-                        .HasColumnName("created_by");
-
-                    b.Property<DateTime?>("DeletedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("deleted_at_utc");
-
-                    b.Property<string>("Description")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)")
-                        .HasColumnName("description");
-
-                    b.Property<bool>("IsDeleted")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_deleted");
-
-                    b.Property<bool>("IsEnabled")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_enabled");
-
-                    b.Property<bool>("IsSystem")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_system");
-
-                    b.Property<string>("Key")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("key");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)")
-                        .HasColumnName("name");
-
-                    b.Property<DateTime?>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at_utc");
-
-                    b.Property<Guid?>("UpdatedBy")
-                        .HasColumnType("uuid")
-                        .HasColumnName("updated_by");
-
-                    b.HasKey("Id")
-                        .HasName("pk_integrations");
-
-                    b.HasIndex("Key")
-                        .IsUnique()
-                        .HasDatabaseName("ix_integrations_key")
-                        .HasFilter("\"is_deleted\" = FALSE");
-
-                    b.ToTable("integrations");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Navigation.MenuItem", b =>

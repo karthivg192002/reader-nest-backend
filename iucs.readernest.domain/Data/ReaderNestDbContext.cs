@@ -5,8 +5,11 @@ using iucs.readernest.domain.Entities.Auditing;
 using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Common;
 using iucs.readernest.domain.Entities.Communication;
+using iucs.readernest.domain.Entities.Integrations;
+using iucs.readernest.domain.Entities.Navigation;
 using iucs.readernest.domain.Entities.Payouts;
 using iucs.readernest.domain.Entities.Resources;
+using iucs.readernest.domain.Entities.Settings;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
 using Microsoft.EntityFrameworkCore;
@@ -28,6 +31,8 @@ namespace iucs.readernest.domain.Data
         public DbSet<TeacherProfile> TeacherProfiles => Set<TeacherProfile>();
         public DbSet<Child> Children => Set<Child>();
         public DbSet<SubAdminPermission> SubAdminPermissions => Set<SubAdminPermission>();
+        public DbSet<RoleDefinition> RoleDefinitions => Set<RoleDefinition>();
+        public DbSet<RolePermission> RolePermissions => Set<RolePermission>();
 
         // Academics
         public DbSet<CourseCategory> CourseCategories => Set<CourseCategory>();
@@ -70,6 +75,11 @@ namespace iucs.readernest.domain.Data
         // Communication & auditing
         public DbSet<Notification> Notifications => Set<Notification>();
         public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
+
+        // Platform configuration
+        public DbSet<AppSetting> AppSettings => Set<AppSetting>();
+        public DbSet<MenuItem> MenuItems => Set<MenuItem>();
+        public DbSet<Integration> Integrations => Set<Integration>();
 
         protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
         {

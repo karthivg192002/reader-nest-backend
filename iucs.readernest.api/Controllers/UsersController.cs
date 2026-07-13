@@ -13,10 +13,12 @@ namespace iucs.readernest.api.Controllers
     public class UsersController : ControllerBase
     {
         private readonly IUserService _userService;
+        private readonly IRoleService _roleService;
 
-        public UsersController(IUserService userService)
+        public UsersController(IUserService userService, IRoleService roleService)
         {
             _userService = userService;
+            _roleService = roleService;
         }
 
         [HttpGet]
@@ -89,27 +91,29 @@ namespace iucs.readernest.api.Controllers
             return NoContent();
         }
 
-        /// <summary>Named Sub Admin presets (Academic Coordinator, Management read-only).</summary>
+        /// <summary>Named Sub Admin presets, maintained in the DB roles table (seeded with Academic Coordinator, Management).</summary>
         [HttpGet("permission-presets")]
         [HasPermission(PermissionModule.UserManagement, PermissionAction.View)]
-        public ActionResult<IReadOnlyList<string>> ListPermissionPresets()
+        public async Task<ActionResult<IReadOnlyList<string>>> ListPermissionPresets(CancellationToken cancellationToken)
         {
-            return Ok(PermissionPresets.Names);
+            var roles = await _roleService.ListAsync(cancellationToken);
+            return Ok(roles.Select(r => r.Name).ToList());
         }
 
-        /// <summary>Replaces the user's grants with the preset's matrix.</summary>
+        /// <summary>Replaces the user's grants with the DB role's matrix.</summary>
         [HttpPut("{id:guid}/permissions/preset/{preset}")]
         [HasPermission(PermissionModule.UserManagement, PermissionAction.Edit)]
         public async Task<IActionResult> ApplyPermissionPreset(Guid id, string preset, CancellationToken cancellationToken)
         {
-            var permissions = PermissionPresets.Resolve(preset);
+            var permissions = await _roleService.ResolvePermissionsAsync(preset, cancellationToken);
             if (permissions is null)
             {
+                var roles = await _roleService.ListAsync(cancellationToken);
                 return NotFound(new Microsoft.AspNetCore.Mvc.ProblemDetails
                 {
                     Status = 404,
                     Title = "Not Found",
-                    Detail = $"Unknown permission preset '{preset}'. Available: {string.Join(", ", PermissionPresets.Names)}.",
+                    Detail = $"Unknown permission preset '{preset}'. Available: {string.Join(", ", roles.Select(r => r.Name))}.",
                 });
             }
 

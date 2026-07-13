@@ -4,8 +4,9 @@ using iucs.readernest.domain.Enums;
 namespace iucs.readernest.application.Common
 {
     /// <summary>
-    /// Named Sub Admin permission presets: applying one replaces the user's grants
-    /// with a role-shaped matrix instead of hand-picking modules.
+    /// Seed matrices for the system permission roles. Runtime preset resolution now
+    /// reads the DB roles table (see IRoleService); this class only feeds the
+    /// first-run seed in DatabaseInitializer.
     /// </summary>
     public static class PermissionPresets
     {
