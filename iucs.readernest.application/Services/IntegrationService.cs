@@ -1,5 +1,6 @@
 using System.Text.Json;
 using iucs.readernest.application.Common.Exceptions;
+using iucs.readernest.application.Dto.Billing;
 using iucs.readernest.application.Dto.Integrations;
 using iucs.readernest.domain.Entities.Integrations;
 using iucs.readernest.domain.Enums;
@@ -26,6 +27,15 @@ namespace iucs.readernest.application.Services
                 .ToListAsync(cancellationToken);
 
             return integrations.Select(ToDto).ToList();
+        }
+
+        public async Task<IReadOnlyList<PaymentMethodOptionDto>> GetEnabledPaymentMethodsAsync(CancellationToken cancellationToken = default)
+        {
+            return await _unitOfWork.Repository<Integration>().Query()
+                .Where(i => i.Category == IntegrationCategory.PaymentGateway && i.IsEnabled)
+                .OrderBy(i => i.Name)
+                .Select(i => new PaymentMethodOptionDto { Key = i.Key, Name = i.Name })
+                .ToListAsync(cancellationToken);
         }
 
         public async Task<IntegrationDto> CreateAsync(

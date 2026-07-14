@@ -21,5 +21,8 @@ namespace iucs.readernest.application.Services
         Task<EnrollmentFormDto> ReviewAsync(Guid id, ReviewEnrollmentFormRequest request, CancellationToken cancellationToken = default);
 
         Task<IReadOnlyList<ChildDto>> ListChildrenForParentUserAsync(Guid parentUserId, CancellationToken cancellationToken = default);
+
+        /// <summary>Admin students directory: every enrolled child with its parent and current course resolved.</summary>
+        Task<IReadOnlyList<StudentDto>> ListAllStudentsAsync(CancellationToken cancellationToken = default);
     }
 }

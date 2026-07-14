@@ -31,5 +31,16 @@ namespace iucs.readernest.application.Services
             IReadOnlyList<PermissionDto> permissions,
             Guid? roleDefinitionId = null,
             CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Regenerates the account's temporary password and delivers a welcome
+        /// message with the new credentials over the chosen channel. The password
+        /// is only reset once delivery succeeds, so a failed send never locks the
+        /// account out with an undelivered password.
+        /// </summary>
+        Task ResendCredentialsAsync(Guid userId, CredentialChannel channel, CancellationToken cancellationToken = default);
+
+        /// <summary>Which credential-delivery channels are enabled in Settings → Integrations, so the UI shows only usable buttons.</summary>
+        Task<CredentialChannelsDto> GetCredentialChannelsAsync(CancellationToken cancellationToken = default);
     }
 }

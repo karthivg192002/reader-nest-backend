@@ -7,6 +7,12 @@ namespace iucs.readernest.application.Services
     {
         Task<IReadOnlyList<PackagePlanDto>> ListPlansAsync(CancellationToken cancellationToken = default);
 
+        /// <summary>Department payment accounts with live transaction stats, for the Payment Gateway Mapping screen.</summary>
+        Task<IReadOnlyList<PaymentAccountDto>> ListPaymentAccountsAsync(CancellationToken cancellationToken = default);
+
+        /// <summary>Pins a parent's payments to a specific department account (admin override).</summary>
+        Task SetParentPaymentAccountAsync(SavePaymentMappingRequest request, CancellationToken cancellationToken = default);
+
         Task<PackagePlanDto> CreatePlanAsync(SavePackagePlanRequest request, CancellationToken cancellationToken = default);
 
         Task<PackagePlanDto> UpdatePlanAsync(Guid id, SavePackagePlanRequest request, CancellationToken cancellationToken = default);

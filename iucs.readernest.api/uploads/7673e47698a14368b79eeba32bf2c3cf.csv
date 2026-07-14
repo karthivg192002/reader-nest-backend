@@ -1,0 +1,9 @@
+id,title,type,category,location,address,areaSqft,bedrooms,bathrooms,furnishing,price,currency,status,ownerName,contactName,contactPhone,createdAt
+cmrdofd0y000tyltiof5d1gpu,JC Appartment,APARTMENT,SALE,Chennai,"No 78, 2nd floor, C.Packiyam Street, Annupanadi",10000,4,4,FURNISHED,40000000,INR,AVAILABLE,Test owner,Owner,9382183924,2026-07-09T15:43:40.978Z
+cmr4iqjeh000jnjstidt0ryhj,Plot for sale in Thanjavur ,PLOT,SALE,Nanjikottai road ,Eb colony ,2400,,,,6000000,INR,AVAILABLE,Vijay ,Vijay ,9578311506,2026-07-03T05:54:29.177Z
+seed-prop-6,"Commercial Office, T. Nagar — Fitted",OFFICE,COMMERCIAL,"T. Nagar, Chennai","Usman Road, Near Pondy Bazaar",1500,,2,FURNISHED,180000,INR,AVAILABLE,T Nagar Commercial,Priya Venkatesan,+919843334444,2026-07-02T16:28:15.357Z
+seed-prop-5,"3BHK Villa, Coimbatore Saravanampatti — Gated Community",TOWNHOUSE,SALE,"Saravanampatti, Coimbatore",Kalapatti Road,2100,3,3,UNFURNISHED,12500000,INR,AVAILABLE,Private Owner,Priya Venkatesan,+919843334444,2026-07-02T16:28:15.102Z
+seed-prop-4,"Studio Apartment, OMR Sholinganallur — Furnished",STUDIO,RENT,"Sholinganallur, Chennai","OMR Main Road, Near ELCOT",520,0,1,FURNISHED,22000,INR,AVAILABLE,OMR Living,Priya Venkatesan,+919843334444,2026-07-02T16:28:14.855Z
+seed-prop-3,"4BHK Independent Villa, ECR — Sea Breeze",VILLA,SALE,"ECR, Chennai","Uthandi, East Coast Road",3200,4,5,UNFURNISHED,42500000,INR,AVAILABLE,Private Owner,Priya Venkatesan,+919843334444,2026-07-02T16:28:14.600Z
+seed-prop-2,"2BHK Apartment, Velachery — Near IT Corridor",APARTMENT,SALE,"Velachery, Chennai","Vijayanagar, 100 Feet Road",980,2,2,UNFURNISHED,8500000,INR,AVAILABLE,Velachery Builders,Priya Venkatesan,+919843334444,2026-07-02T16:28:14.342Z
+seed-prop-1,"3BHK Apartment, Anna Nagar — Park Facing",APARTMENT,SALE,"Anna Nagar, Chennai","2nd Avenue, Near Tower Park",1450,3,3,SEMI_FURNISHED,17500000,INR,AVAILABLE,Anna Nagar Estates,Priya Venkatesan,+919843334444,2026-07-02T16:28:13.914Z

@@ -95,7 +95,9 @@ namespace iucs.readernest.application.Services
             ReviewEnrollmentFormRequest request,
             CancellationToken cancellationToken = default)
         {
-            var form = await BaseQuery().FirstOrDefaultAsync(f => f.Id == id, cancellationToken)
+            // Load TRACKED (not via BaseQuery's AsNoTracking) so the status change
+            // and the parent's EnrollmentFormCompleted flag actually persist.
+            var form = await _unitOfWork.Repository<EnrollmentForm>().FirstOrDefaultAsync(f => f.Id == id, cancellationToken)
                 ?? throw new NotFoundException(nameof(EnrollmentForm), id);
 
             if (form.Status != EnrollmentFormStatus.Submitted)
@@ -117,7 +119,15 @@ namespace iucs.readernest.application.Services
 
                 form.Child = child;
                 form.Status = EnrollmentFormStatus.Approved;
-                form.ParentProfile.EnrollmentFormCompleted = true;
+
+                // Unlock the parent's dashboard — load the profile tracked so the flag saves.
+                var parentProfile = await _unitOfWork.Repository<ParentProfile>()
+                    .GetByIdAsync(form.ParentProfileId, cancellationToken);
+                if (parentProfile is not null)
+                {
+                    parentProfile.EnrollmentFormCompleted = true;
+                    _unitOfWork.Repository<ParentProfile>().Update(parentProfile);
+                }
             }
             else
             {
@@ -125,6 +135,7 @@ namespace iucs.readernest.application.Services
             }
 
             form.ReviewedAtUtc = DateTime.UtcNow;
+            _unitOfWork.Repository<EnrollmentForm>().Update(form);
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(EnrollmentForm), form.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
@@ -150,6 +161,41 @@ namespace iucs.readernest.application.Services
                 LastName = c.LastName,
                 DateOfBirth = c.DateOfBirth,
                 AcademicLevel = c.AcademicLevel,
+                IsActive = c.IsActive,
+            }).ToList();
+        }
+
+        public async Task<IReadOnlyList<StudentDto>> ListAllStudentsAsync(CancellationToken cancellationToken = default)
+        {
+            var children = await _unitOfWork.Repository<Child>().Query()
+                .Include(c => c.ParentProfile).ThenInclude(p => p.User)
+                .OrderBy(c => c.FirstName).ThenBy(c => c.LastName)
+                .ToListAsync(cancellationToken);
+
+            if (children.Count == 0)
+            {
+                return [];
+            }
+
+            // Resolve each child's current course in one pass (child → batch enrollment → batch → course).
+            var childIds = children.Select(c => c.Id).ToList();
+            var enrollments = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => childIds.Contains(e.ChildId))
+                .Include(e => e.Batch).ThenInclude(b => b.Course)
+                .ToListAsync(cancellationToken);
+            var courseByChild = enrollments
+                .GroupBy(e => e.ChildId)
+                .ToDictionary(g => g.Key, g => g.First().Batch.Course.Name);
+
+            var today = DateOnly.FromDateTime(DateTime.UtcNow);
+            return children.Select(c => new StudentDto
+            {
+                Id = c.Id,
+                FullName = $"{c.FirstName} {c.LastName}".Trim(),
+                Age = c.DateOfBirth is { } dob ? Math.Max(0, (today.DayNumber - dob.DayNumber) / 365) : null,
+                AcademicLevel = c.AcademicLevel,
+                ParentName = c.ParentProfile?.User is { } u ? $"{u.FirstName} {u.LastName}".Trim() : "—",
+                CourseName = courseByChild.TryGetValue(c.Id, out var name) ? name : null,
                 IsActive = c.IsActive,
             }).ToList();
         }

@@ -38,7 +38,11 @@ builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 // Application services + API-layer implementations of its abstractions
 builder.Services.AddApplication();
 builder.Services.AddScoped<ITokenService, JwtTokenService>();
-builder.Services.AddScoped<IEmailSender, LoggingEmailSender>();
+// Real SMTP delivery driven by the DB "email" integration config (Settings →
+// Integrations); logs and no-ops safely when that integration is off/unconfigured.
+builder.Services.AddScoped<IEmailSender, SmtpEmailSender>();
+// WhatsApp Business Cloud API delivery, driven by the DB "whatsapp" integration.
+builder.Services.AddScoped<IWhatsAppSender, WhatsAppSender>();
 builder.Services.AddSingleton<IFileStorage, LocalFileStorage>();
 // Dual-gateway abstraction: swap for the client's provider at deployment
 builder.Services.AddSingleton<IPaymentGateway, SimulatedPaymentGateway>();

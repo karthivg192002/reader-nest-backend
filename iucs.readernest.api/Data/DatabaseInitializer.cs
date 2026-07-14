@@ -1,6 +1,6 @@
 using System.Text.Json;
-using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Interfaces;
+using iucs.readernest.application.Dto.Users;
 using iucs.readernest.domain.Data;
 using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Integrations;
@@ -119,23 +119,40 @@ namespace iucs.readernest.api.Data
 
         private static async Task SeedRolesAsync(ReaderNestDbContext context)
         {
-            if (await context.RoleDefinitions.AnyAsync())
-            {
-                return;
-            }
+            // System roles mirror the platform's portals so the Roles & Permissions
+            // screen ships with a ready-to-assign preset per persona. Reconciled on
+            // every start (insert-if-absent + retire renamed/obsolete system roles),
+            // never clobbering admin-created custom roles or hand-edited matrices.
+            var desired = SystemRoleSeeds();
+            var desiredNames = desired.Select(d => d.Name).ToHashSet();
 
-            foreach (var name in PermissionPresets.Names)
+            var existing = await context.RoleDefinitions
+                .Include(r => r.Permissions)
+                .ToListAsync();
+            var existingByName = existing.ToDictionary(r => r.Name);
+
+            foreach (var seed in desired)
             {
-                var permissions = PermissionPresets.Resolve(name)!;
+                if (existingByName.TryGetValue(seed.Name, out var current))
+                {
+                    // Backfill the default landing route on roles seeded before the
+                    // column existed; leave everything else the admin may have edited.
+                    if (string.IsNullOrWhiteSpace(current.DefaultRoute))
+                    {
+                        current.DefaultRoute = seed.DefaultRoute;
+                    }
+
+                    continue;
+                }
+
                 context.RoleDefinitions.Add(new RoleDefinition
                 {
-                    Name = name,
-                    DisplayName = name == PermissionPresets.AcademicCoordinator ? "Academic Coordinator" : "Management",
-                    Description = name == PermissionPresets.AcademicCoordinator
-                        ? "Scheduling and calendar coordination with leave approval."
-                        : "Read-only executive dashboard access.",
+                    Name = seed.Name,
+                    DisplayName = seed.DisplayName,
+                    Description = seed.Description,
+                    DefaultRoute = seed.DefaultRoute,
                     IsSystem = true,
-                    Permissions = permissions.Select(p => new RolePermission
+                    Permissions = seed.Permissions.Select(p => new RolePermission
                     {
                         Module = p.Module,
                         CanView = p.CanView,
@@ -146,6 +163,67 @@ namespace iucs.readernest.api.Data
                     }).ToList(),
                 });
             }
+
+            // Retire obsolete system roles (e.g. the old "academic-coordinator",
+            // replaced by "coordinator"). Clear any user assignment first so the
+            // Restrict FK doesn't block the delete; the user's own permission grants
+            // are untouched, only the named-role pointer is reset.
+            var obsolete = existing.Where(r => r.IsSystem && !desiredNames.Contains(r.Name)).ToList();
+            foreach (var role in obsolete)
+            {
+                var assignedUsers = await context.Users
+                    .Where(u => u.RoleDefinitionId == role.Id)
+                    .ToListAsync();
+                foreach (var user in assignedUsers)
+                {
+                    user.RoleDefinitionId = null;
+                }
+
+                context.RolePermissions.RemoveRange(role.Permissions);
+                context.RoleDefinitions.Remove(role);
+            }
+        }
+
+        private static IReadOnlyList<(string Name, string DisplayName, string Description, string DefaultRoute, PermissionDto[] Permissions)> SystemRoleSeeds()
+        {
+            PermissionDto Grant(PermissionModule module, bool view = false, bool create = false, bool edit = false, bool delete = false, bool approve = false) =>
+                new() { Module = module, CanView = view, CanCreate = create, CanEdit = edit, CanDelete = delete, CanApprove = approve };
+
+            PermissionDto[] AllModulesFull() =>
+                Enum.GetValues<PermissionModule>()
+                    .Select(m => Grant(m, view: true, create: true, edit: true, delete: true, approve: true))
+                    .ToArray();
+
+            return
+            [
+                ("admin", "Admin", "Full access across every module.", "/admin", AllModulesFull()),
+                ("teacher", "Teacher", "Class delivery: own schedule, content and leave.", "/teacher",
+                [
+                    Grant(PermissionModule.SessionCalendarManagement, view: true),
+                    Grant(PermissionModule.ContentAccessManagement, view: true),
+                    Grant(PermissionModule.LeaveManagement, view: true),
+                ]),
+                ("parent", "Parent", "Family account holder; managed through the parent portal.", "/parent", []),
+                ("sub-admin", "Sub Admin", "Base delegated staff account; grant modules as needed.", "/subadmin", []),
+                ("admission", "Admission", "Demo-to-enrollment pipeline and lead follow-up.", "/admission",
+                [
+                    Grant(PermissionModule.Admission, view: true, create: true, edit: true, approve: true),
+                    Grant(PermissionModule.UserManagement, view: true),
+                    Grant(PermissionModule.ReportsAnalytics, view: true),
+                ]),
+                ("coordinator", "Coordinator", "Scheduling and calendar coordination with leave approval.", "/coordinator",
+                [
+                    Grant(PermissionModule.SessionCalendarManagement, view: true, create: true, edit: true),
+                    Grant(PermissionModule.LeaveManagement, view: true, approve: true),
+                    Grant(PermissionModule.UserManagement, view: true),
+                    Grant(PermissionModule.CourseBatchManagement, view: true),
+                ]),
+                ("management", "Management", "Read-only executive dashboards and reports.", "/management",
+                [
+                    Grant(PermissionModule.ReportsAnalytics, view: true),
+                ]),
+                ("student", "Student", "Learner experience surfaced through the parent account.", "/student", []),
+            ];
         }
 
         private static async Task SeedMenusAsync(ReaderNestDbContext context)

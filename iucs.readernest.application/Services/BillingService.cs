@@ -39,6 +39,71 @@ namespace iucs.readernest.application.Services
             return plans.Select(p => p.ToDto()).ToList();
         }
 
+        public async Task<IReadOnlyList<PaymentAccountDto>> ListPaymentAccountsAsync(CancellationToken cancellationToken = default)
+        {
+            var accounts = await _unitOfWork.Repository<PaymentAccount>().Query()
+                .OrderBy(a => a.Department)
+                .ToListAsync(cancellationToken);
+
+            var result = new List<PaymentAccountDto>(accounts.Count);
+            foreach (var account in accounts)
+            {
+                var transactions = await _unitOfWork.Repository<PaymentTransaction>().Query()
+                    .Where(t => t.PaymentAccountId == account.Id)
+                    .Include(t => t.Invoice).ThenInclude(i => i.Child)
+                    .OrderByDescending(t => t.CreatedAtUtc)
+                    .ToListAsync(cancellationToken);
+
+                result.Add(new PaymentAccountDto
+                {
+                    Id = account.Id,
+                    Name = account.Name,
+                    Department = account.Department,
+                    GatewayProvider = account.GatewayProvider,
+                    GatewayAccountRef = account.GatewayAccountRef,
+                    IsActive = account.IsActive,
+                    TransactionCount = transactions.Count(t => t.Status == TransactionStatus.Success),
+                    TotalCollected = transactions
+                        .Where(t => t.Status == TransactionStatus.Success)
+                        .Sum(t => t.Amount),
+                    RecentTransactions = transactions.Take(5).Select(t => new PaymentAccountTransactionDto
+                    {
+                        Id = t.Id,
+                        InvoiceNumber = t.Invoice.InvoiceNumber,
+                        StudentName = t.Invoice.Child is { } c ? $"{c.FirstName} {c.LastName}".Trim() : null,
+                        Amount = t.Amount,
+                        Status = t.Status,
+                        DateUtc = t.PaidAtUtc ?? t.CreatedAtUtc,
+                    }).ToList(),
+                });
+            }
+
+            return result;
+        }
+
+        public async Task SetParentPaymentAccountAsync(
+            SavePaymentMappingRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var parent = await _unitOfWork.Repository<ParentProfile>()
+                .FirstOrDefaultAsync(p => p.UserId == request.ParentUserId, cancellationToken)
+                ?? throw new NotFoundException("No parent profile is linked to that account.");
+
+            var accountExists = await _unitOfWork.Repository<PaymentAccount>()
+                .ExistsAsync(a => a.Id == request.PaymentAccountId, cancellationToken);
+            if (!accountExists)
+            {
+                throw new NotFoundException(nameof(PaymentAccount), request.PaymentAccountId);
+            }
+
+            parent.PaymentAccountId = request.PaymentAccountId;
+            _unitOfWork.Repository<ParentProfile>().Update(parent);
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(ParentProfile), parent.Id.ToString(),
+                $"Mapped to payment account {request.PaymentAccountId}", cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
         public async Task<PackagePlanDto> CreatePlanAsync(
             SavePackagePlanRequest request,
             CancellationToken cancellationToken = default)
@@ -106,15 +171,21 @@ namespace iucs.readernest.application.Services
             CreateInvoiceRequest request,
             CancellationToken cancellationToken = default)
         {
-            var parentExists = await _unitOfWork.Repository<ParentProfile>()
-                .ExistsAsync(p => p.Id == request.ParentProfileId, cancellationToken);
-            if (!parentExists)
+            var parent = await _unitOfWork.Repository<ParentProfile>()
+                .FirstOrDefaultAsync(p => p.Id == request.ParentProfileId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ParentProfile), request.ParentProfileId);
+
+            // Admin override (Payment Gateway Mapping): if this parent is pinned to a
+            // specific account, route through it; otherwise fall back to the invoice's
+            // department account (the default dual-gateway behaviour).
+            PaymentAccount? account = null;
+            if (parent.PaymentAccountId.HasValue)
             {
-                throw new NotFoundException(nameof(ParentProfile), request.ParentProfileId);
+                account = await _unitOfWork.Repository<PaymentAccount>()
+                    .FirstOrDefaultAsync(a => a.Id == parent.PaymentAccountId.Value && a.IsActive, cancellationToken);
             }
 
-            // Dual-gateway requirement: every invoice routes through its department's account
-            var account = await _unitOfWork.Repository<PaymentAccount>()
+            account ??= await _unitOfWork.Repository<PaymentAccount>()
                 .FirstOrDefaultAsync(a => a.Department == request.Department && a.IsActive, cancellationToken)
                 ?? throw new NotFoundException($"No active payment account is configured for the {request.Department} department.");
 

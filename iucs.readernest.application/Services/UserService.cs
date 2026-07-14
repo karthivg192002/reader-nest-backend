@@ -4,6 +4,8 @@ using iucs.readernest.application.Dto.Common;
 using iucs.readernest.application.Dto.Users;
 using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
+using iucs.readernest.domain.Entities.Communication;
+using iucs.readernest.domain.Entities.Integrations;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using iucs.readernest.domain.Repository;
@@ -17,17 +19,23 @@ namespace iucs.readernest.application.Services
         private readonly IPasswordHasher _passwordHasher;
         private readonly INotificationService _notifications;
         private readonly IAuditLogService _auditLog;
+        private readonly IEmailSender _emailSender;
+        private readonly IWhatsAppSender _whatsAppSender;
 
         public UserService(
             IUnitOfWork unitOfWork,
             IPasswordHasher passwordHasher,
             INotificationService notifications,
-            IAuditLogService auditLog)
+            IAuditLogService auditLog,
+            IEmailSender emailSender,
+            IWhatsAppSender whatsAppSender)
         {
             _unitOfWork = unitOfWork;
             _passwordHasher = passwordHasher;
             _notifications = notifications;
             _auditLog = auditLog;
+            _emailSender = emailSender;
+            _whatsAppSender = whatsAppSender;
         }
 
         public async Task<PagedResult<UserDto>> ListAsync(
@@ -178,14 +186,13 @@ namespace iucs.readernest.application.Services
 
             // Requirement: the account holder receives login credentials on creation.
             // The plain-text temp password lives only in this email, never in the database.
+            var (subject, body) = BuildWelcomeMessage(user.FirstName, user.Email, temporaryPassword);
             await _notifications.SendEmailAsync(
                 user.Id,
                 user.Email,
                 NotificationType.General,
-                "Your Reader Nest account",
-                $"Hello {user.FirstName},\n\nYour Reader Nest account is ready.\n\n" +
-                $"Login: {user.Email}\nTemporary password: {temporaryPassword}\n\n" +
-                "Please sign in and change your password.",
+                subject,
+                body,
                 cancellationToken);
 
             await _auditLog.StageAsync(AuditAction.Create, nameof(User), user.Id.ToString(), cancellationToken: cancellationToken);
@@ -292,6 +299,109 @@ namespace iucs.readernest.application.Services
                 userId.ToString(),
                 cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
+        public async Task ResendCredentialsAsync(
+            Guid userId,
+            CredentialChannel channel,
+            CancellationToken cancellationToken = default)
+        {
+            var user = await _unitOfWork.Repository<User>().GetByIdAsync(userId, cancellationToken)
+                ?? throw new NotFoundException(nameof(User), userId);
+
+            // Gate on the channel's integration being switched on (is_enabled). Do this
+            // before regenerating the password so a disabled channel changes nothing.
+            var channelKey = channel == CredentialChannel.WhatsApp ? "whatsapp" : "email";
+            if (!await IsIntegrationEnabledAsync(channelKey, cancellationToken))
+            {
+                throw new DomainValidationException(
+                    $"{channel} delivery is turned off. Enable it in Settings → Integrations first.");
+            }
+
+            var temporaryPassword = TemporaryPasswordGenerator.Generate();
+            var (subject, body) = BuildWelcomeMessage(user.FirstName, user.Email, temporaryPassword);
+
+            // Deliver BEFORE resetting the password: if the send fails we must not
+            // leave the account with a new password nobody received. The senders
+            // throw on failure so the admin gets a clear reason.
+            var notificationChannel = NotificationChannel.Email;
+            try
+            {
+                switch (channel)
+                {
+                    case CredentialChannel.WhatsApp:
+                        if (string.IsNullOrWhiteSpace(user.Phone))
+                        {
+                            throw new DomainValidationException("This account has no phone number on file for WhatsApp.");
+                        }
+
+                        notificationChannel = NotificationChannel.WhatsApp;
+                        await _whatsAppSender.SendAsync(user.Phone, body, cancellationToken);
+                        break;
+
+                    default:
+                        await _emailSender.SendAsync(user.Email, subject, body, cancellationToken);
+                        break;
+                }
+            }
+            catch (AppException)
+            {
+                throw; // already a friendly, mapped failure
+            }
+            catch (Exception ex)
+            {
+                throw new DomainValidationException($"Could not send the {channel} message: {ex.Message}");
+            }
+
+            user.PasswordHash = _passwordHasher.Hash(temporaryPassword);
+            _unitOfWork.Repository<User>().Update(user);
+
+            await _unitOfWork.Repository<Notification>().AddAsync(
+                new Notification
+                {
+                    RecipientUserId = user.Id,
+                    Type = NotificationType.General,
+                    Channel = notificationChannel,
+                    Subject = subject,
+                    Body = $"Onboarding credentials re-sent to {user.Email}.",
+                    Status = NotificationStatus.Sent,
+                    SentAtUtc = DateTime.UtcNow,
+                },
+                cancellationToken);
+
+            await _auditLog.StageAsync(
+                AuditAction.Update,
+                nameof(User),
+                user.Id.ToString(),
+                $"Resent onboarding credentials via {channel}",
+                cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
+        public async Task<CredentialChannelsDto> GetCredentialChannelsAsync(CancellationToken cancellationToken = default)
+        {
+            return new CredentialChannelsDto
+            {
+                Email = await IsIntegrationEnabledAsync("email", cancellationToken),
+                WhatsApp = await IsIntegrationEnabledAsync("whatsapp", cancellationToken),
+            };
+        }
+
+        private async Task<bool> IsIntegrationEnabledAsync(string key, CancellationToken cancellationToken)
+        {
+            var integration = await _unitOfWork.Repository<Integration>().Query()
+                .FirstOrDefaultAsync(i => i.Key == key, cancellationToken);
+            return integration is { IsEnabled: true };
+        }
+
+        private static (string Subject, string Body) BuildWelcomeMessage(string firstName, string email, string temporaryPassword)
+        {
+            const string subject = "Your Reader Nest account";
+            var body =
+                $"Hello {firstName},\n\nYour Reader Nest account is ready.\n\n" +
+                $"Login: {email}\nTemporary password: {temporaryPassword}\n\n" +
+                "Please sign in and change your password.";
+            return (subject, body);
         }
     }
 }

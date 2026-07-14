@@ -4,6 +4,7 @@ namespace iucs.readernest.domain.Enums
     {
         Email,
         Sms,
-        InApp
+        InApp,
+        WhatsApp
     }
 }

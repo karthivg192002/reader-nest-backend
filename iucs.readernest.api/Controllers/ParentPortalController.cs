@@ -19,11 +19,16 @@ namespace iucs.readernest.api.Controllers
     {
         private readonly IParentPortalService _parentPortal;
         private readonly IEnrollmentService _enrollmentService;
+        private readonly IIntegrationService _integrationService;
 
-        public ParentPortalController(IParentPortalService parentPortal, IEnrollmentService enrollmentService)
+        public ParentPortalController(
+            IParentPortalService parentPortal,
+            IEnrollmentService enrollmentService,
+            IIntegrationService integrationService)
         {
             _parentPortal = parentPortal;
             _enrollmentService = enrollmentService;
+            _integrationService = integrationService;
         }
 
         [HttpGet("dashboard")]
@@ -58,6 +63,13 @@ namespace iucs.readernest.api.Controllers
         public async Task<ActionResult<IReadOnlyList<InvoiceDto>>> Invoices(CancellationToken cancellationToken)
         {
             return Ok(await _parentPortal.GetInvoicesAsync(UserId(), cancellationToken));
+        }
+
+        /// <summary>Enabled payment gateways for the Pay Now popup; the UI adds a Cash option on top.</summary>
+        [HttpGet("payment-methods")]
+        public async Task<ActionResult<IReadOnlyList<PaymentMethodOptionDto>>> PaymentMethods(CancellationToken cancellationToken)
+        {
+            return Ok(await _integrationService.GetEnabledPaymentMethodsAsync(cancellationToken));
         }
 
         /// <summary>Grant-checked worksheet download (books stay view-only).</summary>

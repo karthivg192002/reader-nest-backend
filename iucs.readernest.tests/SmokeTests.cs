@@ -3,6 +3,7 @@ using iucs.readernest.application.Dto.Auth;
 using iucs.readernest.application.Dto.Batches;
 using iucs.readernest.application.Dto.Billing;
 using iucs.readernest.application.Dto.Courses;
+using iucs.readernest.application.Dto.Enrollment;
 using iucs.readernest.application.Dto.Payouts;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Dto.Users;
@@ -13,6 +14,7 @@ using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -34,7 +36,9 @@ namespace iucs.readernest.tests
 
         private AuthService CreateAuthService() => new(_db.UnitOfWork, _hasher, new FakeTokenService(), _auditLog);
 
-        private UserService CreateUserService() => new(_db.UnitOfWork, _hasher, _notifications, _auditLog);
+        private readonly FakeWhatsAppSender _whatsAppSender = new();
+
+        private UserService CreateUserService() => new(_db.UnitOfWork, _hasher, _notifications, _auditLog, _emailSender, _whatsAppSender);
 
         private CourseService CreateCourseService() => new(_db.UnitOfWork, _auditLog);
 
@@ -45,6 +49,8 @@ namespace iucs.readernest.tests
         private SessionService CreateSessionService() => new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser);
 
         private BillingService CreateBillingService() => new(_db.UnitOfWork, _auditLog, new FakePaymentGateway(), _notifications);
+
+        private EnrollmentService CreateEnrollmentService() => new(_db.UnitOfWork, _auditLog);
 
         [Fact]
         public async Task Login_Succeeds_WithValidCredentials()
@@ -186,6 +192,30 @@ namespace iucs.readernest.tests
             Assert.Equal(InvoiceStatus.Paid, paid.Status);
             var transaction = Assert.Single(_db.Context.PaymentTransactions.ToList());
             Assert.StartsWith("RCP-", transaction.ReceiptNumber);
+        }
+
+        [Fact]
+        public async Task CreateInvoice_RoutesThroughParentAccountOverride_WhenSet()
+        {
+            var parentUser = await _db.SeedUserAsync($"map-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var phonics = new PaymentAccount { Name = "Phonics", Department = Department.Phonics, GatewayProvider = "t", GatewayAccountRef = "ph" };
+            var maths = new PaymentAccount { Name = "Maths", Department = Department.Maths, GatewayProvider = "t", GatewayAccountRef = "ma" };
+            // Parent is pinned to the Maths account even though the invoice is a Phonics one.
+            var parentProfile = new ParentProfile { UserId = parentUser.Id, PaymentAccount = maths };
+            _db.Context.AddRange(phonics, maths, parentProfile);
+            await _db.Context.SaveChangesAsync();
+
+            var invoice = await CreateBillingService().CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = parentProfile.Id,
+                Department = Department.Phonics,
+                Amount = 500,
+                DueDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)),
+            });
+
+            var stored = await _db.Context.Invoices.FirstAsync(i => i.Id == invoice.Id);
+            Assert.Equal(maths.Id, stored.PaymentAccountId); // override wins over the department account
+            Assert.Equal(Department.Phonics, stored.Department); // department still reflects the course
         }
 
         [Fact]
@@ -338,6 +368,31 @@ namespace iucs.readernest.tests
 
             await Assert.ThrowsAsync<ForbiddenException>(
                 () => CreateSessionService().RecordEngagementAsync(session.Id, EngagementRequest()));
+        }
+
+        [Fact]
+        public async Task ApproveEnrollment_PersistsStatus_UnlocksParent_AndCreatesChild()
+        {
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            _db.Context.ParentProfiles.Add(parentProfile);
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateEnrollmentService();
+            await service.SubmitAsync(parentUser.Id, new SubmitEnrollmentFormRequest { FormDataJson = "{\"childName\":\"Kid One\"}" });
+            var formId = (await service.ListAsync(null)).Single().Id;
+
+            var result = await service.ReviewAsync(formId, new ReviewEnrollmentFormRequest
+            {
+                Approve = true,
+                ChildFirstName = "Kid",
+                ChildLastName = "One",
+            });
+
+            Assert.Equal(EnrollmentFormStatus.Approved, result.Status);
+            var refreshedParent = await _db.Context.ParentProfiles.FirstAsync(p => p.Id == parentProfile.Id);
+            Assert.True(refreshedParent.EnrollmentFormCompleted);
+            Assert.Single(_db.Context.Children.ToList());
         }
 
         private static RecordEngagementRequest EngagementRequest() => new()

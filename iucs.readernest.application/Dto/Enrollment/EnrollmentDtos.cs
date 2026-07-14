@@ -63,4 +63,22 @@ namespace iucs.readernest.application.Dto.Enrollment
 
         public bool IsActive { get; set; }
     }
+
+    /// <summary>Admin students-directory row: a child with its parent and (if enrolled) course resolved.</summary>
+    public class StudentDto
+    {
+        public Guid Id { get; set; }
+
+        public string FullName { get; set; } = null!;
+
+        public int? Age { get; set; }
+
+        public string? AcademicLevel { get; set; }
+
+        public string ParentName { get; set; } = null!;
+
+        public string? CourseName { get; set; }
+
+        public bool IsActive { get; set; }
+    }
 }

@@ -1,6 +1,6 @@
 using iucs.readernest.api.Auth;
-using iucs.readernest.application.Common;
 using iucs.readernest.application.Dto.Common;
+using iucs.readernest.application.Dto.Enrollment;
 using iucs.readernest.application.Dto.Users;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
@@ -14,11 +14,13 @@ namespace iucs.readernest.api.Controllers
     {
         private readonly IUserService _userService;
         private readonly IRoleService _roleService;
+        private readonly IEnrollmentService _enrollmentService;
 
-        public UsersController(IUserService userService, IRoleService roleService)
+        public UsersController(IUserService userService, IRoleService roleService, IEnrollmentService enrollmentService)
         {
             _userService = userService;
             _roleService = roleService;
+            _enrollmentService = enrollmentService;
         }
 
         [HttpGet]
@@ -39,6 +41,14 @@ namespace iucs.readernest.api.Controllers
         public async Task<ActionResult<IReadOnlyList<TeacherOptionDto>>> ListTeachers(CancellationToken cancellationToken)
         {
             return Ok(await _userService.ListTeachersAsync(cancellationToken));
+        }
+
+        /// <summary>Students directory: enrolled children with their parent and course, for the Users → Students tab.</summary>
+        [HttpGet("students")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<StudentDto>>> ListStudents(CancellationToken cancellationToken)
+        {
+            return Ok(await _enrollmentService.ListAllStudentsAsync(cancellationToken));
         }
 
         [HttpGet("{id:guid}")]
@@ -71,6 +81,30 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             return Ok(await _userService.SetStatusAsync(id, request.Status, cancellationToken));
+        }
+
+        /// <summary>
+        /// Regenerates the account's temporary password and (re)sends the onboarding
+        /// welcome message over Email or WhatsApp — used to get parents/teachers their
+        /// first-login credentials. Returns 400 with a reason if delivery fails.
+        /// </summary>
+        [HttpPost("{id:guid}/resend-credentials")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.Edit)]
+        public async Task<IActionResult> ResendCredentials(
+            Guid id,
+            ResendCredentialsRequest request,
+            CancellationToken cancellationToken)
+        {
+            await _userService.ResendCredentialsAsync(id, request.Channel, cancellationToken);
+            return NoContent();
+        }
+
+        /// <summary>Which credential-delivery channels are enabled (Settings → Integrations), so the UI shows only usable Send buttons.</summary>
+        [HttpGet("credential-channels")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.View)]
+        public async Task<ActionResult<CredentialChannelsDto>> GetCredentialChannels(CancellationToken cancellationToken)
+        {
+            return Ok(await _userService.GetCredentialChannelsAsync(cancellationToken));
         }
 
         [HttpGet("{id:guid}/permissions")]
