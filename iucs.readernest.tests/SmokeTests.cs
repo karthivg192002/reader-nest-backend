@@ -42,7 +42,7 @@ namespace iucs.readernest.tests
 
         private PayoutService CreatePayoutService() => new(_db.UnitOfWork, _auditLog, _notifications);
 
-        private SessionService CreateSessionService() => new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications);
+        private SessionService CreateSessionService() => new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser);
 
         private BillingService CreateBillingService() => new(_db.UnitOfWork, _auditLog, new FakePaymentGateway(), _notifications);
 
@@ -281,6 +281,69 @@ namespace iucs.readernest.tests
             Assert.Equal(PayoutItemType.StudentNoShowWaiting, item.Type);
             Assert.Equal(1100, item.Amount);
         }
+
+        [Fact]
+        public async Task RecordEngagement_Allows_AssignedTeacher()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var teacherProfile = await _db.Context.TeacherProfiles.FindAsync(session.TeacherProfileId);
+            _db.CurrentUser.UserId = teacherProfile!.UserId;
+
+            await CreateSessionService().RecordEngagementAsync(session.Id, EngagementRequest());
+
+            Assert.Single(_db.Context.EngagementEvents.ToList());
+        }
+
+        [Fact]
+        public async Task RecordEngagement_Rejects_UnrelatedTeacher()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var otherTeacherUser = await _db.SeedUserAsync($"t2-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            _db.Context.TeacherProfiles.Add(new TeacherProfile { UserId = otherTeacherUser.Id });
+            await _db.Context.SaveChangesAsync();
+            _db.CurrentUser.UserId = otherTeacherUser.Id;
+
+            await Assert.ThrowsAsync<ForbiddenException>(
+                () => CreateSessionService().RecordEngagementAsync(session.Id, EngagementRequest()));
+        }
+
+        [Fact]
+        public async Task RecordEngagement_Allows_ParentWithChildInBatch()
+        {
+            var (batch, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var child = new Child { ParentProfile = parentProfile, FirstName = "Kid", LastName = "One" };
+            _db.Context.AddRange(parentProfile, child);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.Add(new BatchEnrollment { BatchId = batch.Id, ChildId = child.Id });
+            await _db.Context.SaveChangesAsync();
+            _db.CurrentUser.UserId = parentUser.Id;
+
+            await CreateSessionService().RecordEngagementAsync(session.Id, EngagementRequest());
+
+            Assert.Single(_db.Context.EngagementEvents.ToList());
+        }
+
+        [Fact]
+        public async Task RecordEngagement_Rejects_ParentWithoutChildInBatch()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var parentUser = await _db.SeedUserAsync($"p2-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var child = new Child { ParentProfile = parentProfile, FirstName = "Kid", LastName = "Two" };
+            _db.Context.AddRange(parentProfile, child);
+            await _db.Context.SaveChangesAsync();
+            _db.CurrentUser.UserId = parentUser.Id;
+
+            await Assert.ThrowsAsync<ForbiddenException>(
+                () => CreateSessionService().RecordEngagementAsync(session.Id, EngagementRequest()));
+        }
+
+        private static RecordEngagementRequest EngagementRequest() => new()
+        {
+            Events = [new EngagementEntryDto { ParticipantName = "Tester", Type = EngagementEventType.HandRaise }],
+        };
 
         private async Task<(Batch Batch, Course Course, ClassSession Session)> SeedBatchWithSessionAsync(
             int totalSessions,

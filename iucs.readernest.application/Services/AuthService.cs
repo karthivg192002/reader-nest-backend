@@ -53,7 +53,8 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Login, nameof(User), user.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            return BuildResponse(user, permissions, token);
+            var defaultRoute = await ResolveDefaultRouteAsync(user, cancellationToken);
+            return BuildResponse(user, permissions, token, defaultRoute);
         }
 
         public async Task<LoginResponse> GetCurrentUserAsync(Guid userId, CancellationToken cancellationToken = default)
@@ -64,9 +65,38 @@ namespace iucs.readernest.application.Services
                 ?? throw new NotFoundException(nameof(User), userId);
 
             var permissions = await LoadPermissionClaimsAsync(user, cancellationToken);
+            var defaultRoute = await ResolveDefaultRouteAsync(user, cancellationToken);
 
             // No new token on refresh-of-self; caller keeps using its current one.
-            return BuildResponse(user, permissions, null);
+            return BuildResponse(user, permissions, null, defaultRoute);
+        }
+
+        /// <summary>
+        /// The frontend route a user lands on right after login: their assigned
+        /// role's configured route for Sub Admins, else the fixed portal home
+        /// for their account type.
+        /// </summary>
+        private async Task<string> ResolveDefaultRouteAsync(User user, CancellationToken cancellationToken)
+        {
+            if (user.Role == UserRole.SubAdmin && user.RoleDefinitionId.HasValue)
+            {
+                var role = await _unitOfWork.Repository<RoleDefinition>()
+                    .GetByIdAsync(user.RoleDefinitionId.Value, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(role?.DefaultRoute))
+                {
+                    return role.DefaultRoute;
+                }
+            }
+
+            return user.Role switch
+            {
+                UserRole.Admin => "/admin",
+                UserRole.Teacher => "/teacher",
+                UserRole.Parent => "/parent",
+                UserRole.AdmissionTeam => "/admission",
+                UserRole.SubAdmin => "/subadmin",
+                _ => "/login",
+            };
         }
 
         private async Task<IReadOnlyList<string>> LoadPermissionClaimsAsync(User user, CancellationToken cancellationToken)
@@ -93,7 +123,7 @@ namespace iucs.readernest.application.Services
             return claims;
         }
 
-        private static LoginResponse BuildResponse(User user, IReadOnlyList<string> permissions, TokenResult? token)
+        private static LoginResponse BuildResponse(User user, IReadOnlyList<string> permissions, TokenResult? token, string defaultRoute)
         {
             return new LoginResponse
             {
@@ -101,6 +131,7 @@ namespace iucs.readernest.application.Services
                 ExpiresAtUtc = token?.ExpiresAtUtc ?? default,
                 User = user.ToDto(),
                 Permissions = permissions,
+                DefaultRoute = defaultRoute,
             };
         }
     }

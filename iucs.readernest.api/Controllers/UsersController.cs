@@ -87,7 +87,7 @@ namespace iucs.readernest.api.Controllers
             List<PermissionDto> permissions,
             CancellationToken cancellationToken)
         {
-            await _userService.SetPermissionsAsync(id, permissions, cancellationToken);
+            await _userService.SetPermissionsAsync(id, permissions, cancellationToken: cancellationToken);
             return NoContent();
         }
 
@@ -100,13 +100,16 @@ namespace iucs.readernest.api.Controllers
             return Ok(roles.Select(r => r.Name).ToList());
         }
 
-        /// <summary>Replaces the user's grants with the DB role's matrix.</summary>
+        /// <summary>
+        /// Assigns the named DB role to the user: replaces their grants with its
+        /// matrix and records the assignment, which drives their post-login default route.
+        /// </summary>
         [HttpPut("{id:guid}/permissions/preset/{preset}")]
         [HasPermission(PermissionModule.UserManagement, PermissionAction.Edit)]
         public async Task<IActionResult> ApplyPermissionPreset(Guid id, string preset, CancellationToken cancellationToken)
         {
-            var permissions = await _roleService.ResolvePermissionsAsync(preset, cancellationToken);
-            if (permissions is null)
+            var role = await _roleService.FindByNameAsync(preset, cancellationToken);
+            if (role is null)
             {
                 var roles = await _roleService.ListAsync(cancellationToken);
                 return NotFound(new Microsoft.AspNetCore.Mvc.ProblemDetails
@@ -117,7 +120,7 @@ namespace iucs.readernest.api.Controllers
                 });
             }
 
-            await _userService.SetPermissionsAsync(id, permissions, cancellationToken);
+            await _userService.SetPermissionsAsync(id, role.Permissions, role.Id, cancellationToken);
             return NoContent();
         }
     }

@@ -42,7 +42,7 @@ namespace iucs.readernest.application.Services
             }
 
             var integration = new Integration();
-            Apply(integration, request, key);
+            Apply(integration, request, key, request.Config);
             await repository.AddAsync(integration, cancellationToken);
 
             await _auditLog.StageAsync(AuditAction.Create, nameof(Integration), key, cancellationToken: cancellationToken);
@@ -72,7 +72,16 @@ namespace iucs.readernest.application.Services
                 throw new ConflictException($"An integration with key '{key}' already exists.");
             }
 
-            Apply(integration, request, key);
+            // The client only ever sees masked secrets back; if a field still holds
+            // its mask placeholder the admin didn't touch it, so keep the real value.
+            var existingConfig = DecodeConfig(integration.ConfigJson);
+            var resolvedConfig = request.Config.ToDictionary(
+                kv => kv.Key,
+                kv => IsSecretField(kv.Key) && existingConfig.TryGetValue(kv.Key, out var current) && kv.Value == Mask(current)
+                    ? current
+                    : kv.Value);
+
+            Apply(integration, request, key, resolvedConfig);
             repository.Update(integration);
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(Integration), key, cancellationToken: cancellationToken);
@@ -115,28 +124,56 @@ namespace iucs.readernest.application.Services
             }
         }
 
-        private static void Apply(Integration integration, SaveIntegrationRequest request, string key)
+        private static void Apply(Integration integration, SaveIntegrationRequest request, string key, Dictionary<string, string?> config)
         {
             integration.Key = key;
             integration.Name = request.Name.Trim();
             integration.Category = request.Category;
             integration.Description = string.IsNullOrWhiteSpace(request.Description) ? null : request.Description.Trim();
             integration.IsEnabled = request.IsEnabled;
-            integration.ConfigJson = request.Config.Count > 0 ? JsonSerializer.Serialize(request.Config) : null;
+            integration.ConfigJson = config.Count > 0 ? JsonSerializer.Serialize(config) : null;
         }
 
-        private static IntegrationDto ToDto(Integration integration) => new()
+        private static Dictionary<string, string?> DecodeConfig(string? configJson)
         {
-            Id = integration.Id,
-            Key = integration.Key,
-            Name = integration.Name,
-            Category = integration.Category,
-            Description = integration.Description,
-            IsEnabled = integration.IsEnabled,
-            Config = string.IsNullOrWhiteSpace(integration.ConfigJson)
+            return string.IsNullOrWhiteSpace(configJson)
                 ? []
-                : JsonSerializer.Deserialize<Dictionary<string, string?>>(integration.ConfigJson) ?? [],
-            IsSystem = integration.IsSystem,
-        };
+                : JsonSerializer.Deserialize<Dictionary<string, string?>>(configJson) ?? [];
+        }
+
+        /// <summary>Field names that hold credentials/secrets and must never round-trip to the client in the clear.</summary>
+        private static readonly string[] SecretFieldHints = ["secret", "key", "token", "password"];
+
+        private static bool IsSecretField(string fieldName) =>
+            SecretFieldHints.Any(hint => fieldName.Contains(hint, StringComparison.OrdinalIgnoreCase));
+
+        /// <summary>Masks all but the last 4 characters, e.g. "sk_live_abcd1234" -> "••••••••••••1234".</summary>
+        private static string? Mask(string? value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return value;
+            }
+
+            return value.Length <= 4
+                ? new string('•', value.Length)
+                : new string('•', value.Length - 4) + value[^4..];
+        }
+
+        private static IntegrationDto ToDto(Integration integration)
+        {
+            var config = DecodeConfig(integration.ConfigJson);
+            return new IntegrationDto
+            {
+                Id = integration.Id,
+                Key = integration.Key,
+                Name = integration.Name,
+                Category = integration.Category,
+                Description = integration.Description,
+                IsEnabled = integration.IsEnabled,
+                Config = config.ToDictionary(kv => kv.Key, kv => IsSecretField(kv.Key) ? Mask(kv.Value) : kv.Value),
+                IsSystem = integration.IsSystem,
+            };
+        }
     }
 }

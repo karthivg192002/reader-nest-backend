@@ -118,8 +118,9 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _sessionService.AddRecordingAsync(id, request, cancellationToken));
         }
 
+        /// <summary>Parents see their own child's recordings only via the scoped parent-portal resources endpoint.</summary>
         [HttpGet("{id:guid}/recordings")]
-        [Authorize]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
         public async Task<ActionResult<IReadOnlyList<SessionRecordingDto>>> ListRecordings(
             Guid id,
             CancellationToken cancellationToken)
@@ -161,7 +162,7 @@ namespace iucs.readernest.api.Controllers
         }
 
         [HttpGet("{id:guid}/attendance")]
-        [Authorize]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
         public async Task<ActionResult<IReadOnlyList<SessionAttendanceDto>>> ListAttendance(
             Guid id,
             [FromServices] IAcademicOpsService academicOps,

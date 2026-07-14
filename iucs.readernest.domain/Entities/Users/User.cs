@@ -37,6 +37,14 @@ namespace iucs.readernest.domain.Entities.Users
 
         public DateTime? LastLoginAtUtc { get; set; }
 
+        /// <summary>
+        /// Named role (preset) currently assigned; drives the post-login default
+        /// route. Only meaningful for Sub Admin accounts today.
+        /// </summary>
+        public Guid? RoleDefinitionId { get; set; }
+
+        public RoleDefinition? RoleDefinition { get; set; }
+
         public ParentProfile? ParentProfile { get; set; }
 
         public TeacherProfile? TeacherProfile { get; set; }

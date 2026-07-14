@@ -14,5 +14,8 @@ namespace iucs.readernest.application.Services
 
         /// <summary>The role's permission matrix by role name; null when no such role exists.</summary>
         Task<IReadOnlyList<PermissionDto>?> ResolvePermissionsAsync(string name, CancellationToken cancellationToken = default);
+
+        /// <summary>Full role record by name (case-insensitive), for applying it to a user; null when no such role exists.</summary>
+        Task<RoleDto?> FindByNameAsync(string name, CancellationToken cancellationToken = default);
     }
 }

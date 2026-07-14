@@ -10,6 +10,9 @@ namespace iucs.readernest.application.Services
 
         Task<IReadOnlyList<CourseDto>> ListAsync(bool includeInactive = false, CancellationToken cancellationToken = default);
 
+        /// <summary>Active courses as id/name pairs, for any authenticated role that just needs to pick one (e.g. a teacher recommending a course after a demo).</summary>
+        Task<IReadOnlyList<CourseOptionDto>> ListOptionsAsync(CancellationToken cancellationToken = default);
+
         Task<CourseDto> GetAsync(Guid id, CancellationToken cancellationToken = default);
 
         Task<CourseDto> CreateAsync(SaveCourseRequest request, CancellationToken cancellationToken = default);

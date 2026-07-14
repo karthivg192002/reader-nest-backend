@@ -2,6 +2,7 @@ using iucs.readernest.api.Auth;
 using iucs.readernest.application.Dto.Courses;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace iucs.readernest.api.Controllers
@@ -32,6 +33,14 @@ namespace iucs.readernest.api.Controllers
         {
             var category = await _courseService.CreateCategoryAsync(request, cancellationToken);
             return CreatedAtAction(nameof(ListCategories), null, category);
+        }
+
+        /// <summary>Active courses as id/name pairs; any signed-in role can use this to pick one (e.g. a teacher recommending a course after a demo).</summary>
+        [HttpGet("options")]
+        [Authorize]
+        public async Task<ActionResult<IReadOnlyList<CourseOptionDto>>> ListOptions(CancellationToken cancellationToken)
+        {
+            return Ok(await _courseService.ListOptionsAsync(cancellationToken));
         }
 
         [HttpGet]

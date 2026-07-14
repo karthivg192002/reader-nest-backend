@@ -51,4 +51,13 @@ namespace iucs.readernest.application.Common.Exceptions
         {
         }
     }
+
+    /// <summary>Authenticated, but not allowed to act on this specific resource (e.g. someone else's session).</summary>
+    public class ForbiddenException : AppException
+    {
+        public ForbiddenException(string message)
+            : base(403, message)
+        {
+        }
+    }
 }

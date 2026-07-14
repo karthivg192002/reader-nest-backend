@@ -26,6 +26,10 @@ namespace iucs.readernest.application.Services
 
         Task<IReadOnlyList<PermissionDto>> GetPermissionsAsync(Guid userId, CancellationToken cancellationToken = default);
 
-        Task SetPermissionsAsync(Guid userId, IReadOnlyList<PermissionDto> permissions, CancellationToken cancellationToken = default);
+        Task SetPermissionsAsync(
+            Guid userId,
+            IReadOnlyList<PermissionDto> permissions,
+            Guid? roleDefinitionId = null,
+            CancellationToken cancellationToken = default);
     }
 }

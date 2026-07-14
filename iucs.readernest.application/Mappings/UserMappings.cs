@@ -18,6 +18,7 @@ namespace iucs.readernest.application.Mappings
                 Status = user.Status,
                 TimeZoneId = user.TimeZoneId,
                 Department = user.TeacherProfile?.Department,
+                RoleDefinitionId = user.RoleDefinitionId,
                 CreatedAtUtc = user.CreatedAtUtc,
                 LastLoginAtUtc = user.LastLoginAtUtc,
             };

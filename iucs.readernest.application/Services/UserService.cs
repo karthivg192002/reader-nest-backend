@@ -108,12 +108,26 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("Admin accounts cannot be created through this endpoint.");
             }
 
+            if (request.RoleDefinitionId.HasValue && request.Role != UserRole.SubAdmin)
+            {
+                throw new DomainValidationException("A role can only be assigned to Sub Admin users.");
+            }
+
             var email = request.Email.Trim().ToLowerInvariant();
             var users = _unitOfWork.Repository<User>();
 
             if (await users.ExistsAsync(u => u.Email == email, cancellationToken))
             {
                 throw new ConflictException($"A user with email '{email}' already exists.");
+            }
+
+            RoleDefinition? assignedRole = null;
+            if (request.RoleDefinitionId.HasValue)
+            {
+                assignedRole = await _unitOfWork.Repository<RoleDefinition>().Query()
+                    .Include(r => r.Permissions)
+                    .FirstOrDefaultAsync(r => r.Id == request.RoleDefinitionId.Value, cancellationToken)
+                    ?? throw new NotFoundException(nameof(RoleDefinition), request.RoleDefinitionId.Value);
             }
 
             var temporaryPassword = TemporaryPasswordGenerator.Generate();
@@ -126,6 +140,7 @@ namespace iucs.readernest.application.Services
                 Phone = request.Phone,
                 Role = request.Role,
                 TimeZoneId = string.IsNullOrWhiteSpace(request.TimeZoneId) ? "Asia/Kolkata" : request.TimeZoneId,
+                RoleDefinitionId = assignedRole?.Id,
             };
             await users.AddAsync(user, cancellationToken);
 
@@ -139,6 +154,26 @@ namespace iucs.readernest.application.Services
                     await _unitOfWork.Repository<TeacherProfile>()
                         .AddAsync(new TeacherProfile { User = user, Department = request.Department }, cancellationToken);
                     break;
+            }
+
+            if (assignedRole is not null)
+            {
+                var permissionRepository = _unitOfWork.Repository<SubAdminPermission>();
+                foreach (var grant in assignedRole.Permissions)
+                {
+                    await permissionRepository.AddAsync(
+                        new SubAdminPermission
+                        {
+                            User = user,
+                            Module = grant.Module,
+                            CanView = grant.CanView,
+                            CanCreate = grant.CanCreate,
+                            CanEdit = grant.CanEdit,
+                            CanDelete = grant.CanDelete,
+                            CanApprove = grant.CanApprove,
+                        },
+                        cancellationToken);
+                }
             }
 
             // Requirement: the account holder receives login credentials on creation.
@@ -206,6 +241,7 @@ namespace iucs.readernest.application.Services
         public async Task SetPermissionsAsync(
             Guid userId,
             IReadOnlyList<PermissionDto> permissions,
+            Guid? roleDefinitionId = null,
             CancellationToken cancellationToken = default)
         {
             var user = await _unitOfWork.Repository<User>().GetByIdAsync(userId, cancellationToken)
@@ -214,6 +250,13 @@ namespace iucs.readernest.application.Services
             if (user.Role != UserRole.SubAdmin)
             {
                 throw new DomainValidationException("Module permissions can only be assigned to Sub Admin users.");
+            }
+
+            // Only an explicit role assignment (apply-preset) stamps the user's
+            // named role; hand-editing individual checkboxes leaves it as-is.
+            if (roleDefinitionId.HasValue)
+            {
+                user.RoleDefinitionId = roleDefinitionId;
             }
 
             var repository = _unitOfWork.Repository<SubAdminPermission>();

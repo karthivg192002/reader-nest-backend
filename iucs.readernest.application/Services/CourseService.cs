@@ -67,6 +67,15 @@ namespace iucs.readernest.application.Services
             return courses.Select(c => c.ToDto()).ToList();
         }
 
+        public async Task<IReadOnlyList<CourseOptionDto>> ListOptionsAsync(CancellationToken cancellationToken = default)
+        {
+            return await _unitOfWork.Repository<Course>().Query()
+                .Where(c => c.IsActive)
+                .OrderBy(c => c.Name)
+                .Select(c => new CourseOptionDto { Id = c.Id, Name = c.Name })
+                .ToListAsync(cancellationToken);
+        }
+
         public async Task<CourseDto> GetAsync(Guid id, CancellationToken cancellationToken = default)
         {
             var course = await _unitOfWork.Repository<Course>().Query()

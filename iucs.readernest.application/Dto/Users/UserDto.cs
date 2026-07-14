@@ -24,6 +24,9 @@ namespace iucs.readernest.application.Dto.Users
 
         public Department? Department { get; set; }
 
+        /// <summary>Assigned role (preset) id; only meaningful for Sub Admin accounts.</summary>
+        public Guid? RoleDefinitionId { get; set; }
+
         public DateTime CreatedAtUtc { get; set; }
 
         public DateTime? LastLoginAtUtc { get; set; }

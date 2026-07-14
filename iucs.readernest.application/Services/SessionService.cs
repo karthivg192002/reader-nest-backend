@@ -1,6 +1,7 @@
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Mappings;
+using iucs.readernest.domain.Common;
 using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
@@ -25,17 +26,20 @@ namespace iucs.readernest.application.Services
         private readonly IAuditLogService _auditLog;
         private readonly IPayoutService _payoutService;
         private readonly INotificationService _notificationService;
+        private readonly ICurrentUserService _currentUser;
 
         public SessionService(
             IUnitOfWork unitOfWork,
             IAuditLogService auditLog,
             IPayoutService payoutService,
-            INotificationService notificationService)
+            INotificationService notificationService,
+            ICurrentUserService currentUser)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
             _payoutService = payoutService;
             _notificationService = notificationService;
+            _currentUser = currentUser;
         }
 
         public async Task<IReadOnlyList<ClassSessionDto>> ListAsync(
@@ -515,12 +519,10 @@ namespace iucs.readernest.application.Services
             RecordEngagementRequest request,
             CancellationToken cancellationToken = default)
         {
-            var sessionExists = await _unitOfWork.Repository<ClassSession>()
-                .ExistsAsync(s => s.Id == sessionId, cancellationToken);
-            if (!sessionExists)
-            {
-                throw new NotFoundException(nameof(ClassSession), sessionId);
-            }
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+
+            await EnsureSessionParticipantAsync(session, cancellationToken);
 
             var repository = _unitOfWork.Repository<EngagementEvent>();
             foreach (var entry in request.Events)
@@ -538,6 +540,50 @@ namespace iucs.readernest.application.Services
             }
 
             await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
+        /// <summary>
+        /// Engagement is posted by whoever is actually in the live class (teacher or
+        /// a parent/student), so this endpoint stays open to any signed-in role —
+        /// but the caller must genuinely belong to this specific session, or anyone
+        /// could spam engagement history for a class they have no part in.
+        /// </summary>
+        private async Task EnsureSessionParticipantAsync(ClassSession session, CancellationToken cancellationToken)
+        {
+            var userId = _currentUser.UserId
+                ?? throw new UnauthorizedException("Not signed in.");
+
+            var user = await _unitOfWork.Repository<User>().GetByIdAsync(userId, cancellationToken)
+                ?? throw new UnauthorizedException("Unknown user.");
+
+            if (user.Role == UserRole.Admin)
+            {
+                return;
+            }
+
+            if (user.Role == UserRole.Teacher)
+            {
+                var isAssignedTeacher = await _unitOfWork.Repository<TeacherProfile>()
+                    .ExistsAsync(t => t.Id == session.TeacherProfileId && t.UserId == userId, cancellationToken);
+                if (isAssignedTeacher)
+                {
+                    return;
+                }
+            }
+            else if (user.Role == UserRole.Parent && session.BatchId.HasValue)
+            {
+                var hasChildInBatch = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                    .Where(e => e.BatchId == session.BatchId.Value)
+                    .Join(_unitOfWork.Repository<Child>().Query(), e => e.ChildId, c => c.Id, (e, c) => c.ParentProfileId)
+                    .Join(_unitOfWork.Repository<ParentProfile>().Query(), parentProfileId => parentProfileId, p => p.Id, (parentProfileId, p) => p.UserId)
+                    .AnyAsync(u => u == userId, cancellationToken);
+                if (hasChildInBatch)
+                {
+                    return;
+                }
+            }
+
+            throw new ForbiddenException("You do not have access to this session.");
         }
 
         public async Task<IReadOnlyList<EngagementSummaryDto>> GetEngagementSummaryAsync(

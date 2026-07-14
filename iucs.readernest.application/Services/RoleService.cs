@@ -44,6 +44,7 @@ namespace iucs.readernest.application.Services
                 Name = name,
                 DisplayName = request.DisplayName.Trim(),
                 Description = request.Description?.Trim(),
+                DefaultRoute = NormalizeRoute(request.DefaultRoute),
                 Permissions = MapPermissions(request.Permissions),
             };
             await repository.AddAsync(role, cancellationToken);
@@ -77,6 +78,7 @@ namespace iucs.readernest.application.Services
             role.Name = name;
             role.DisplayName = request.DisplayName.Trim();
             role.Description = request.Description?.Trim();
+            role.DefaultRoute = NormalizeRoute(request.DefaultRoute);
 
             // Replace-all semantics: the role editor submits the full matrix
             var permissionRepository = _unitOfWork.Repository<RolePermission>();
@@ -106,6 +108,11 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException($"System role '{role.Name}' cannot be deleted.");
             }
 
+            if (await _unitOfWork.Repository<User>().ExistsAsync(u => u.RoleDefinitionId == id, cancellationToken))
+            {
+                throw new ConflictException($"Role '{role.DisplayName}' is currently assigned to one or more users and cannot be deleted.");
+            }
+
             var permissionRepository = _unitOfWork.Repository<RolePermission>();
             foreach (var permission in role.Permissions.ToList())
             {
@@ -129,6 +136,16 @@ namespace iucs.readernest.application.Services
             return role?.Permissions.Select(ToPermissionDto).ToList();
         }
 
+        public async Task<RoleDto?> FindByNameAsync(string name, CancellationToken cancellationToken = default)
+        {
+            var key = name.Trim().ToLowerInvariant();
+            var role = await _unitOfWork.Repository<RoleDefinition>().Query()
+                .Include(r => r.Permissions)
+                .FirstOrDefaultAsync(r => r.Name == key, cancellationToken);
+
+            return role is null ? null : ToDto(role);
+        }
+
         private static string NormalizeName(string name)
         {
             var key = name?.Trim().ToLowerInvariant() ?? string.Empty;
@@ -146,6 +163,22 @@ namespace iucs.readernest.application.Services
             {
                 throw new DomainValidationException("Role display name is required.");
             }
+        }
+
+        private static string? NormalizeRoute(string? route)
+        {
+            if (string.IsNullOrWhiteSpace(route))
+            {
+                return null;
+            }
+
+            var trimmed = route.Trim();
+            if (!trimmed.StartsWith('/'))
+            {
+                throw new DomainValidationException("Default route must start with '/'.");
+            }
+
+            return trimmed;
         }
 
         private static List<RolePermission> MapPermissions(IReadOnlyList<PermissionDto> permissions)
@@ -173,6 +206,7 @@ namespace iucs.readernest.application.Services
             Name = role.Name,
             DisplayName = role.DisplayName,
             Description = role.Description,
+            DefaultRoute = role.DefaultRoute,
             IsSystem = role.IsSystem,
             Permissions = role.Permissions
                 .OrderBy(p => p.Module)
