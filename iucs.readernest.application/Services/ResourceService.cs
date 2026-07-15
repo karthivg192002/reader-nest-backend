@@ -1,6 +1,7 @@
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Resources;
 using iucs.readernest.application.Mappings;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Resources;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
@@ -25,6 +26,28 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default)
         {
             var query = _unitOfWork.Repository<Resource>().Query();
+            if (type.HasValue)
+            {
+                query = query.Where(r => r.Type == type.Value);
+            }
+
+            var resources = await query.OrderByDescending(r => r.CreatedAtUtc).ToListAsync(cancellationToken);
+            return resources.Select(r => r.ToDto()).ToList();
+        }
+
+        public async Task<IReadOnlyList<ResourceDto>> ListForTeacherUserAsync(
+            Guid userId,
+            ResourceType? type,
+            CancellationToken cancellationToken = default)
+        {
+            var (batchIds, courseIds) = await ResolveTeacherScopeAsync(userId, cancellationToken);
+
+            var query = _unitOfWork.Repository<Resource>().Query()
+                .Include(r => r.Batch)
+                .Where(r =>
+                    (r.BatchId != null && batchIds.Contains(r.BatchId.Value)) ||
+                    (r.BatchId == null && r.CourseId != null && courseIds.Contains(r.CourseId.Value)));
+
             if (type.HasValue)
             {
                 query = query.Where(r => r.Type == type.Value);
@@ -61,6 +84,23 @@ namespace iucs.readernest.application.Services
             return resource.ToDto();
         }
 
+        public async Task<ResourceDto> CreateForTeacherUserAsync(
+            Guid userId,
+            CreateResourceRequest request,
+            string storedRelativePath,
+            string? mimeType,
+            long sizeBytes,
+            CancellationToken cancellationToken = default)
+        {
+            var (batchIds, _) = await ResolveTeacherScopeAsync(userId, cancellationToken);
+            if (!request.BatchId.HasValue || !batchIds.Contains(request.BatchId.Value))
+            {
+                throw new ForbiddenException("You can only upload resources to your own batches.");
+            }
+
+            return await CreateAsync(request, storedRelativePath, mimeType, sizeBytes, cancellationToken);
+        }
+
         public async Task<Resource> GetForDownloadAsync(Guid id, CancellationToken cancellationToken = default)
         {
             var resource = await _unitOfWork.Repository<Resource>().GetByIdAsync(id, cancellationToken)
@@ -70,6 +110,46 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return resource;
+        }
+
+        public async Task<Resource> GetForTeacherDownloadAsync(Guid userId, Guid id, CancellationToken cancellationToken = default)
+        {
+            var (batchIds, courseIds) = await ResolveTeacherScopeAsync(userId, cancellationToken);
+
+            var resource = await _unitOfWork.Repository<Resource>().GetByIdAsync(id, cancellationToken)
+                ?? throw new NotFoundException(nameof(Resource), id);
+
+            var owns =
+                (resource.BatchId.HasValue && batchIds.Contains(resource.BatchId.Value)) ||
+                (!resource.BatchId.HasValue && resource.CourseId.HasValue && courseIds.Contains(resource.CourseId.Value));
+            if (!owns)
+            {
+                throw new ForbiddenException("This resource is not tied to one of your batches.");
+            }
+
+            await _auditLog.StageAsync(AuditAction.Access, nameof(Resource), resource.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return resource;
+        }
+
+        /// <summary>Resolves the teacher's batch ids and the distinct course ids of those batches.</summary>
+        private async Task<(List<Guid> BatchIds, List<Guid> CourseIds)> ResolveTeacherScopeAsync(
+            Guid userId,
+            CancellationToken cancellationToken)
+        {
+            var teacher = await _unitOfWork.Repository<TeacherProfile>()
+                .FirstOrDefaultAsync(t => t.UserId == userId, cancellationToken)
+                ?? throw new NotFoundException("No teacher profile is linked to the current account.");
+
+            var batches = await _unitOfWork.Repository<Batch>().Query()
+                .Where(b => b.TeacherProfileId == teacher.Id)
+                .Select(b => new { b.Id, b.CourseId })
+                .ToListAsync(cancellationToken);
+
+            return (
+                batches.Select(b => b.Id).ToList(),
+                batches.Select(b => b.CourseId).Distinct().ToList());
         }
 
         public async Task GrantAccessAsync(

@@ -35,6 +35,7 @@ namespace iucs.readernest.api.Data
             await SeedRolesAsync(context);
             await SeedMenusAsync(context);
             await SeedIntegrationsAsync(context);
+            await EnsureCashPaymentMethodAsync(context);
 
             await context.SaveChangesAsync();
         }
@@ -385,7 +386,34 @@ namespace iucs.readernest.api.Data
                     IsEnabled = true,
                     IsSystem = true,
                     ConfigJson = Json(new() { ["domain"] = "meet.techmisai.com" }),
-                });
+                },
+                CashPaymentMethod());
         }
+
+        /// <summary>
+        /// Cash is a first-class payment method managed like a gateway in Settings → Integrations,
+        /// so it shows in the parent Pay-Now popup only while enabled. Runs every startup (insert-if-absent)
+        /// so it also lands in databases that were seeded before Cash existed.
+        /// </summary>
+        private static async Task EnsureCashPaymentMethodAsync(ReaderNestDbContext context)
+        {
+            if (await context.Integrations.AnyAsync(i => i.Key == "cash"))
+            {
+                return;
+            }
+
+            context.Integrations.Add(CashPaymentMethod());
+        }
+
+        private static Integration CashPaymentMethod() => new()
+        {
+            Key = "cash",
+            Name = "Cash",
+            Category = IntegrationCategory.PaymentGateway,
+            Description = "Offline cash payment collected at the centre.",
+            IsEnabled = true,
+            IsSystem = true,
+            ConfigJson = "{}",
+        };
     }
 }

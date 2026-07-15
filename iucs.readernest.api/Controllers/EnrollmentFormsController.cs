@@ -60,6 +60,17 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _enrollmentService.ReviewAsync(id, request, cancellationToken));
         }
 
+        /// <summary>Admin edits the submitted answers before approval.</summary>
+        [HttpPut("{id:guid}")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.Edit)]
+        public async Task<ActionResult<EnrollmentFormDto>> Update(
+            Guid id,
+            SubmitEnrollmentFormRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _enrollmentService.UpdateFormDataAsync(id, request, cancellationToken));
+        }
+
         /// <summary>Admin download of the submitted form as a JSON document.</summary>
         [HttpGet("{id:guid}/download")]
         [HasPermission(PermissionModule.UserManagement, PermissionAction.View)]

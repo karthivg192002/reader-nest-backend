@@ -90,6 +90,39 @@ namespace iucs.readernest.application.Services
             return ToDto(form);
         }
 
+        public async Task<EnrollmentFormDto> UpdateFormDataAsync(
+            Guid id,
+            SubmitEnrollmentFormRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                using var _ = JsonDocument.Parse(request.FormDataJson);
+            }
+            catch (JsonException)
+            {
+                throw new DomainValidationException("The submitted form data is not valid JSON.");
+            }
+
+            // Load tracked so the mutation persists (BaseQuery is AsNoTracking).
+            var form = await _unitOfWork.Repository<EnrollmentForm>()
+                .FirstOrDefaultAsync(f => f.Id == id, cancellationToken)
+                ?? throw new NotFoundException(nameof(EnrollmentForm), id);
+
+            if (form.Status == EnrollmentFormStatus.Approved)
+            {
+                throw new ConflictException("An approved enrollment form can no longer be edited.");
+            }
+
+            form.FormDataJson = request.FormDataJson;
+            _unitOfWork.Repository<EnrollmentForm>().Update(form);
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(EnrollmentForm), form.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return await GetAsync(form.Id, cancellationToken);
+        }
+
         public async Task<EnrollmentFormDto> ReviewAsync(
             Guid id,
             ReviewEnrollmentFormRequest request,

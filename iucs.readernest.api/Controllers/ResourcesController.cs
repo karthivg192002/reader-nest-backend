@@ -1,8 +1,10 @@
+using System.Security.Claims;
 using iucs.readernest.api.Auth;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Resources;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace iucs.readernest.api.Controllers
@@ -29,6 +31,60 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             return Ok(await _resourceService.ListAsync(type, cancellationToken));
+        }
+
+        /// <summary>Teacher portal: resources tied to the signed-in teacher's own batches/courses.</summary>
+        [HttpGet("mine")]
+        [Authorize(Roles = nameof(UserRole.Teacher))]
+        public async Task<ActionResult<IReadOnlyList<ResourceDto>>> Mine(
+            [FromQuery] ResourceType? type,
+            CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _resourceService.ListForTeacherUserAsync(userId, type, cancellationToken));
+        }
+
+        /// <summary>Teacher portal: upload a resource to one of the teacher's own batches.</summary>
+        [HttpPost("mine")]
+        [Authorize(Roles = nameof(UserRole.Teacher))]
+        [RequestSizeLimit(MaxUploadBytes)]
+        public async Task<ActionResult<ResourceDto>> UploadMine(
+            [FromForm] CreateResourceRequest request,
+            IFormFile file,
+            CancellationToken cancellationToken)
+        {
+            if (file.Length == 0)
+            {
+                return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "The uploaded file is empty." });
+            }
+
+            await using var stream = file.OpenReadStream();
+            var stored = await _fileStorage.StoreAsync(stream, file.FileName, cancellationToken);
+            var mimeType = string.IsNullOrWhiteSpace(file.ContentType) ? null : file.ContentType;
+
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var resource = await _resourceService.CreateForTeacherUserAsync(
+                userId, request, stored.RelativePath, mimeType, stored.SizeBytes, cancellationToken);
+
+            return CreatedAtAction(nameof(Mine), null, resource);
+        }
+
+        /// <summary>Teacher portal: download a resource the teacher owns (403 otherwise).</summary>
+        [HttpGet("{id:guid}/mine/download")]
+        [Authorize(Roles = nameof(UserRole.Teacher))]
+        public async Task<IActionResult> DownloadMine(Guid id, CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var resource = await _resourceService.GetForTeacherDownloadAsync(userId, id, cancellationToken);
+            var absolutePath = _fileStorage.GetAbsolutePath(resource.FileUrl);
+
+            if (!System.IO.File.Exists(absolutePath))
+            {
+                return NotFound(new ProblemDetails { Status = 404, Title = "Not Found", Detail = "The stored file is missing." });
+            }
+
+            var mimeType = string.IsNullOrWhiteSpace(resource.MimeType) ? "application/octet-stream" : resource.MimeType;
+            return PhysicalFile(absolutePath, mimeType, $"{resource.Title}{Path.GetExtension(resource.FileUrl)}");
         }
 
         [HttpPost]

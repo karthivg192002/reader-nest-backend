@@ -19,6 +19,9 @@ namespace iucs.readernest.application.Dto.Resources
 
         public Guid? BatchId { get; set; }
 
+        /// <summary>Batch display name, when the resource is tied to a batch.</summary>
+        public string? BatchName { get; set; }
+
         public bool IsDownloadable { get; set; }
 
         public string? Description { get; set; }

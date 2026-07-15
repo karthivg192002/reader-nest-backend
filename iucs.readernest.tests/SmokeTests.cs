@@ -395,6 +395,31 @@ namespace iucs.readernest.tests
             Assert.Single(_db.Context.Children.ToList());
         }
 
+        [Fact]
+        public async Task UpdateEnrollmentForm_PersistsEditedAnswers_AndRejectsApprovedForms()
+        {
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            _db.Context.ParentProfiles.Add(new ParentProfile { UserId = parentUser.Id });
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateEnrollmentService();
+            await service.SubmitAsync(parentUser.Id, new SubmitEnrollmentFormRequest { FormDataJson = "{\"childName\":\"Old Name\",\"grade\":\"1\"}" });
+            var formId = (await service.ListAsync(null)).Single().Id;
+
+            var edited = await service.UpdateFormDataAsync(formId, new SubmitEnrollmentFormRequest
+            {
+                FormDataJson = "{\"childName\":\"New Name\",\"grade\":\"2\"}",
+            });
+            Assert.Contains("New Name", edited.FormDataJson);
+            var reloaded = await service.GetAsync(formId);
+            Assert.Contains("New Name", reloaded.FormDataJson);
+
+            // Once approved, the form is immutable.
+            await service.ReviewAsync(formId, new ReviewEnrollmentFormRequest { Approve = true, ChildFirstName = "New", ChildLastName = "Name" });
+            await Assert.ThrowsAsync<ConflictException>(
+                () => service.UpdateFormDataAsync(formId, new SubmitEnrollmentFormRequest { FormDataJson = "{\"childName\":\"Later\"}" }));
+        }
+
         private static RecordEngagementRequest EngagementRequest() => new()
         {
             Events = [new EngagementEntryDto { ParticipantName = "Tester", Type = EngagementEventType.HandRaise }],

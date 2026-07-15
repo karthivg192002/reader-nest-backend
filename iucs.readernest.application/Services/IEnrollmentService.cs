@@ -14,6 +14,9 @@ namespace iucs.readernest.application.Services
 
         Task<EnrollmentFormDto> GetAsync(Guid id, CancellationToken cancellationToken = default);
 
+        /// <summary>Admin edits the submitted answers before approval (approved forms are immutable).</summary>
+        Task<EnrollmentFormDto> UpdateFormDataAsync(Guid id, SubmitEnrollmentFormRequest request, CancellationToken cancellationToken = default);
+
         /// <summary>
         /// Admin review: approval creates the Child record, links it to the form and
         /// unlocks the parent dashboard (EnrollmentFormCompleted).
