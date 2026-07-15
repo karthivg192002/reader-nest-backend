@@ -57,9 +57,16 @@ builder.Services.AddScoped<ITokenService, JwtTokenService>();
 builder.Services.AddScoped<IEmailSender, SmtpEmailSender>();
 // WhatsApp Business Cloud API delivery, driven by the DB "whatsapp" integration.
 builder.Services.AddScoped<IWhatsAppSender, WhatsAppSender>();
+// SMS delivery (MSG91/Twilio), driven by the DB "sms" integration.
+builder.Services.AddScoped<ISmsSender, SmsSender>();
 builder.Services.AddSingleton<IFileStorage, LocalFileStorage>();
-// Dual-gateway abstraction: swap for the client's provider at deployment
-builder.Services.AddSingleton<IPaymentGateway, SimulatedPaymentGateway>();
+// Dual-gateway abstraction: the dispatcher routes to Razorpay/Cashfree using live
+// credentials from Settings → Integrations, and falls back to the simulated gateway
+// while an integration is disabled or its keys are blank.
+builder.Services.AddSingleton<SimulatedPaymentGateway>();
+builder.Services.AddScoped<iucs.readernest.api.Services.Payments.IGatewayAdapter, iucs.readernest.api.Services.Payments.RazorpayGateway>();
+builder.Services.AddScoped<iucs.readernest.api.Services.Payments.IGatewayAdapter, iucs.readernest.api.Services.Payments.CashfreeGateway>();
+builder.Services.AddScoped<IPaymentGateway, iucs.readernest.api.Services.Payments.PaymentGatewayDispatcher>();
 // Auto billing: recurring invoice generation + overdue flagging + fee suspension
 builder.Services.AddHostedService<BillingBackgroundService>();
 // Session reminders, delayed-session alerts
@@ -89,7 +96,27 @@ builder.Services
             ValidateLifetime = true,
             ClockSkew = TimeSpan.FromMinutes(1),
         };
+
+        // SignalR websockets can't send an Authorization header: the classroom hub
+        // authenticates via the standard access_token query parameter instead.
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+                if (!string.IsNullOrEmpty(accessToken)
+                    && context.HttpContext.Request.Path.StartsWithSegments("/hubs"))
+                {
+                    context.Token = accessToken;
+                }
+
+                return Task.CompletedTask;
+            },
+        };
     });
+
+// Real-time classroom layer (roster, whiteboard sync, quizzes, celebrations)
+builder.Services.AddSignalR();
 
 // Authorization: module/action permission policies (Admin passes implicitly)
 builder.Services.AddAuthorization();
@@ -124,6 +151,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+app.MapHub<iucs.readernest.api.Hubs.ClassroomHub>("/hubs/classroom");
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok", timestampUtc = DateTime.UtcNow }));
 

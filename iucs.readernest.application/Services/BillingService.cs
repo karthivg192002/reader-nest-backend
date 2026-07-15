@@ -104,6 +104,35 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
+        public async Task<PaymentAccountDto> UpdatePaymentAccountAsync(
+            Guid id,
+            UpdatePaymentAccountRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var account = await _unitOfWork.Repository<PaymentAccount>().GetByIdAsync(id, cancellationToken)
+                ?? throw new NotFoundException(nameof(PaymentAccount), id);
+
+            account.Name = request.Name.Trim();
+            account.GatewayProvider = request.GatewayProvider.Trim();
+            account.GatewayAccountRef = request.GatewayAccountRef.Trim();
+            account.IsActive = request.IsActive;
+            _unitOfWork.Repository<PaymentAccount>().Update(account);
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(PaymentAccount), account.Id.ToString(),
+                $"Gateway wiring set to {account.GatewayProvider}/{account.GatewayAccountRef}", cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return new PaymentAccountDto
+            {
+                Id = account.Id,
+                Name = account.Name,
+                Department = account.Department,
+                GatewayProvider = account.GatewayProvider,
+                GatewayAccountRef = account.GatewayAccountRef,
+                IsActive = account.IsActive,
+            };
+        }
+
         public async Task<PackagePlanDto> CreatePlanAsync(
             SavePackagePlanRequest request,
             CancellationToken cancellationToken = default)
@@ -242,7 +271,25 @@ namespace iucs.readernest.application.Services
                 },
                 cancellationToken);
 
-            invoice.AmountPaid += request.Amount;
+            await ApplyPaymentToInvoiceAsync(invoice, request.Amount, cancellationToken);
+
+            await _auditLog.StageAsync(AuditAction.Payment, nameof(Invoice), invoice.Id.ToString(),
+                changesJson: $"{{\"amount\":{request.Amount}}}", cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            await NotifyAdminsAsync(
+                NotificationType.PaymentReceived,
+                "Payment received",
+                $"Payment of {request.Amount:0.00} {invoice.Currency} recorded against invoice {invoice.InvoiceNumber} ({invoice.Status}).",
+                cancellationToken);
+
+            return invoice.ToDto();
+        }
+
+        /// <summary>Shared by manual recording and webhook settlement: balance, status and suspension auto-lift.</summary>
+        private async Task ApplyPaymentToInvoiceAsync(Invoice invoice, decimal amount, CancellationToken cancellationToken)
+        {
+            invoice.AmountPaid += amount;
             if (invoice.AmountPaid >= invoice.Amount)
             {
                 invoice.Status = InvoiceStatus.Paid;
@@ -263,18 +310,151 @@ namespace iucs.readernest.application.Services
             {
                 invoice.Status = InvoiceStatus.PartiallyPaid;
             }
+        }
+
+        public async Task<ParentPaymentResultDto> InitiateParentPaymentAsync(
+            Guid parentUserId,
+            Guid invoiceId,
+            InitiateParentPaymentRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var parent = await _unitOfWork.Repository<ParentProfile>()
+                .FirstOrDefaultAsync(p => p.UserId == parentUserId, cancellationToken)
+                ?? throw new NotFoundException("No parent profile is linked to the current account.");
+
+            // Ownership: a parent can only pay their own invoice
+            var invoice = await _unitOfWork.Repository<Invoice>()
+                .FirstOrDefaultAsync(i => i.Id == invoiceId && i.ParentProfileId == parent.Id, cancellationToken)
+                ?? throw new NotFoundException(nameof(Invoice), invoiceId);
+
+            if (invoice.Status is InvoiceStatus.Paid or InvoiceStatus.Cancelled)
+            {
+                throw new DomainValidationException($"Invoice '{invoice.InvoiceNumber}' is already {invoice.Status}.");
+            }
+
+            var remaining = invoice.Amount - invoice.AmountPaid;
+            var methodKey = request.MethodKey.Trim().ToLowerInvariant();
+
+            if (methodKey == "cash")
+            {
+                var reference = $"CASH-{Guid.NewGuid():N}";
+                await _unitOfWork.Repository<PaymentTransaction>().AddAsync(
+                    new PaymentTransaction
+                    {
+                        InvoiceId = invoice.Id,
+                        PaymentAccountId = invoice.PaymentAccountId,
+                        Amount = remaining,
+                        Currency = invoice.Currency,
+                        Status = TransactionStatus.Pending,
+                        GatewayTransactionId = reference,
+                        Method = PaymentMethod.Cash,
+                    },
+                    cancellationToken);
+
+                await _auditLog.StageAsync(AuditAction.Payment, nameof(Invoice), invoice.Id.ToString(),
+                    changesJson: $"{{\"cashIntent\":\"{reference}\"}}", cancellationToken: cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+                await NotifyAdminsAsync(
+                    NotificationType.PaymentReceived,
+                    "Cash payment intent",
+                    $"A parent chose to pay {remaining:0.00} {invoice.Currency} in cash for invoice {invoice.InvoiceNumber}. Record the payment once collected.",
+                    cancellationToken);
+
+                return new ParentPaymentResultDto
+                {
+                    Mode = "cash",
+                    GatewayReference = reference,
+                    Message = $"Cash payment of {remaining:0.00} {invoice.Currency} noted. Please pay at the centre; your invoice updates once the team confirms receipt.",
+                };
+            }
+
+            // Gateway path: checkout link + a pending transaction the webhook settles
+            var account = await _unitOfWork.Repository<PaymentAccount>().GetByIdAsync(invoice.PaymentAccountId, cancellationToken)
+                ?? throw new NotFoundException(nameof(PaymentAccount), invoice.PaymentAccountId);
+
+            var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, cancellationToken);
+
+            await _unitOfWork.Repository<PaymentTransaction>().AddAsync(
+                new PaymentTransaction
+                {
+                    InvoiceId = invoice.Id,
+                    PaymentAccountId = invoice.PaymentAccountId,
+                    Amount = remaining,
+                    Currency = invoice.Currency,
+                    Status = TransactionStatus.Pending,
+                    GatewayTransactionId = link.GatewayReference,
+                },
+                cancellationToken);
 
             await _auditLog.StageAsync(AuditAction.Payment, nameof(Invoice), invoice.Id.ToString(),
-                changesJson: $"{{\"amount\":{request.Amount}}}", cancellationToken: cancellationToken);
+                changesJson: $"{{\"checkoutRef\":\"{link.GatewayReference}\"}}", cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return new ParentPaymentResultDto
+            {
+                Mode = "redirect",
+                Url = link.Url,
+                GatewayReference = link.GatewayReference,
+                Message = "Complete the payment in the secure checkout page. Your invoice updates automatically once the gateway confirms.",
+            };
+        }
+
+        public async Task SettleGatewayTransactionAsync(
+            string gatewayReference,
+            bool succeeded,
+            string? gatewayPaymentId,
+            string? failureReason,
+            CancellationToken cancellationToken = default)
+        {
+            // Idempotency: webhooks retry — an already-settled reference is a no-op.
+            // A settled row's reference becomes "ref|paymentId", so match the prefix too.
+            var prefix = gatewayReference + "|";
+            var transaction = await _unitOfWork.Repository<PaymentTransaction>()
+                .FirstOrDefaultAsync(
+                    t => t.GatewayTransactionId == gatewayReference
+                        || (t.GatewayTransactionId != null && t.GatewayTransactionId.StartsWith(prefix)),
+                    cancellationToken)
+                ?? throw new NotFoundException($"No payment transaction matches gateway reference '{gatewayReference}'.");
+
+            if (transaction.Status != TransactionStatus.Pending)
+            {
+                return;
+            }
+
+            if (!succeeded)
+            {
+                transaction.Status = TransactionStatus.Failed;
+                transaction.FailureReason = failureReason?.Length > 500 ? failureReason[..500] : failureReason;
+                _unitOfWork.Repository<PaymentTransaction>().Update(transaction);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                return;
+            }
+
+            transaction.Status = TransactionStatus.Success;
+            transaction.PaidAtUtc = DateTime.UtcNow;
+            transaction.ReceiptNumber = GenerateNumber("RCP");
+            if (!string.IsNullOrWhiteSpace(gatewayPaymentId))
+            {
+                // Keep the link reference (webhook correlation key) and append the concrete payment id
+                transaction.GatewayTransactionId = $"{gatewayReference}|{gatewayPaymentId}";
+            }
+
+            _unitOfWork.Repository<PaymentTransaction>().Update(transaction);
+
+            var invoice = await _unitOfWork.Repository<Invoice>().GetByIdAsync(transaction.InvoiceId, cancellationToken)
+                ?? throw new NotFoundException(nameof(Invoice), transaction.InvoiceId);
+            await ApplyPaymentToInvoiceAsync(invoice, transaction.Amount, cancellationToken);
+
+            await _auditLog.StageAsync(AuditAction.Payment, nameof(Invoice), invoice.Id.ToString(),
+                changesJson: $"{{\"amount\":{transaction.Amount},\"gatewayRef\":\"{gatewayReference}\"}}", cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             await NotifyAdminsAsync(
                 NotificationType.PaymentReceived,
                 "Payment received",
-                $"Payment of {request.Amount:0.00} {invoice.Currency} recorded against invoice {invoice.InvoiceNumber} ({invoice.Status}).",
+                $"Gateway payment of {transaction.Amount:0.00} {invoice.Currency} confirmed for invoice {invoice.InvoiceNumber} ({invoice.Status}).",
                 cancellationToken);
-
-            return invoice.ToDto();
         }
 
         public async Task<IReadOnlyList<FeeSuspensionDto>> ListSuspensionsAsync(

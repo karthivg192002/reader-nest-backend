@@ -35,6 +35,12 @@ namespace iucs.readernest.domain.Entities.Users
         [MaxLength(64)]
         public string TimeZoneId { get; set; } = "Asia/Kolkata";
 
+        /// <summary>
+        /// Long-lived secret for the personal iCalendar feed URL (external calendar
+        /// apps can't send a JWT). Created on first request; null until then.
+        /// </summary>
+        public Guid? CalendarFeedToken { get; set; }
+
         public DateTime? LastLoginAtUtc { get; set; }
 
         /// <summary>

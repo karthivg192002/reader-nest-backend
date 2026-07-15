@@ -36,6 +36,7 @@ namespace iucs.readernest.api.Data
             await SeedMenusAsync(context);
             await SeedIntegrationsAsync(context);
             await EnsureCashPaymentMethodAsync(context);
+            await EnsureSmsIntegrationAsync(context);
 
             await context.SaveChangesAsync();
         }
@@ -415,5 +416,36 @@ namespace iucs.readernest.api.Data
             IsSystem = true,
             ConfigJson = "{}",
         };
+
+        /// <summary>
+        /// SMS reminders/credentials channel (MSG91 or Twilio). Insert-if-absent every
+        /// startup so it also lands in databases seeded before SMS support existed.
+        /// </summary>
+        private static async Task EnsureSmsIntegrationAsync(ReaderNestDbContext context)
+        {
+            if (await context.Integrations.AnyAsync(i => i.Key == "sms"))
+            {
+                return;
+            }
+
+            context.Integrations.Add(new Integration
+            {
+                Key = "sms",
+                Name = "SMS",
+                Category = IntegrationCategory.Messaging,
+                Description = "Transactional SMS for reminders and onboarding credentials (provider: msg91 or twilio).",
+                IsEnabled = false,
+                IsSystem = true,
+                ConfigJson = JsonSerializer.Serialize(new Dictionary<string, string?>
+                {
+                    ["provider"] = "msg91",
+                    ["authKey"] = "",
+                    ["senderId"] = "",
+                    ["accountSid"] = "",
+                    ["authToken"] = "",
+                    ["fromNumber"] = "",
+                }),
+            });
+        }
     }
 }

@@ -38,6 +38,17 @@ namespace iucs.readernest.tests
         }
     }
 
+    public class FakeSmsSender : ISmsSender
+    {
+        public List<(string To, string Message)> Sent { get; } = [];
+
+        public Task SendAsync(string toPhone, string message, CancellationToken cancellationToken = default)
+        {
+            Sent.Add((toPhone, message));
+            return Task.CompletedTask;
+        }
+    }
+
     public class FakePaymentGateway : IPaymentGateway
     {
         public Task<PaymentLinkResult> CreatePaymentLinkAsync(

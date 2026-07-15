@@ -13,6 +13,9 @@ namespace iucs.readernest.application.Services
         /// <summary>Pins a parent's payments to a specific department account (admin override).</summary>
         Task SetParentPaymentAccountAsync(SavePaymentMappingRequest request, CancellationToken cancellationToken = default);
 
+        /// <summary>Admin edit of a department account's name/provider/ref/active flag.</summary>
+        Task<PaymentAccountDto> UpdatePaymentAccountAsync(Guid id, UpdatePaymentAccountRequest request, CancellationToken cancellationToken = default);
+
         Task<PackagePlanDto> CreatePlanAsync(SavePackagePlanRequest request, CancellationToken cancellationToken = default);
 
         Task<PackagePlanDto> UpdatePlanAsync(Guid id, SavePackagePlanRequest request, CancellationToken cancellationToken = default);
@@ -36,6 +39,29 @@ namespace iucs.readernest.application.Services
         /// routed through the invoice's department payment account.
         /// </summary>
         Task<PaymentLinkDto> CreatePaymentLinkAsync(Guid invoiceId, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Parent Pay-Now: for "cash", records a pending cash intent for admin confirmation;
+        /// for a gateway key, creates a checkout link plus a pending transaction the webhook settles.
+        /// The invoice must belong to the calling parent.
+        /// </summary>
+        Task<ParentPaymentResultDto> InitiateParentPaymentAsync(
+            Guid parentUserId,
+            Guid invoiceId,
+            InitiateParentPaymentRequest request,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Gateway webhook settlement: marks the pending transaction with this gateway reference
+        /// Success/Failed and, on success, applies the payment to the invoice (receipt, status,
+        /// suspension auto-lift). Idempotent — an already-settled reference is a no-op.
+        /// </summary>
+        Task SettleGatewayTransactionAsync(
+            string gatewayReference,
+            bool succeeded,
+            string? gatewayPaymentId,
+            string? failureReason,
+            CancellationToken cancellationToken = default);
 
         // Renewal tracking workflow: subscriptions drive recurring billing and renew/lapse explicitly
         Task<IReadOnlyList<SubscriptionDto>> ListSubscriptionsAsync(

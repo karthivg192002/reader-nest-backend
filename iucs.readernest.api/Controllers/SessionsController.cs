@@ -182,7 +182,73 @@ namespace iucs.readernest.api.Controllers
             var from = DateTime.UtcNow.AddDays(-30);
             var to = DateTime.UtcNow.AddDays(120);
             var sessions = await _sessionService.ListAsync(from, to, teacherProfileId, batchId, cancellationToken);
+            return IcsFile(sessions);
+        }
 
+        /// <summary>
+        /// Personal calendar-sync URL for the signed-in user. External calendar apps
+        /// can't send a JWT, so the feed authenticates with a long-lived token that
+        /// is created here on first request.
+        /// </summary>
+        [HttpGet("calendar/feed-url")]
+        [Authorize]
+        public async Task<ActionResult<object>> MyCalendarFeedUrl(
+            [FromServices] iucs.readernest.domain.Repository.IUnitOfWork unitOfWork,
+            CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var user = await unitOfWork.Repository<domain.Entities.Users.User>()
+                .FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+            if (user is null)
+            {
+                return NotFound();
+            }
+
+            if (user.CalendarFeedToken is null)
+            {
+                user.CalendarFeedToken = Guid.NewGuid();
+                unitOfWork.Repository<domain.Entities.Users.User>().Update(user);
+                await unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+
+            return Ok(new { url = $"/api/sessions/calendar/mine.ics?token={user.CalendarFeedToken:N}" });
+        }
+
+        /// <summary>Role-scoped personal iCalendar feed: teachers get their classes, parents their children's.</summary>
+        [HttpGet("calendar/mine.ics")]
+        [AllowAnonymous]
+        public async Task<IActionResult> MyCalendarFeed(
+            [FromQuery] string token,
+            [FromServices] iucs.readernest.domain.Repository.IUnitOfWork unitOfWork,
+            [FromServices] IParentPortalService parentPortal,
+            CancellationToken cancellationToken)
+        {
+            if (!Guid.TryParseExact(token, "N", out var feedToken) && !Guid.TryParse(token, out feedToken))
+            {
+                return Unauthorized();
+            }
+
+            var user = await unitOfWork.Repository<domain.Entities.Users.User>()
+                .FirstOrDefaultAsync(u => u.CalendarFeedToken == feedToken, cancellationToken);
+            if (user is null)
+            {
+                return Unauthorized();
+            }
+
+            var from = DateTime.UtcNow.AddDays(-30);
+            var to = DateTime.UtcNow.AddDays(120);
+            var sessions = user.Role switch
+            {
+                UserRole.Teacher => await _sessionService.ListForTeacherUserAsync(user.Id, from, to, cancellationToken),
+                UserRole.Parent => await parentPortal.GetScheduleAsync(user.Id, from, to, cancellationToken),
+                _ => await _sessionService.ListAsync(from, to, null, null, cancellationToken),
+            };
+
+            return IcsFile(sessions);
+        }
+
+        private FileContentResult IcsFile(IReadOnlyList<ClassSessionDto> sessions)
+        {
             var builder = new System.Text.StringBuilder();
             builder.AppendLine("BEGIN:VCALENDAR");
             builder.AppendLine("VERSION:2.0");

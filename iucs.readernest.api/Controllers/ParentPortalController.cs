@@ -65,11 +65,25 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _parentPortal.GetInvoicesAsync(UserId(), cancellationToken));
         }
 
-        /// <summary>Enabled payment gateways for the Pay Now popup; the UI adds a Cash option on top.</summary>
+        /// <summary>Enabled payment methods (gateways + Cash) for the Pay Now popup, from Settings → Integrations.</summary>
         [HttpGet("payment-methods")]
         public async Task<ActionResult<IReadOnlyList<PaymentMethodOptionDto>>> PaymentMethods(CancellationToken cancellationToken)
         {
             return Ok(await _integrationService.GetEnabledPaymentMethodsAsync(cancellationToken));
+        }
+
+        /// <summary>
+        /// Pay Now: "cash" records a pending intent for admin confirmation; a gateway key
+        /// returns a checkout URL whose webhook settles the invoice automatically.
+        /// </summary>
+        [HttpPost("invoices/{id:guid}/pay")]
+        public async Task<ActionResult<ParentPaymentResultDto>> PayInvoice(
+            Guid id,
+            InitiateParentPaymentRequest request,
+            [FromServices] IBillingService billingService,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await billingService.InitiateParentPaymentAsync(UserId(), id, request, cancellationToken));
         }
 
         /// <summary>Grant-checked worksheet download (books stay view-only).</summary>

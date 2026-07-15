@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using iucs.readernest.domain.Data;
@@ -11,9 +12,11 @@ using iucs.readernest.domain.Data;
 namespace iucs.readernest.domain.Migrations
 {
     [DbContext(typeof(ReaderNestDbContext))]
-    partial class ReaderNestDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260715143429_GamificationAwards")]
+    partial class GamificationAwards
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -2813,10 +2816,6 @@ namespace iucs.readernest.domain.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid")
                         .HasColumnName("id");
-
-                    b.Property<Guid?>("CalendarFeedToken")
-                        .HasColumnType("uuid")
-                        .HasColumnName("calendar_feed_token");
 
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone")

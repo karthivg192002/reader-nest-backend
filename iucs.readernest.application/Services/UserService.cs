@@ -21,6 +21,7 @@ namespace iucs.readernest.application.Services
         private readonly IAuditLogService _auditLog;
         private readonly IEmailSender _emailSender;
         private readonly IWhatsAppSender _whatsAppSender;
+        private readonly ISmsSender _smsSender;
 
         public UserService(
             IUnitOfWork unitOfWork,
@@ -28,7 +29,8 @@ namespace iucs.readernest.application.Services
             INotificationService notifications,
             IAuditLogService auditLog,
             IEmailSender emailSender,
-            IWhatsAppSender whatsAppSender)
+            IWhatsAppSender whatsAppSender,
+            ISmsSender smsSender)
         {
             _unitOfWork = unitOfWork;
             _passwordHasher = passwordHasher;
@@ -36,6 +38,7 @@ namespace iucs.readernest.application.Services
             _auditLog = auditLog;
             _emailSender = emailSender;
             _whatsAppSender = whatsAppSender;
+            _smsSender = smsSender;
         }
 
         public async Task<PagedResult<UserDto>> ListAsync(
@@ -311,7 +314,12 @@ namespace iucs.readernest.application.Services
 
             // Gate on the channel's integration being switched on (is_enabled). Do this
             // before regenerating the password so a disabled channel changes nothing.
-            var channelKey = channel == CredentialChannel.WhatsApp ? "whatsapp" : "email";
+            var channelKey = channel switch
+            {
+                CredentialChannel.WhatsApp => "whatsapp",
+                CredentialChannel.Sms => "sms",
+                _ => "email",
+            };
             if (!await IsIntegrationEnabledAsync(channelKey, cancellationToken))
             {
                 throw new DomainValidationException(
@@ -337,6 +345,16 @@ namespace iucs.readernest.application.Services
 
                         notificationChannel = NotificationChannel.WhatsApp;
                         await _whatsAppSender.SendAsync(user.Phone, body, cancellationToken);
+                        break;
+
+                    case CredentialChannel.Sms:
+                        if (string.IsNullOrWhiteSpace(user.Phone))
+                        {
+                            throw new DomainValidationException("This account has no phone number on file for SMS.");
+                        }
+
+                        notificationChannel = NotificationChannel.Sms;
+                        await _smsSender.SendAsync(user.Phone, body, cancellationToken);
                         break;
 
                     default:
@@ -384,6 +402,7 @@ namespace iucs.readernest.application.Services
             {
                 Email = await IsIntegrationEnabledAsync("email", cancellationToken),
                 WhatsApp = await IsIntegrationEnabledAsync("whatsapp", cancellationToken),
+                Sms = await IsIntegrationEnabledAsync("sms", cancellationToken),
             };
         }
 

@@ -4,7 +4,8 @@ namespace iucs.readernest.application.Dto.Users
     public enum CredentialChannel
     {
         Email,
-        WhatsApp
+        WhatsApp,
+        Sms
     }
 
     public class ResendCredentialsRequest
@@ -18,5 +19,7 @@ namespace iucs.readernest.application.Dto.Users
         public bool Email { get; set; }
 
         public bool WhatsApp { get; set; }
+
+        public bool Sms { get; set; }
     }
 }

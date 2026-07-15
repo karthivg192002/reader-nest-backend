@@ -71,7 +71,7 @@ namespace iucs.readernest.api.Services
                 await notifications.SendEmailAsync(
                     teacherUser.Id, teacherUser.Email, NotificationType.SessionReminder,
                     "Class starts in 1 hour",
-                    $"Your {session.Type} session starts at {session.ScheduledStartAtUtc:u}.",
+                    $"Your {session.Type} session starts at {FormatLocal(session.ScheduledStartAtUtc, teacherUser.TimeZoneId)}.",
                     cancellationToken);
 
                 if (session.BatchId is null)
@@ -89,7 +89,7 @@ namespace iucs.readernest.api.Services
                     await notifications.SendEmailAsync(
                         parent.Id, parent.Email, NotificationType.SessionReminder,
                         "Class starts in 1 hour",
-                        $"Your child's class starts at {session.ScheduledStartAtUtc:u}. Join from the parent dashboard.",
+                        $"Your child's class starts at {FormatLocal(session.ScheduledStartAtUtc, parent.TimeZoneId)}. Join from the parent dashboard.",
                         cancellationToken);
                 }
             }
@@ -115,7 +115,7 @@ namespace iucs.readernest.api.Services
                         await notifications.SendEmailAsync(
                             admin.Id, admin.Email, NotificationType.DelayedSessionAlert,
                             "Session has not started",
-                            $"The session scheduled at {session.ScheduledStartAtUtc:u} (teacher {session.TeacherProfile.User.FirstName} {session.TeacherProfile.User.LastName}) has not started.",
+                            $"The session scheduled at {FormatLocal(session.ScheduledStartAtUtc, admin.TimeZoneId)} (teacher {session.TeacherProfile.User.FirstName} {session.TeacherProfile.User.LastName}) has not started.",
                             cancellationToken);
                     }
                 }
@@ -126,6 +126,21 @@ namespace iucs.readernest.api.Services
                 _logger.LogInformation(
                     "Reminders: {ReminderCount} session reminder group(s), {DelayedCount} delayed alert(s).",
                     upcoming.Count, delayed.Count);
+            }
+        }
+
+        /// <summary>Multi-timezone support: renders a UTC instant in the recipient's own zone.</summary>
+        private static string FormatLocal(DateTime utc, string timeZoneId)
+        {
+            try
+            {
+                var zone = TimeZoneInfo.FindSystemTimeZoneById(timeZoneId);
+                var local = TimeZoneInfo.ConvertTimeFromUtc(utc, zone);
+                return $"{local:ddd, dd MMM yyyy h:mm tt} ({timeZoneId})";
+            }
+            catch (TimeZoneNotFoundException)
+            {
+                return $"{utc:u} (UTC)";
             }
         }
     }

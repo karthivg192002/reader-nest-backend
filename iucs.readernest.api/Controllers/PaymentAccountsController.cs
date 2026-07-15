@@ -32,5 +32,16 @@ namespace iucs.readernest.api.Controllers
             await _billingService.SetParentPaymentAccountAsync(request, cancellationToken);
             return NoContent();
         }
+
+        /// <summary>Admin edit of a department account's gateway wiring (name/provider/ref/active).</summary>
+        [HttpPut("{id:guid}")]
+        [HasPermission(PermissionModule.BillingFinance, PermissionAction.Edit)]
+        public async Task<ActionResult<PaymentAccountDto>> Update(
+            Guid id,
+            UpdatePaymentAccountRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _billingService.UpdatePaymentAccountAsync(id, request, cancellationToken));
+        }
     }
 }

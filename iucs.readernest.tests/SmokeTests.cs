@@ -38,7 +38,9 @@ namespace iucs.readernest.tests
 
         private readonly FakeWhatsAppSender _whatsAppSender = new();
 
-        private UserService CreateUserService() => new(_db.UnitOfWork, _hasher, _notifications, _auditLog, _emailSender, _whatsAppSender);
+        private readonly FakeSmsSender _smsSender = new();
+
+        private UserService CreateUserService() => new(_db.UnitOfWork, _hasher, _notifications, _auditLog, _emailSender, _whatsAppSender, _smsSender);
 
         private CourseService CreateCourseService() => new(_db.UnitOfWork, _auditLog);
 
@@ -247,6 +249,92 @@ namespace iucs.readernest.tests
             Assert.Contains(invoice.Id.ToString(), link.Url);
             Assert.Equal(2500, link.AmountDue);
             Assert.StartsWith("TEST-", link.GatewayReference);
+        }
+
+        [Fact]
+        public async Task ParentPayNow_GatewayCheckout_SettlesViaWebhook_Idempotently()
+        {
+            var parentUser = await _db.SeedUserAsync($"paynow-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            _db.Context.ParentProfiles.Add(parentProfile);
+            _db.Context.PaymentAccounts.Add(new PaymentAccount
+            {
+                Name = "Phonics",
+                Department = Department.Phonics,
+                GatewayProvider = "razorpay",
+                GatewayAccountRef = "acc-1",
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var billing = CreateBillingService();
+            var invoice = await billing.CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = parentProfile.Id,
+                Department = Department.Phonics,
+                Amount = 800,
+                DueDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)),
+            });
+
+            // Parent initiates checkout: a pending transaction carries the link reference
+            var result = await billing.InitiateParentPaymentAsync(
+                parentUser.Id, invoice.Id, new InitiateParentPaymentRequest { MethodKey = "razorpay" });
+
+            Assert.Equal("redirect", result.Mode);
+            Assert.NotNull(result.Url);
+            var pending = await _db.Context.PaymentTransactions
+                .SingleAsync(t => t.GatewayTransactionId == result.GatewayReference);
+            Assert.Equal(TransactionStatus.Pending, pending.Status);
+
+            // Webhook settles the reference; a retry of the same event is a no-op
+            await billing.SettleGatewayTransactionAsync(result.GatewayReference!, true, "pay_123", null);
+            await billing.SettleGatewayTransactionAsync(result.GatewayReference!, true, "pay_123", null);
+
+            var storedInvoice = await _db.Context.Invoices.FirstAsync(i => i.Id == invoice.Id);
+            Assert.Equal(InvoiceStatus.Paid, storedInvoice.Status);
+            Assert.Equal(800, storedInvoice.AmountPaid);
+            var settled = await _db.Context.PaymentTransactions.SingleAsync(t => t.InvoiceId == invoice.Id);
+            Assert.Equal(TransactionStatus.Success, settled.Status);
+            Assert.StartsWith("RCP-", settled.ReceiptNumber);
+            Assert.Contains("pay_123", settled.GatewayTransactionId);
+        }
+
+        [Fact]
+        public async Task ParentPayNow_Cash_RecordsPendingIntent_WithoutTouchingInvoice()
+        {
+            var parentUser = await _db.SeedUserAsync($"cash-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            _db.Context.ParentProfiles.Add(parentProfile);
+            _db.Context.PaymentAccounts.Add(new PaymentAccount
+            {
+                Name = "Maths",
+                Department = Department.Maths,
+                GatewayProvider = "cashfree",
+                GatewayAccountRef = "acc-2",
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var billing = CreateBillingService();
+            var invoice = await billing.CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = parentProfile.Id,
+                Department = Department.Maths,
+                Amount = 1200,
+                DueDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)),
+            });
+
+            var result = await billing.InitiateParentPaymentAsync(
+                parentUser.Id, invoice.Id, new InitiateParentPaymentRequest { MethodKey = "cash" });
+
+            Assert.Equal("cash", result.Mode);
+            var intent = await _db.Context.PaymentTransactions.SingleAsync(t => t.InvoiceId == invoice.Id);
+            Assert.Equal(TransactionStatus.Pending, intent.Status);
+            Assert.Equal(PaymentMethod.Cash, intent.Method);
+            Assert.Equal(1200, intent.Amount);
+
+            // The invoice only changes once an admin records the collected cash
+            var storedInvoice = await _db.Context.Invoices.FirstAsync(i => i.Id == invoice.Id);
+            Assert.NotEqual(InvoiceStatus.Paid, storedInvoice.Status);
+            Assert.Equal(0, storedInvoice.AmountPaid);
         }
 
         [Fact]
