@@ -30,9 +30,23 @@ builder.Services.AddScoped<ICurrentUserService, CurrentUserService>();
 builder.Services.AddScoped<AuditableEntityInterceptor>();
 
 // Persistence
+//builder.Services.AddDbContext<ReaderNestDbContext>((serviceProvider, options) =>
+//    options.UseNpgsql(builder.Configuration.GetConnectionString("ReaderNestDb"))
+//        .AddInterceptors(serviceProvider.GetRequiredService<AuditableEntityInterceptor>()));
+//builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
+var connectionString =
+    builder.Configuration.GetConnectionString("ReaderNestDb") ??
+    Environment.GetEnvironmentVariable("ConnectionStrings__ReaderNestDb");
+
+if (string.IsNullOrWhiteSpace(connectionString))
+{
+    throw new InvalidOperationException("Database connection string is missing.");
+}
+
 builder.Services.AddDbContext<ReaderNestDbContext>((serviceProvider, options) =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("ReaderNestDb"))
-        .AddInterceptors(serviceProvider.GetRequiredService<AuditableEntityInterceptor>()));
+    options.UseNpgsql(connectionString)
+           .AddInterceptors(serviceProvider.GetRequiredService<AuditableEntityInterceptor>()));
+
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 
 // Application services + API-layer implementations of its abstractions
