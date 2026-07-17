@@ -44,6 +44,60 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.Repository<Holiday>().AddAsync(holiday, cancellationToken);
             await _auditLog.StageAsync(AuditAction.Create, nameof(Holiday), holiday.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            // Business rule: a class never runs on a holiday. Any session already scheduled
+            // on this date is automatically carried forward to the next available same-weekday
+            // slot (skipping further holidays), keeping the traceability link.
+            var dayStart = request.Date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+            var dayEnd = dayStart.AddDays(1);
+            var clashingIds = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                            && s.ScheduledStartAtUtc >= dayStart
+                            && s.ScheduledStartAtUtc < dayEnd)
+                .Select(s => s.Id)
+                .ToListAsync(cancellationToken);
+
+            foreach (var sessionId in clashingIds)
+            {
+                var session = await _unitOfWork.Repository<ClassSession>()
+                    .FirstOrDefaultAsync(s => s.Id == sessionId, cancellationToken);
+                if (session is null)
+                {
+                    continue;
+                }
+
+                var offsetDays = 7;
+                while (await _unitOfWork.Repository<Holiday>().ExistsAsync(
+                           h => h.Date == request.Date.AddDays(offsetDays), cancellationToken))
+                {
+                    offsetDays += 7;
+                }
+
+                await _unitOfWork.Repository<ClassSession>().AddAsync(
+                    new ClassSession
+                    {
+                        BatchId = session.BatchId,
+                        TeacherProfileId = session.TeacherProfileId,
+                        Type = session.Type,
+                        Status = SessionStatus.CarriedForward,
+                        ScheduledStartAtUtc = session.ScheduledStartAtUtc.AddDays(offsetDays),
+                        ScheduledEndAtUtc = session.ScheduledEndAtUtc.AddDays(offsetDays),
+                        MeetingRoomId = session.MeetingRoomId,
+                        CarriedForwardFromSessionId = session.Id,
+                    },
+                    cancellationToken);
+
+                session.Status = SessionStatus.Cancelled;
+                session.CancellationReason = $"Holiday — {holiday.Name}; carried forward to {request.Date.AddDays(offsetDays):yyyy-MM-dd}";
+            }
+
+            if (clashingIds.Count > 0)
+            {
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), null,
+                    changesJson: $"{{\"holidayCarryForward\":{clashingIds.Count}}}", cancellationToken: cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+
             return ToDto(holiday);
         }
 
@@ -160,9 +214,8 @@ namespace iucs.readernest.application.Services
             ReviewLeaveRequest request,
             CancellationToken cancellationToken = default)
         {
-            var leave = await _unitOfWork.Repository<LeaveRequest>().Query()
-                .Include(l => l.TeacherProfile).ThenInclude(t => t.User)
-                .FirstOrDefaultAsync(l => l.Id == id, cancellationToken)
+            // Load tracked (Query() is AsNoTracking; mutating that never persists).
+            var leave = await _unitOfWork.Repository<LeaveRequest>().FirstOrDefaultAsync(l => l.Id == id, cancellationToken)
                 ?? throw new NotFoundException(nameof(LeaveRequest), id);
 
             if (leave.Status != LeaveStatus.Pending)
@@ -177,7 +230,10 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Update, nameof(LeaveRequest), leave.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            var teacherUser = leave.TeacherProfile.User;
+            var teacherProfile = await _unitOfWork.Repository<TeacherProfile>().Query()
+                .Include(t => t.User)
+                .FirstAsync(t => t.Id == leave.TeacherProfileId, cancellationToken);
+            var teacherUser = teacherProfile.User;
             await _notificationService.SendEmailAsync(
                 teacherUser.Id,
                 teacherUser.Email,
@@ -187,6 +243,44 @@ namespace iucs.readernest.application.Services
                 (string.IsNullOrEmpty(request.ReviewNote) ? "" : $" Note: {request.ReviewNote}"),
                 cancellationToken);
 
+            // Approved leave fans out: the whole core team plus every parent whose child
+            // is in one of this teacher's batches gets notified (client requirement).
+            if (leave.Status == LeaveStatus.Approved)
+            {
+                var teacherName = $"{teacherUser.FirstName} {teacherUser.LastName}";
+                var window = $"{leave.StartAtUtc:dd MMM yyyy HH:mm} – {leave.EndAtUtc:dd MMM yyyy HH:mm} UTC";
+
+                var coreTeam = await _unitOfWork.Repository<User>().Query()
+                    .Where(u => (u.Role == UserRole.Admin || u.Role == UserRole.SubAdmin) && u.Status == UserStatus.Active)
+                    .ToListAsync(cancellationToken);
+                foreach (var member in coreTeam)
+                {
+                    await _notificationService.SendEmailAsync(
+                        member.Id, member.Email, NotificationType.LeaveStatusUpdate,
+                        $"Teacher on leave: {teacherName}",
+                        $"{teacherName} is on approved leave {window}. Their batch classes in this window may need rescheduling or a substitute.",
+                        cancellationToken);
+                }
+
+                var affectedParents = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                    .Where(e => e.Status == EnrollmentStatus.Active
+                                && e.Batch.TeacherProfileId == leave.TeacherProfileId)
+                    .Select(e => e.Child.ParentProfile.User)
+                    .Distinct()
+                    .ToListAsync(cancellationToken);
+                foreach (var parent in affectedParents)
+                {
+                    await _notificationService.SendEmailAsync(
+                        parent.Id, parent.Email, NotificationType.LeaveStatusUpdate,
+                        $"Class update: {teacherName} is on leave",
+                        $"Your child's teacher {teacherName} is on approved leave {window}. " +
+                        "Any affected classes will be rescheduled — the new slots will appear on your schedule.",
+                        cancellationToken);
+                }
+            }
+
+            // Attach the nav for DTO mapping only, after the last SaveChanges (avoids re-tracking).
+            leave.TeacherProfile = teacherProfile;
             return await ToDtoAsync(leave, cancellationToken);
         }
 

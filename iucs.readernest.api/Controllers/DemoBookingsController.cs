@@ -28,6 +28,16 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _demoBookingService.ListAsync(status, cancellationToken));
         }
 
+        /// <summary>Per-parent demo record: every demo each parent has taken, with auto-calculated fee totals.</summary>
+        [HttpGet("parent-history")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<ParentDemoHistoryDto>>> ParentHistory(
+            [FromQuery] string? search,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _demoBookingService.ListParentHistoryAsync(search, cancellationToken));
+        }
+
         [HttpGet("{id:guid}")]
         [HasPermission(PermissionModule.Admission, PermissionAction.View)]
         public async Task<ActionResult<DemoBookingDto>> Get(Guid id, CancellationToken cancellationToken)

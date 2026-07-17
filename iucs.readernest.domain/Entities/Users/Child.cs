@@ -27,6 +27,13 @@ namespace iucs.readernest.domain.Entities.Users
         [MaxLength(100)]
         public string? AcademicLevel { get; set; }
 
+        /// <summary>
+        /// Special enrolment notes from the Relationship Manager, surfaced on the child's
+        /// profile (e.g. "enrolled during discount window; services start after 4 months").
+        /// </summary>
+        [MaxLength(2000)]
+        public string? RmNotes { get; set; }
+
         public bool IsActive { get; set; } = true;
     }
 }

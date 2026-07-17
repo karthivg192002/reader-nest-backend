@@ -41,6 +41,13 @@ namespace iucs.readernest.domain.Entities.Users
         /// </summary>
         public Guid? CalendarFeedToken { get; set; }
 
+        /// <summary>
+        /// The member's permanent personal meeting room (Zoom-style): one stable link,
+        /// startable any time. Minted on first request; null until then.
+        /// </summary>
+        [MaxLength(64)]
+        public string? PersonalMeetingRoomId { get; set; }
+
         public DateTime? LastLoginAtUtc { get; set; }
 
         /// <summary>

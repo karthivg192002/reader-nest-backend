@@ -179,7 +179,8 @@ namespace iucs.readernest.application.Services
 
         public async Task<PayoutDto> FinalizeAsync(Guid payoutId, CancellationToken cancellationToken = default)
         {
-            var payout = await BaseQuery().FirstOrDefaultAsync(p => p.Id == payoutId, cancellationToken)
+            // Load tracked (Query()/BaseQuery is AsNoTracking; mutating that never persists).
+            var payout = await _unitOfWork.Repository<Payout>().FirstOrDefaultAsync(p => p.Id == payoutId, cancellationToken)
                 ?? throw new NotFoundException(nameof(Payout), payoutId);
 
             if (payout.Status != PayoutStatus.Pending)
@@ -187,17 +188,21 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException($"A payout in status '{payout.Status}' cannot be finalized.");
             }
 
+            var items = await _unitOfWork.Repository<PayoutItem>().Query()
+                .Where(i => i.PayoutId == payoutId)
+                .ToListAsync(cancellationToken);
+
             payout.Status = PayoutStatus.Finalized;
-            payout.TotalAmount = payout.Items.Sum(i => i.Amount);
+            payout.TotalAmount = items.Sum(i => i.Amount);
             payout.FinalizedAtUtc = DateTime.UtcNow;
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(Payout), payout.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             // Monthly statement dispatch — the notification row records delivery state
-            var teacherUser = payout.TeacherProfile.User;
+            var teacherUser = await TeacherUserAsync(payout.TeacherProfileId, cancellationToken);
             var period = $"{payout.PeriodYear}-{payout.PeriodMonth:D2}";
-            var lines = payout.Items
+            var lines = items
                 .Select(i => $"- {i.Type}: {i.Amount:0.00}{(string.IsNullOrEmpty(i.Note) ? "" : $" ({i.Note})")}");
             await _notificationService.SendEmailAsync(
                 teacherUser.Id,
@@ -210,12 +215,13 @@ namespace iucs.readernest.application.Services
             payout.EmailSentAtUtc = DateTime.UtcNow;
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            return payout.ToDto();
+            return (await BaseQuery().FirstAsync(p => p.Id == payoutId, cancellationToken)).ToDto();
         }
 
         public async Task<PayoutDto> MarkPaidAsync(Guid payoutId, CancellationToken cancellationToken = default)
         {
-            var payout = await BaseQuery().FirstOrDefaultAsync(p => p.Id == payoutId, cancellationToken)
+            // Load tracked (Query()/BaseQuery is AsNoTracking; mutating that never persists).
+            var payout = await _unitOfWork.Repository<Payout>().FirstOrDefaultAsync(p => p.Id == payoutId, cancellationToken)
                 ?? throw new NotFoundException(nameof(Payout), payoutId);
 
             if (payout.Status != PayoutStatus.Finalized)
@@ -228,7 +234,39 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Update, nameof(Payout), payout.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            return payout.ToDto();
+            // Salary slip: emailed automatically the moment the payment is processed.
+            var items = await _unitOfWork.Repository<PayoutItem>().Query()
+                .Where(i => i.PayoutId == payoutId)
+                .ToListAsync(cancellationToken);
+            var teacherUser = await TeacherUserAsync(payout.TeacherProfileId, cancellationToken);
+            var period = $"{payout.PeriodYear}-{payout.PeriodMonth:D2}";
+            var slipLines = items
+                .Select(i => $"  {i.Type,-26} {i.Amount,12:0.00}{(string.IsNullOrEmpty(i.Note) ? "" : $"   {i.Note}")}");
+            var slip =
+                $"SALARY SLIP — The Reader Nest\n" +
+                $"Teacher: {teacherUser.FirstName} {teacherUser.LastName}\n" +
+                $"Period:  {period}\n" +
+                $"Paid on: {DateTime.UtcNow:yyyy-MM-dd}\n\n" +
+                $"Earnings & adjustments\n{string.Join("\n", slipLines)}\n" +
+                $"  {"NET PAID",-26} {payout.TotalAmount,12:0.00}\n\n" +
+                "This is a system-generated salary slip. Please contact the admin team for any discrepancy.";
+            await _notificationService.SendEmailAsync(
+                teacherUser.Id,
+                teacherUser.Email,
+                NotificationType.PayoutStatement,
+                $"Salary slip — {period} (paid)",
+                slip,
+                cancellationToken);
+
+            return (await BaseQuery().FirstAsync(p => p.Id == payoutId, cancellationToken)).ToDto();
+        }
+
+        private async Task<User> TeacherUserAsync(Guid teacherProfileId, CancellationToken cancellationToken)
+        {
+            return await _unitOfWork.Repository<TeacherProfile>().Query()
+                .Where(t => t.Id == teacherProfileId)
+                .Select(t => t.User)
+                .FirstAsync(cancellationToken);
         }
 
         private async Task<Payout> GetOrCreateCurrentPayoutAsync(

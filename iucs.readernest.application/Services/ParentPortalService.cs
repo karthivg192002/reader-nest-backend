@@ -129,13 +129,26 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("Content access is suspended until the pending fee is settled.");
             }
 
-            var resources = await _unitOfWork.Repository<ResourceAccess>().Query()
+            var granted = await _unitOfWork.Repository<ResourceAccess>().Query()
                 .Include(a => a.Resource)
                 .Where(a => a.ParentProfileId == parent.Id && a.VisibleOnDashboard)
                 .Select(a => a.Resource)
                 .ToListAsync(cancellationToken);
 
-            return resources.Select(r => r.ToDto()).ToList();
+            // Multi-batch visibility: resources the teacher made visible to a batch reach
+            // every parent with an actively enrolled child in that batch (no grant needed).
+            var enrolledBatchIds = _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.Status == EnrollmentStatus.Active && e.Child.ParentProfileId == parent.Id)
+                .Select(e => e.BatchId);
+            var batchVisible = await _unitOfWork.Repository<ResourceBatchVisibility>().Query()
+                .Where(v => enrolledBatchIds.Contains(v.BatchId))
+                .Select(v => v.Resource)
+                .ToListAsync(cancellationToken);
+
+            return granted.Concat(batchVisible)
+                .GroupBy(r => r.Id)
+                .Select(g => g.First().ToDto())
+                .ToList();
         }
 
         public async Task<IReadOnlyList<InvoiceDto>> GetInvoicesAsync(

@@ -234,6 +234,32 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Create, nameof(Invoice), invoice.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
+            // Invoices are emailed to the parent automatically the moment they're issued
+            // (covers both manual invoices and the recurring-billing background service).
+            var parentUser = await _unitOfWork.Repository<ParentProfile>().Query()
+                .Where(p => p.Id == invoice.ParentProfileId)
+                .Select(p => p.User)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (parentUser is not null)
+            {
+                var body =
+                    $"INVOICE — The Reader Nest\n" +
+                    $"Invoice no: {invoice.InvoiceNumber}\n" +
+                    $"Billed to:  {parentUser.FirstName} {parentUser.LastName}\n" +
+                    $"Department: {invoice.Department}\n" +
+                    $"Amount due: {invoice.Amount:0.00} {invoice.Currency}\n" +
+                    $"Due date:   {invoice.DueDate:yyyy-MM-dd}\n\n" +
+                    "You can pay securely from the parent portal (Payments & Billing → Pay Now) " +
+                    "or download this invoice there. Please ignore this email if you have already paid.";
+                await NotifyUserAsync(
+                    parentUser,
+                    NotificationType.PaymentReminder,
+                    $"Invoice {invoice.InvoiceNumber} — {invoice.Amount:0.00} {invoice.Currency} due {invoice.DueDate:dd MMM yyyy}",
+                    body,
+                    cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken); // persist the notification log row
+            }
+
             return invoice.ToDto();
         }
 
@@ -295,21 +321,47 @@ namespace iucs.readernest.application.Services
                 invoice.Status = InvoiceStatus.Paid;
                 invoice.PaidAtUtc = DateTime.UtcNow;
 
-                // Access restoration: full payment auto-lifts any active fee suspension
-                var suspensions = await _unitOfWork.Repository<FeeSuspension>().Query()
+                // Access restoration: full payment auto-lifts any active fee suspension.
+                // Load each tracked (Query() is AsNoTracking, so mutations there never persist).
+                var suspensionIds = await _unitOfWork.Repository<FeeSuspension>().Query()
                     .Where(s => s.ParentProfileId == invoice.ParentProfileId && s.Status == SuspensionStatus.Active)
+                    .Select(s => s.Id)
                     .ToListAsync(cancellationToken);
-                foreach (var suspension in suspensions)
+                foreach (var suspensionId in suspensionIds)
                 {
+                    var suspension = await _unitOfWork.Repository<FeeSuspension>().GetByIdAsync(suspensionId, cancellationToken);
+                    if (suspension is null)
+                    {
+                        continue;
+                    }
+
                     suspension.Status = SuspensionStatus.Lifted;
                     suspension.LiftedAtUtc = DateTime.UtcNow;
                     suspension.AutoRestored = true;
+                    _unitOfWork.Repository<FeeSuspension>().Update(suspension);
                 }
             }
             else
             {
                 invoice.Status = InvoiceStatus.PartiallyPaid;
             }
+        }
+
+        public async Task<(InvoiceDto Invoice, string ParentName)> GetParentInvoiceAsync(
+            Guid parentUserId,
+            Guid invoiceId,
+            CancellationToken cancellationToken = default)
+        {
+            var parent = await _unitOfWork.Repository<ParentProfile>().Query()
+                .Include(p => p.User)
+                .FirstOrDefaultAsync(p => p.UserId == parentUserId, cancellationToken)
+                ?? throw new NotFoundException("No parent profile is linked to the current account.");
+
+            var invoice = await _unitOfWork.Repository<Invoice>().Query()
+                .FirstOrDefaultAsync(i => i.Id == invoiceId && i.ParentProfileId == parent.Id, cancellationToken)
+                ?? throw new NotFoundException(nameof(Invoice), invoiceId);
+
+            return (invoice.ToDto(), $"{parent.User.FirstName} {parent.User.LastName}");
         }
 
         public async Task<ParentPaymentResultDto> InitiateParentPaymentAsync(
@@ -475,10 +527,8 @@ namespace iucs.readernest.application.Services
 
         public async Task<FeeSuspensionDto> LiftSuspensionAsync(Guid id, CancellationToken cancellationToken = default)
         {
-            var suspension = await _unitOfWork.Repository<FeeSuspension>().Query()
-                .Include(s => s.ParentProfile).ThenInclude(p => p.User)
-                .Include(s => s.Invoice)
-                .FirstOrDefaultAsync(s => s.Id == id, cancellationToken)
+            // Load tracked (Query() is AsNoTracking; mutating that never persists).
+            var suspension = await _unitOfWork.Repository<FeeSuspension>().GetByIdAsync(id, cancellationToken)
                 ?? throw new NotFoundException(nameof(FeeSuspension), id);
 
             if (suspension.Status != SuspensionStatus.Active)
@@ -493,7 +543,11 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Update, nameof(FeeSuspension), suspension.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            return ToDto(suspension);
+            var saved = await _unitOfWork.Repository<FeeSuspension>().Query()
+                .Include(s => s.ParentProfile).ThenInclude(p => p.User)
+                .Include(s => s.Invoice)
+                .FirstAsync(s => s.Id == id, cancellationToken);
+            return ToDto(saved);
         }
 
         public async Task<IReadOnlyList<RefundDto>> ListRefundsAsync(CancellationToken cancellationToken = default)
@@ -533,9 +587,8 @@ namespace iucs.readernest.application.Services
 
         public async Task<RefundDto> ReviewRefundAsync(Guid id, ReviewRefundRequest request, CancellationToken cancellationToken = default)
         {
-            var refund = await _unitOfWork.Repository<Refund>().Query()
-                .Include(r => r.PaymentTransaction).ThenInclude(t => t.Invoice)
-                .FirstOrDefaultAsync(r => r.Id == id, cancellationToken)
+            // Load tracked (Query() is AsNoTracking; mutating that never persists).
+            var refund = await _unitOfWork.Repository<Refund>().GetByIdAsync(id, cancellationToken)
                 ?? throw new NotFoundException(nameof(Refund), id);
 
             if (refund.Status != RefundStatus.Requested)
@@ -557,7 +610,20 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Update, nameof(Refund), refund.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            return ToDto(refund);
+            var saved = await _unitOfWork.Repository<Refund>().Query()
+                .Include(r => r.PaymentTransaction).ThenInclude(t => t.Invoice)
+                .FirstAsync(r => r.Id == id, cancellationToken);
+            return ToDto(saved);
+        }
+
+        private async Task NotifyUserAsync(
+            User user,
+            NotificationType type,
+            string subject,
+            string body,
+            CancellationToken cancellationToken)
+        {
+            await _notificationService.SendEmailAsync(user.Id, user.Email, type, subject, body, cancellationToken);
         }
 
         private async Task NotifyAdminsAsync(
@@ -687,7 +753,8 @@ namespace iucs.readernest.application.Services
 
         public async Task<SubscriptionDto> RenewSubscriptionAsync(Guid id, CancellationToken cancellationToken = default)
         {
-            var subscription = await SubscriptionQuery().FirstOrDefaultAsync(s => s.Id == id, cancellationToken)
+            // Load tracked (Query() is AsNoTracking; mutating that never persists).
+            var subscription = await _unitOfWork.Repository<Subscription>().GetByIdAsync(id, cancellationToken)
                 ?? throw new NotFoundException(nameof(Subscription), id);
 
             if (subscription.Status == SubscriptionStatus.Active)
@@ -695,21 +762,26 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("This subscription is already active; nothing to renew.");
             }
 
+            var plan = await _unitOfWork.Repository<PackagePlan>().GetByIdAsync(subscription.PackagePlanId, cancellationToken)
+                ?? throw new NotFoundException(nameof(PackagePlan), subscription.PackagePlanId);
+
             subscription.Status = SubscriptionStatus.Active;
             subscription.CancelledAtUtc = null;
-            subscription.NextBillingAtUtc = NextBillingFrom(DateTime.UtcNow, subscription.PackagePlan.BillingCycle);
+            subscription.NextBillingAtUtc = NextBillingFrom(DateTime.UtcNow, plan.BillingCycle);
+            _unitOfWork.Repository<Subscription>().Update(subscription);
 
             // Renewal conversion is tracked in the audit trail for the renewal-rate report
             await _auditLog.StageAsync(AuditAction.Update, nameof(Subscription), subscription.Id.ToString(),
                 changesJson: "{\"renewed\":true}", cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            return ToDto(subscription);
+            return ToDto(await SubscriptionQuery().FirstAsync(s => s.Id == id, cancellationToken));
         }
 
         public async Task<SubscriptionDto> CancelSubscriptionAsync(Guid id, CancellationToken cancellationToken = default)
         {
-            var subscription = await SubscriptionQuery().FirstOrDefaultAsync(s => s.Id == id, cancellationToken)
+            // Load tracked (Query() is AsNoTracking; mutating that never persists).
+            var subscription = await _unitOfWork.Repository<Subscription>().GetByIdAsync(id, cancellationToken)
                 ?? throw new NotFoundException(nameof(Subscription), id);
 
             if (subscription.Status == SubscriptionStatus.Cancelled)
@@ -720,11 +792,12 @@ namespace iucs.readernest.application.Services
             subscription.Status = SubscriptionStatus.Cancelled;
             subscription.CancelledAtUtc = DateTime.UtcNow;
             subscription.NextBillingAtUtc = null;
+            _unitOfWork.Repository<Subscription>().Update(subscription);
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(Subscription), subscription.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            return ToDto(subscription);
+            return ToDto(await SubscriptionQuery().FirstAsync(s => s.Id == id, cancellationToken));
         }
 
         private static DateTime? NextBillingFrom(DateTime fromUtc, BillingCycle cycle)

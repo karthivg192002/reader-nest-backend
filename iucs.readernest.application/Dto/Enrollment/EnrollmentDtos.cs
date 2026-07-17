@@ -79,6 +79,15 @@ namespace iucs.readernest.application.Dto.Enrollment
 
         public string? CourseName { get; set; }
 
+        /// <summary>Relationship Manager's special enrolment notes, shown on the child profile.</summary>
+        public string? RmNotes { get; set; }
+
         public bool IsActive { get; set; }
+    }
+
+    public class UpdateChildNotesRequest
+    {
+        [MaxLength(2000)]
+        public string? Notes { get; set; }
     }
 }

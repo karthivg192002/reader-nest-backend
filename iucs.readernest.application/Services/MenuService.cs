@@ -22,17 +22,63 @@ namespace iucs.readernest.application.Services
             _auditLog = auditLog;
         }
 
-        public async Task<IReadOnlyList<MenuItemDto>> GetForPortalAsync(
-            string portal,
+        public async Task<IReadOnlyList<MenuItemDto>> GetForUserAsync(
+            Guid userId,
+            UserRole role,
+            IReadOnlyCollection<PermissionModule> viewableModules,
             CancellationToken cancellationToken = default)
         {
-            var key = NormalizePortal(portal);
+            var isAdmin = role == UserRole.Admin;
+            var key = await ResolvePortalAsync(userId, role, cancellationToken);
+
             var items = await _unitOfWork.Repository<MenuItem>().Query()
                 .Where(m => m.Portal == key && m.IsActive)
                 .OrderBy(m => m.SectionOrder).ThenBy(m => m.SortOrder)
                 .ToListAsync(cancellationToken);
 
-            return items.Select(ToDto).ToList();
+            // A menu item with no RequiredModule is always visible; a gated item shows
+            // only when the user's assigned role grants View on that module (Admin bypasses).
+            var visible = items.Where(m =>
+                m.RequiredModule is null
+                || isAdmin
+                || viewableModules.Contains(m.RequiredModule.Value));
+
+            return visible.Select(ToDto).ToList();
+        }
+
+        /// <summary>
+        /// Portal key for a user. Sub Admins take the portal from their assigned role's
+        /// DefaultRoute (e.g. "/coordinator/..." → "coordinator") so a Coordinator/Management
+        /// preset lands on its own sidebar; everyone else maps straight from the account role.
+        /// </summary>
+        private async Task<string> ResolvePortalAsync(Guid userId, UserRole role, CancellationToken cancellationToken)
+        {
+            if (role == UserRole.SubAdmin)
+            {
+                var user = await _unitOfWork.Repository<domain.Entities.Users.User>()
+                    .FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+                if (user?.RoleDefinitionId is { } roleId)
+                {
+                    var roleDef = await _unitOfWork.Repository<domain.Entities.Users.RoleDefinition>()
+                        .GetByIdAsync(roleId, cancellationToken);
+                    var segment = roleDef?.DefaultRoute?.Trim('/').Split('/').FirstOrDefault();
+                    if (!string.IsNullOrWhiteSpace(segment) && Portals.Contains(segment))
+                    {
+                        return segment;
+                    }
+                }
+
+                return "subadmin";
+            }
+
+            return role switch
+            {
+                UserRole.Admin => "admin",
+                UserRole.Teacher => "teacher",
+                UserRole.Parent => "parent",
+                UserRole.AdmissionTeam => "admission",
+                _ => "admin",
+            };
         }
 
         public async Task<IReadOnlyList<MenuItemDto>> ListAsync(

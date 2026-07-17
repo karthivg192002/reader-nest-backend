@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using iucs.readernest.domain.Data;
@@ -11,9 +12,11 @@ using iucs.readernest.domain.Data;
 namespace iucs.readernest.domain.Migrations
 {
     [DbContext(typeof(ReaderNestDbContext))]
-    partial class ReaderNestDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260716164107_DemoChildParticipants")]
+    partial class DemoChildParticipants
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1981,51 +1984,6 @@ namespace iucs.readernest.domain.Migrations
                     b.ToTable("resource_accesses");
                 });
 
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Resources.ResourceBatchVisibility", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
-
-                    b.Property<Guid>("BatchId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("batch_id");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at_utc");
-
-                    b.Property<DateTime?>("DeletedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("deleted_at_utc");
-
-                    b.Property<bool>("IsDeleted")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_deleted");
-
-                    b.Property<Guid>("ResourceId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("resource_id");
-
-                    b.Property<DateTime?>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at_utc");
-
-                    b.HasKey("Id")
-                        .HasName("pk_resource_batch_visibilities");
-
-                    b.HasIndex("BatchId")
-                        .HasDatabaseName("ix_resource_batch_visibilities_batch_id");
-
-                    b.HasIndex("ResourceId", "BatchId")
-                        .IsUnique()
-                        .HasDatabaseName("ix_resource_batch_visibilities_resource_id_batch_id")
-                        .HasFilter("\"is_deleted\" = FALSE");
-
-                    b.ToTable("resource_batch_visibilities");
-                });
-
             modelBuilder.Entity("iucs.readernest.domain.Entities.Sessions.ClassSession", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2519,11 +2477,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("parent_profile_id");
 
-                    b.Property<string>("RmNotes")
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)")
-                        .HasColumnName("rm_notes");
-
                     b.Property<DateTime?>("UpdatedAtUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_at_utc");
@@ -2914,11 +2867,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasMaxLength(512)
                         .HasColumnType("character varying(512)")
                         .HasColumnName("password_hash");
-
-                    b.Property<string>("PersonalMeetingRoomId")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("personal_meeting_room_id");
 
                     b.Property<string>("Phone")
                         .HasMaxLength(20)
@@ -3338,27 +3286,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasConstraintName("fk_resource_accesses_resources_resource_id");
 
                     b.Navigation("ParentProfile");
-
-                    b.Navigation("Resource");
-                });
-
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Resources.ResourceBatchVisibility", b =>
-                {
-                    b.HasOne("iucs.readernest.domain.Entities.Academics.Batch", "Batch")
-                        .WithMany()
-                        .HasForeignKey("BatchId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired()
-                        .HasConstraintName("fk_resource_batch_visibilities_batches_batch_id");
-
-                    b.HasOne("iucs.readernest.domain.Entities.Resources.Resource", "Resource")
-                        .WithMany()
-                        .HasForeignKey("ResourceId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired()
-                        .HasConstraintName("fk_resource_batch_visibilities_resources_resource_id");
-
-                    b.Navigation("Batch");
 
                     b.Navigation("Resource");
                 });

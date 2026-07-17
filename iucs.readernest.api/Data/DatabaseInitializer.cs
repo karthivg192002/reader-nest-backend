@@ -34,6 +34,7 @@ namespace iucs.readernest.api.Data
             await SeedSettingsAsync(context);
             await SeedRolesAsync(context);
             await SeedMenusAsync(context);
+            await RemoveRetiredMenusAsync(context);
             await SeedIntegrationsAsync(context);
             await EnsureCashPaymentMethodAsync(context);
             await EnsureSmsIntegrationAsync(context);
@@ -138,10 +139,18 @@ namespace iucs.readernest.api.Data
                 if (existingByName.TryGetValue(seed.Name, out var current))
                 {
                     // Backfill the default landing route on roles seeded before the
-                    // column existed; leave everything else the admin may have edited.
+                    // column existed; leave the permission matrix the admin may have edited.
                     if (string.IsNullOrWhiteSpace(current.DefaultRoute))
                     {
                         current.DefaultRoute = seed.DefaultRoute;
+                    }
+
+                    // Keep system roles' display name/description in sync with the seed
+                    // (e.g. the Sub Admin → Parent Relationship Manager rename).
+                    if (current.IsSystem)
+                    {
+                        current.DisplayName = seed.DisplayName;
+                        current.Description = seed.Description;
                     }
 
                     continue;
@@ -206,7 +215,7 @@ namespace iucs.readernest.api.Data
                     Grant(PermissionModule.LeaveManagement, view: true),
                 ]),
                 ("parent", "Parent", "Family account holder; managed through the parent portal.", "/parent", []),
-                ("sub-admin", "Sub Admin", "Base delegated staff account; grant modules as needed.", "/subadmin", []),
+                ("sub-admin", "Parent Relationship Manager", "Parent relationship management account; grant modules as needed.", "/subadmin", []),
                 ("admission", "Admission", "Demo-to-enrollment pipeline and lead follow-up.", "/admission",
                 [
                     Grant(PermissionModule.Admission, view: true, create: true, edit: true, approve: true),
@@ -226,6 +235,21 @@ namespace iucs.readernest.api.Data
                 ]),
                 ("student", "Student", "Learner experience surfaced through the parent account.", "/student", []),
             ];
+        }
+
+        /// <summary>
+        /// Removes menu items retired after the initial seed (the seed early-returns once
+        /// any menu exists, so removals need their own idempotent pass). Currently drops the
+        /// Coordinator "Scheduling" screen — the coordinator role is monitor-only.
+        /// </summary>
+        private static async Task RemoveRetiredMenusAsync(ReaderNestDbContext context)
+        {
+            var retiredPaths = new[] { "/coordinator/scheduling" };
+            var stale = await context.MenuItems.Where(m => retiredPaths.Contains(m.Path)).ToListAsync();
+            if (stale.Count > 0)
+            {
+                context.MenuItems.RemoveRange(stale);
+            }
         }
 
         private static async Task SeedMenusAsync(ReaderNestDbContext context)
@@ -280,9 +304,8 @@ namespace iucs.readernest.api.Data
                 ("admission", "CRM", "Payment Tracking", "/admission/payments", "Link2"),
                 ("admission", "Insights", "Reports", "/admission/reports", "BarChart3"),
                 ("coordinator", null, "Dashboard", "/coordinator", "LayoutDashboard"),
-                ("coordinator", "Scheduling", "Academic Calendar", "/coordinator/calendar", "CalendarDays"),
-                ("coordinator", "Scheduling", "Scheduling", "/coordinator/scheduling", "CalendarClock"),
-                ("coordinator", "Scheduling", "Teacher Availability", "/coordinator/availability", "CalendarRange"),
+                ("coordinator", "Monitoring", "Academic Calendar", "/coordinator/calendar", "CalendarDays"),
+                ("coordinator", "Monitoring", "Teacher Availability", "/coordinator/availability", "CalendarRange"),
                 ("management", null, "Executive Overview", "/management", "LayoutDashboard"),
                 ("management", "Performance", "Revenue & Courses", "/management/revenue", "TrendingUp"),
                 ("management", "Performance", "Teacher & Batch Performance", "/management/performance", "Gauge"),

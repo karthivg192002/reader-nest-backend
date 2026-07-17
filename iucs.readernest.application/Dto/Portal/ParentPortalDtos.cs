@@ -66,6 +66,26 @@ namespace iucs.readernest.application.Dto.Reports
         public double TeacherUtilizationSessionsPerTeacher { get; set; }
 
         public IReadOnlyList<CourseRevenueDto> RevenueByDepartment { get; set; } = [];
+
+        /// <summary>Cash collected per month for the last 6 calendar months (oldest first).</summary>
+        public IReadOnlyList<RevenuePointDto> RevenueTrend { get; set; } = [];
+
+        /// <summary>Admission funnel counts: demo booked → completed → follow-up → enrolled.</summary>
+        public IReadOnlyList<FunnelStageDto> EnrollmentFunnel { get; set; } = [];
+    }
+
+    public class RevenuePointDto
+    {
+        public string Month { get; set; } = null!;
+
+        public decimal Revenue { get; set; }
+    }
+
+    public class FunnelStageDto
+    {
+        public string Stage { get; set; } = null!;
+
+        public int Value { get; set; }
     }
 
     public class CourseRevenueDto

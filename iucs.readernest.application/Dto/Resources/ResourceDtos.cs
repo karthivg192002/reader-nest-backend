@@ -22,6 +22,9 @@ namespace iucs.readernest.application.Dto.Resources
         /// <summary>Batch display name, when the resource is tied to a batch.</summary>
         public string? BatchName { get; set; }
 
+        /// <summary>All batches this resource is visible to (multi-batch visibility).</summary>
+        public IReadOnlyList<string> VisibleBatchNames { get; set; } = [];
+
         public bool IsDownloadable { get; set; }
 
         public string? Description { get; set; }
@@ -42,6 +45,9 @@ namespace iucs.readernest.application.Dto.Resources
         public Guid? CourseId { get; set; }
 
         public Guid? BatchId { get; set; }
+
+        /// <summary>Uploader-chosen batches the resource is visible to (multi-batch visibility).</summary>
+        public List<Guid> BatchIds { get; set; } = [];
 
         /// <summary>Business rule: only worksheets should be downloadable; books are view-only.</summary>
         public bool IsDownloadable { get; set; }

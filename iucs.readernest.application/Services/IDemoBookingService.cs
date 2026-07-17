@@ -11,6 +11,9 @@ namespace iucs.readernest.application.Services
 
         Task<DemoBookingDto> CreateAsync(CreateDemoBookingRequest request, CancellationToken cancellationToken = default);
 
+        /// <summary>Per-parent demo record: every demo each parent has taken, grouped by email, with fee totals.</summary>
+        Task<IReadOnlyList<ParentDemoHistoryDto>> ListParentHistoryAsync(string? search, CancellationToken cancellationToken = default);
+
         Task<DemoBookingDto> UpdateConversionStatusAsync(
             Guid id,
             UpdateConversionStatusRequest request,

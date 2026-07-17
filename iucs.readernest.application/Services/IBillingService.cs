@@ -41,6 +41,15 @@ namespace iucs.readernest.application.Services
         Task<PaymentLinkDto> CreatePaymentLinkAsync(Guid invoiceId, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Ownership-checked invoice fetch for the parent portal download; returns the
+        /// invoice with the billed parent's display name resolved.
+        /// </summary>
+        Task<(InvoiceDto Invoice, string ParentName)> GetParentInvoiceAsync(
+            Guid parentUserId,
+            Guid invoiceId,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Parent Pay-Now: for "cash", records a pending cash intent for admin confirmation;
         /// for a gateway key, creates a checkout link plus a pending transaction the webhook settles.
         /// The invoice must belong to the calling parent.

@@ -73,6 +73,58 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>
+        /// Downloadable invoice for the parent (ownership-checked): a self-contained,
+        /// print-ready HTML document (print → Save as PDF). Format is finalizable once
+        /// the client supplies their letterhead.
+        /// </summary>
+        [HttpGet("invoices/{id:guid}/download")]
+        public async Task<IActionResult> DownloadInvoice(
+            Guid id,
+            [FromServices] IBillingService billingService,
+            CancellationToken cancellationToken)
+        {
+            var (invoice, parentName) = await billingService.GetParentInvoiceAsync(UserId(), id, cancellationToken);
+            var balance = invoice.Amount - invoice.AmountPaid;
+            var html = $$"""
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Invoice {{invoice.InvoiceNumber}}</title>
+<style>
+  body { font-family: 'Segoe UI', Arial, sans-serif; margin: 40px; color: #1a1a2e; }
+  .head { display: flex; justify-content: space-between; border-bottom: 3px solid #1F6FE0; padding-bottom: 16px; }
+  .brand { font-size: 22px; font-weight: 800; color: #1F6FE0; }
+  h1 { font-size: 18px; margin: 24px 0 4px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #e5e7eb; }
+  th { background: #f3f6fc; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .total td { font-weight: 800; border-top: 2px solid #1a1a2e; }
+  .muted { color: #667085; font-size: 13px; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700;
+           background: {{(invoice.Status == domain.Enums.InvoiceStatus.Paid ? "#e8f7ee; color:#177245" : "#fdf1e2; color:#a05a00")}}; }
+</style></head>
+<body>
+  <div class="head">
+    <div><div class="brand">The Reader Nest</div><div class="muted">Learning Management &amp; Virtual Classroom</div></div>
+    <div style="text-align:right"><div style="font-size:20px;font-weight:800">INVOICE</div><div class="muted">{{invoice.InvoiceNumber}}</div></div>
+  </div>
+  <h1>Billed to</h1>
+  <div>{{System.Net.WebUtility.HtmlEncode(parentName)}}</div>
+  <div class="muted">Issued {{invoice.IssuedAtUtc:dd MMM yyyy}} &middot; Due {{invoice.DueDate:dd MMM yyyy}} &middot; <span class="badge">{{invoice.Status}}</span></div>
+  <table>
+    <tr><th>Description</th><th style="text-align:right">Amount ({{invoice.Currency}})</th></tr>
+    <tr><td>{{invoice.Department}} programme fees</td><td style="text-align:right">{{invoice.Amount:0.00}}</td></tr>
+    <tr><td>Paid to date</td><td style="text-align:right">-{{invoice.AmountPaid:0.00}}</td></tr>
+    <tr class="total"><td>Balance due</td><td style="text-align:right">{{balance:0.00}}</td></tr>
+  </table>
+  <p class="muted">Pay securely from the parent portal (Payments &amp; Billing → Pay Now). This is a system-generated invoice.</p>
+</body></html>
+""";
+            return File(
+                System.Text.Encoding.UTF8.GetBytes(html),
+                "text/html",
+                $"invoice-{invoice.InvoiceNumber}.html");
+        }
+
+        /// <summary>
         /// Pay Now: "cash" records a pending intent for admin confirmation; a gateway key
         /// returns a checkout URL whose webhook settles the invoice automatically.
         /// </summary>

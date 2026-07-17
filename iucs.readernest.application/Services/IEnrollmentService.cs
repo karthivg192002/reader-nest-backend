@@ -27,5 +27,8 @@ namespace iucs.readernest.application.Services
 
         /// <summary>Admin students directory: every enrolled child with its parent and current course resolved.</summary>
         Task<IReadOnlyList<StudentDto>> ListAllStudentsAsync(CancellationToken cancellationToken = default);
+
+        /// <summary>Relationship Manager's special enrolment notes on a child's profile.</summary>
+        Task UpdateChildNotesAsync(Guid childId, string? notes, CancellationToken cancellationToken = default);
     }
 }

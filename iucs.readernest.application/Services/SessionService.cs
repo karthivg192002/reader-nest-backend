@@ -91,6 +91,16 @@ namespace iucs.readernest.application.Services
         {
             ValidateWindow(request.ScheduledStartAtUtc, request.ScheduledEndAtUtc);
 
+            // Business rule: no class is ever scheduled on a holiday.
+            var sessionDate = DateOnly.FromDateTime(request.ScheduledStartAtUtc);
+            var holiday = await _unitOfWork.Repository<Holiday>()
+                .FirstOrDefaultAsync(h => h.Date == sessionDate, cancellationToken);
+            if (holiday is not null)
+            {
+                throw new DomainValidationException(
+                    $"No class can be scheduled on {sessionDate:yyyy-MM-dd} — it's a holiday ({holiday.Name}). Pick the next available date.");
+            }
+
             if (request.Type == SessionType.Regular && request.BatchId is null)
             {
                 throw new DomainValidationException("A regular session must belong to a batch.");

@@ -99,7 +99,22 @@ namespace iucs.readernest.application.Services
                 ChildAge = request.ChildAge,
                 Department = request.Department,
                 Participants = request.Participants
-                    .Select(p => new DemoParticipant { Name = p.Name.Trim(), Email = p.Email.Trim().ToLowerInvariant(), Phone = p.Phone })
+                    .Select(p =>
+                    {
+                        // Adults need an email for the confirmation; children carry none.
+                        if (!p.IsChild && string.IsNullOrWhiteSpace(p.Email))
+                        {
+                            throw new DomainValidationException($"Participant '{p.Name}' needs an email address (children don't).");
+                        }
+
+                        return new DemoParticipant
+                        {
+                            Name = p.Name.Trim(),
+                            Email = string.IsNullOrWhiteSpace(p.Email) ? null : p.Email.Trim().ToLowerInvariant(),
+                            Phone = p.Phone,
+                            IsChild = p.IsChild,
+                        };
+                    })
                     .ToList(),
             };
             await _unitOfWork.Repository<DemoBooking>().AddAsync(booking, cancellationToken);
@@ -112,9 +127,9 @@ namespace iucs.readernest.application.Services
             var when = $"{request.ScheduledStartAtUtc:u}";
             var confirmation = $"Your demo class for {booking.ChildName} is confirmed for {when}. A join link follows before the session.";
             await _emailSender.SendAsync(booking.ParentEmail, "Demo class confirmed", confirmation, cancellationToken);
-            foreach (var participant in booking.Participants)
+            foreach (var participant in booking.Participants.Where(p => !string.IsNullOrWhiteSpace(p.Email)))
             {
-                await _emailSender.SendAsync(participant.Email, "Demo class confirmed", confirmation, cancellationToken);
+                await _emailSender.SendAsync(participant.Email!, "Demo class confirmed", confirmation, cancellationToken);
             }
 
             // New lead lands in the client's CRM (no-op when no webhook is configured)
@@ -314,10 +329,48 @@ namespace iucs.readernest.application.Services
             };
         }
 
+        public async Task<IReadOnlyList<ParentDemoHistoryDto>> ListParentHistoryAsync(
+            string? search,
+            CancellationToken cancellationToken = default)
+        {
+            var query = BaseQuery();
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var term = search.Trim().ToLower();
+                query = query.Where(b =>
+                    b.ParentName.ToLower().Contains(term)
+                    || b.ParentEmail.ToLower().Contains(term)
+                    || (b.ParentPhone != null && b.ParentPhone.Contains(term)));
+            }
+
+            var bookings = await query.OrderByDescending(b => b.CreatedAtUtc).ToListAsync(cancellationToken);
+
+            // One record per parent (email is the lead identity), every demo they've taken.
+            return bookings
+                .GroupBy(b => b.ParentEmail)
+                .Select(g =>
+                {
+                    var dtos = g.Select(b => b.ToDto()).ToList();
+                    return new ParentDemoHistoryDto
+                    {
+                        ParentEmail = g.Key,
+                        ParentName = g.First().ParentName,
+                        ParentPhone = g.First().ParentPhone,
+                        TotalDemos = dtos.Count,
+                        EnrolledCount = dtos.Count(d => d.ConversionStatus == ConversionStatus.Enrolled),
+                        LastDemoAtUtc = dtos.Max(d => d.ScheduledStartAtUtc),
+                        TotalPayable = dtos.Sum(d => d.PayableAmount),
+                        Bookings = dtos,
+                    };
+                })
+                .OrderByDescending(h => h.LastDemoAtUtc)
+                .ToList();
+        }
+
         private IQueryable<DemoBooking> BaseQuery()
         {
             return _unitOfWork.Repository<DemoBooking>().Query()
-                .Include(b => b.ClassSession)
+                .Include(b => b.ClassSession!).ThenInclude(s => s.TeacherProfile).ThenInclude(t => t.User)
                 .Include(b => b.Participants);
         }
     }

@@ -191,6 +191,38 @@ namespace iucs.readernest.application.Services
                 .OrderByDescending(r => r.Revenue)
                 .ToList();
 
+            // Revenue trend: successful payments grouped into the last 6 calendar months (oldest first).
+            var trendStart = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(-5);
+            var successfulPayments = await _unitOfWork.Repository<PaymentTransaction>().Query()
+                .Where(t => t.Status == TransactionStatus.Success && t.PaidAtUtc != null && t.PaidAtUtc >= trendStart)
+                .Select(t => new { t.PaidAtUtc, t.Amount })
+                .ToListAsync(cancellationToken);
+            var revenueTrend = Enumerable.Range(0, 6)
+                .Select(offset =>
+                {
+                    var month = trendStart.AddMonths(offset);
+                    var revenue = successfulPayments
+                        .Where(p => p.PaidAtUtc!.Value.Year == month.Year && p.PaidAtUtc.Value.Month == month.Month)
+                        .Sum(p => p.Amount);
+                    return new RevenuePointDto { Month = month.ToString("MMM"), Revenue = revenue };
+                })
+                .ToList();
+
+            // Enrollment funnel: cumulative demo-booking stage counts.
+            var demoByStatus = await _unitOfWork.Repository<DemoBooking>().Query()
+                .GroupBy(b => b.ConversionStatus)
+                .Select(g => new { Status = g.Key, Count = g.Count() })
+                .ToListAsync(cancellationToken);
+            int StageCount(params ConversionStatus[] statuses) =>
+                demoByStatus.Where(x => statuses.Contains(x.Status)).Sum(x => x.Count);
+            var enrollmentFunnel = new List<FunnelStageDto>
+            {
+                new() { Stage = "Demo Booked", Value = demoTotal },
+                new() { Stage = "Demo Completed", Value = StageCount(ConversionStatus.DemoCompleted, ConversionStatus.FollowUpInProgress, ConversionStatus.Enrolled) },
+                new() { Stage = "Follow-up", Value = StageCount(ConversionStatus.FollowUpInProgress, ConversionStatus.Enrolled) },
+                new() { Stage = "Enrolled", Value = demoEnrolled },
+            };
+
             return new DashboardSummaryDto
             {
                 TotalStudents = totalStudents,
@@ -207,6 +239,8 @@ namespace iucs.readernest.application.Services
                     ? 0
                     : Math.Round((double)completedSessions / activeTeachers, 1),
                 RevenueByDepartment = revenueByDepartment,
+                RevenueTrend = revenueTrend,
+                EnrollmentFunnel = enrollmentFunnel,
             };
         }
 

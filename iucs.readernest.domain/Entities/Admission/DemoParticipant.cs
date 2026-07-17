@@ -4,7 +4,9 @@ using iucs.readernest.domain.Entities.Common;
 namespace iucs.readernest.domain.Entities.Admission
 {
     /// <summary>
-    /// Invited attendee of a demo class; demos are flexible for more than one parent to join.
+    /// Invited attendee of a demo class — extra parents/guardians or additional
+    /// children (a demo can host more than two kids). Children carry no contact
+    /// details of their own, so Email is optional.
     /// </summary>
     public class DemoParticipant : BaseEntity
     {
@@ -16,10 +18,13 @@ namespace iucs.readernest.domain.Entities.Admission
         public string Name { get; set; } = null!;
 
         [MaxLength(256)]
-        public string Email { get; set; } = null!;
+        public string? Email { get; set; }
 
         [MaxLength(20)]
         public string? Phone { get; set; }
+
+        /// <summary>True for an additional child attending the demo (contact-less participant).</summary>
+        public bool IsChild { get; set; }
 
         public bool HasJoined { get; set; }
     }

@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using iucs.readernest.api.Auth;
 using iucs.readernest.application.Dto.Navigation;
 using iucs.readernest.application.Services;
@@ -18,14 +19,30 @@ namespace iucs.readernest.api.Controllers
             _menuService = menuService;
         }
 
-        /// <summary>Active sidebar items of one portal; any signed-in user can render their own navigation.</summary>
-        [HttpGet("portal/{portal}")]
+        /// <summary>
+        /// The signed-in user's own sidebar, resolved from their account role's portal and
+        /// filtered by the module grants their assigned role carries (same "perm" claims as
+        /// [HasPermission]). This is what the app shell loads so the menu reflects the role
+        /// assigned to the user, not a hard-coded per-portal list.
+        /// </summary>
+        [HttpGet("mine")]
         [Authorize]
-        public async Task<ActionResult<IReadOnlyList<MenuItemDto>>> GetPortalMenu(
-            string portal,
-            CancellationToken cancellationToken)
+        public async Task<ActionResult<IReadOnlyList<MenuItemDto>>> GetMyMenu(CancellationToken cancellationToken)
         {
-            return Ok(await _menuService.GetForPortalAsync(portal, cancellationToken));
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var role = Enum.TryParse<UserRole>(User.FindFirstValue(ClaimTypes.Role), out var r) ? r : UserRole.Admin;
+
+            // "perm" claims are "Module:Action"; collect the modules the role can View.
+            var viewable = User.FindAll(JwtTokenService.PermissionClaimType)
+                .Select(c => c.Value)
+                .Where(v => v.EndsWith($":{PermissionAction.View}", StringComparison.Ordinal))
+                .Select(v => Enum.TryParse<PermissionModule>(v.Split(':')[0], out var m) ? (PermissionModule?)m : null)
+                .Where(m => m.HasValue)
+                .Select(m => m!.Value)
+                .Distinct()
+                .ToList();
+
+            return Ok(await _menuService.GetForUserAsync(userId, role, viewable, cancellationToken));
         }
 
         /// <summary>Every configured item including inactive ones, for the admin menu manager.</summary>

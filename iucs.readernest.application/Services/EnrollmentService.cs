@@ -229,8 +229,21 @@ namespace iucs.readernest.application.Services
                 AcademicLevel = c.AcademicLevel,
                 ParentName = c.ParentProfile?.User is { } u ? $"{u.FirstName} {u.LastName}".Trim() : "—",
                 CourseName = courseByChild.TryGetValue(c.Id, out var name) ? name : null,
+                RmNotes = c.RmNotes,
                 IsActive = c.IsActive,
             }).ToList();
+        }
+
+        public async Task UpdateChildNotesAsync(Guid childId, string? notes, CancellationToken cancellationToken = default)
+        {
+            // Load tracked so the mutation persists (Query() is AsNoTracking).
+            var child = await _unitOfWork.Repository<Child>().FirstOrDefaultAsync(c => c.Id == childId, cancellationToken)
+                ?? throw new NotFoundException(nameof(Child), childId);
+
+            child.RmNotes = string.IsNullOrWhiteSpace(notes) ? null : notes.Trim();
+            await _auditLog.StageAsync(AuditAction.Update, nameof(Child), child.Id.ToString(),
+                changesJson: "{\"rmNotes\":\"updated\"}", cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
         private static (string FirstName, string LastName) ResolveChildName(EnrollmentForm form, ReviewEnrollmentFormRequest request)

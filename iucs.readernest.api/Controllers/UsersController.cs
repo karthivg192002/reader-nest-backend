@@ -51,6 +51,46 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _enrollmentService.ListAllStudentsAsync(cancellationToken));
         }
 
+        /// <summary>Relationship Manager's special enrolment notes on a child's profile.</summary>
+        [HttpPut("students/{childId:guid}/notes")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.Edit)]
+        public async Task<IActionResult> UpdateStudentNotes(
+            Guid childId,
+            UpdateChildNotesRequest request,
+            CancellationToken cancellationToken)
+        {
+            await _enrollmentService.UpdateChildNotesAsync(childId, request.Notes, cancellationToken);
+            return NoContent();
+        }
+
+        /// <summary>
+        /// The signed-in member's permanent personal meeting room (Zoom-style): one
+        /// stable room id, startable any time. Minted on first request.
+        /// </summary>
+        [HttpGet("me/meeting-room")]
+        [Microsoft.AspNetCore.Authorization.Authorize]
+        public async Task<ActionResult<object>> MyMeetingRoom(
+            [FromServices] iucs.readernest.domain.Repository.IUnitOfWork unitOfWork,
+            CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value);
+            var user = await unitOfWork.Repository<domain.Entities.Users.User>()
+                .FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+            if (user is null)
+            {
+                return NotFound();
+            }
+
+            if (string.IsNullOrEmpty(user.PersonalMeetingRoomId))
+            {
+                user.PersonalMeetingRoomId = $"trn-personal-{Guid.NewGuid():N}";
+                unitOfWork.Repository<domain.Entities.Users.User>().Update(user);
+                await unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+
+            return Ok(new { roomId = user.PersonalMeetingRoomId });
+        }
+
         [HttpGet("{id:guid}")]
         [HasPermission(PermissionModule.UserManagement, PermissionAction.View)]
         public async Task<ActionResult<UserDto>> Get(Guid id, CancellationToken cancellationToken)
