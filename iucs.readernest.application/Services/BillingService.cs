@@ -3,6 +3,7 @@ using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Billing;
 using iucs.readernest.application.Mappings;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
@@ -364,6 +365,28 @@ namespace iucs.readernest.application.Services
                     suspension.AutoRestored = true;
                     _unitOfWork.Repository<FeeSuspension>().Update(suspension);
                 }
+
+                // Close any other still-pending cash intents on this invoice: the money
+                // arrived through another payment, so there is nothing left to collect and
+                // they must not linger in the staff confirmation queue.
+                var staleIntentIds = await _unitOfWork.Repository<PaymentTransaction>().Query()
+                    .Where(t => t.InvoiceId == invoice.Id
+                        && t.Method == PaymentMethod.Cash
+                        && t.Status == TransactionStatus.Pending)
+                    .Select(t => t.Id)
+                    .ToListAsync(cancellationToken);
+                foreach (var intentId in staleIntentIds)
+                {
+                    var intent = await _unitOfWork.Repository<PaymentTransaction>().GetByIdAsync(intentId, cancellationToken);
+                    if (intent is null)
+                    {
+                        continue;
+                    }
+
+                    intent.Status = TransactionStatus.Failed;
+                    intent.FailureReason = "Invoice was settled by another payment before this cash intent was collected.";
+                    _unitOfWork.Repository<PaymentTransaction>().Update(intent);
+                }
             }
             else
             {
@@ -455,6 +478,17 @@ namespace iucs.readernest.application.Services
                 ?? throw new NotFoundException(nameof(PaymentAccount), invoice.PaymentAccountId);
 
             var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, methodKey, cancellationToken);
+
+            // Chosen gateway can't start a checkout (turned off / missing keys) → surface the
+            // actionable reason; no pending transaction is created.
+            if (link.UnavailableReason is not null)
+            {
+                return new ParentPaymentResultDto
+                {
+                    Mode = "unavailable",
+                    Message = link.UnavailableReason,
+                };
+            }
 
             await _unitOfWork.Repository<PaymentTransaction>().AddAsync(
                 new PaymentTransaction
@@ -566,6 +600,20 @@ namespace iucs.readernest.application.Services
 
             var amount = request.Amount ?? transaction.Amount;
             var remaining = invoice.Amount - invoice.AmountPaid;
+
+            // Stale intent: the invoice was settled by another payment while this intent sat
+            // pending (older data predating the auto-close in ApplyPaymentToInvoiceAsync).
+            // Close it here so it leaves the confirmation queue instead of erroring forever.
+            if (remaining <= 0)
+            {
+                transaction.Status = TransactionStatus.Failed;
+                transaction.FailureReason = "Invoice was already fully paid; cash intent closed without collection.";
+                _unitOfWork.Repository<PaymentTransaction>().Update(transaction);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                throw new DomainValidationException(
+                    "This invoice is already fully paid — the cash intent has been closed. Do not collect the cash.");
+            }
+
             if (amount > remaining)
             {
                 throw new DomainValidationException($"Confirmed amount {amount} exceeds the outstanding balance of {remaining}.");
@@ -656,6 +704,58 @@ namespace iucs.readernest.application.Services
                 Reference = transaction.GatewayTransactionId ?? "—",
                 RequestedAtUtc = transaction.CreatedAtUtc,
             };
+        }
+
+        public async Task<InvoiceDto> ReconcileInvoicePaymentAsync(
+            Guid parentUserId,
+            Guid invoiceId,
+            CancellationToken cancellationToken = default)
+        {
+            var parent = await _unitOfWork.Repository<ParentProfile>()
+                .FirstOrDefaultAsync(p => p.UserId == parentUserId, cancellationToken)
+                ?? throw new NotFoundException("No parent profile is linked to the current account.");
+
+            var invoice = await _unitOfWork.Repository<Invoice>().Query()
+                .FirstOrDefaultAsync(i => i.Id == invoiceId && i.ParentProfileId == parent.Id, cancellationToken)
+                ?? throw new NotFoundException(nameof(Invoice), invoiceId);
+
+            // Already closed → nothing to poll; hand back the current state.
+            if (invoice.Status is InvoiceStatus.Paid or InvoiceStatus.Cancelled)
+            {
+                return invoice.ToDto();
+            }
+
+            // Pending gateway checkout attempts for this invoice (cash intents are settled by admins).
+            var pending = await _unitOfWork.Repository<PaymentTransaction>().Query()
+                .Where(t => t.InvoiceId == invoice.Id
+                            && t.Status == TransactionStatus.Pending
+                            && t.GatewayTransactionId != null
+                            && (t.Method == null || t.Method != PaymentMethod.Cash))
+                .ToListAsync(cancellationToken);
+
+            foreach (var transaction in pending)
+            {
+                var status = await _paymentGateway.GetPaymentStatusAsync(transaction.GatewayTransactionId!, cancellationToken);
+                switch (status.State)
+                {
+                    case GatewayPaymentState.Paid:
+                        await SettleGatewayTransactionAsync(
+                            transaction.GatewayTransactionId!, succeeded: true, status.PaymentId, null, cancellationToken);
+                        break;
+                    case GatewayPaymentState.Failed:
+                        await SettleGatewayTransactionAsync(
+                            transaction.GatewayTransactionId!, succeeded: false, null,
+                            "The payment link was cancelled or expired.", cancellationToken);
+                        break;
+                    // Pending / Unknown → leave the transaction as-is.
+                }
+            }
+
+            // Re-read so the returned status reflects any settlement just applied.
+            var refreshed = await _unitOfWork.Repository<Invoice>().Query()
+                .FirstOrDefaultAsync(i => i.Id == invoiceId, cancellationToken)
+                ?? invoice;
+            return refreshed.ToDto();
         }
 
         public async Task<IReadOnlyList<FeeSuspensionDto>> ListSuspensionsAsync(
@@ -917,17 +1017,42 @@ namespace iucs.readernest.application.Services
                 throw new ConflictException("This child already has an active subscription on that plan.");
             }
 
+            var startUtc = request.StartDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+            var today = DateOnly.FromDateTime(DateTime.UtcNow);
+            var startsNow = request.StartDate <= today;
+
             var subscription = new Subscription
             {
                 ParentProfileId = request.ParentProfileId,
                 ChildId = request.ChildId,
                 PackagePlanId = request.PackagePlanId,
                 StartDate = request.StartDate,
-                NextBillingAtUtc = NextBillingFrom(request.StartDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc), plan.BillingCycle),
+                // Started subscriptions get their first invoice below, so the pointer moves
+                // one cycle out; a future start leaves the first invoice to the billing job
+                // on the start date itself.
+                NextBillingAtUtc = startsNow ? NextBillingFrom(startUtc, plan.BillingCycle) : startUtc,
             };
             await _unitOfWork.Repository<Subscription>().AddAsync(subscription, cancellationToken);
             await _auditLog.StageAsync(AuditAction.Create, nameof(Subscription), subscription.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            // First invoice is issued immediately — the parent has something to pay the
+            // moment the subscription starts (the hourly job only handles later cycles),
+            // and one-time plans (which have no next-billing pointer) bill here or never.
+            if (startsNow)
+            {
+                await CreateInvoiceAsync(
+                    new CreateInvoiceRequest
+                    {
+                        ParentProfileId = request.ParentProfileId,
+                        ChildId = request.ChildId,
+                        SubscriptionId = subscription.Id,
+                        Department = await DepartmentForPlanAsync(plan, cancellationToken),
+                        Amount = plan.Price,
+                        DueDate = today.AddDays(7),
+                    },
+                    cancellationToken);
+            }
 
             return ToDto(await SubscriptionQuery().FirstAsync(s => s.Id == subscription.Id, cancellationToken));
         }
@@ -955,6 +1080,19 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Update, nameof(Subscription), subscription.Id.ToString(),
                 changesJson: "{\"renewed\":true}", cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            // Renewal bills right away, same as a fresh start — the next cycle is the job's.
+            await CreateInvoiceAsync(
+                new CreateInvoiceRequest
+                {
+                    ParentProfileId = subscription.ParentProfileId,
+                    ChildId = subscription.ChildId,
+                    SubscriptionId = subscription.Id,
+                    Department = await DepartmentForPlanAsync(plan, cancellationToken),
+                    Amount = plan.Price,
+                    DueDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(7),
+                },
+                cancellationToken);
 
             return ToDto(await SubscriptionQuery().FirstAsync(s => s.Id == id, cancellationToken));
         }
@@ -990,6 +1128,18 @@ namespace iucs.readernest.application.Services
                 BillingCycle.Yearly => fromUtc.AddYears(1),
                 _ => null, // one-time plans bill once at creation
             };
+        }
+
+        /// <summary>Invoices route to the plan's course department; plans without a course default to Phonics.</summary>
+        private async Task<Department> DepartmentForPlanAsync(PackagePlan plan, CancellationToken cancellationToken)
+        {
+            if (plan.CourseId is null)
+            {
+                return Department.Phonics;
+            }
+
+            var course = await _unitOfWork.Repository<Course>().GetByIdAsync(plan.CourseId.Value, cancellationToken);
+            return course?.Department ?? Department.Phonics;
         }
 
         private IQueryable<Subscription> SubscriptionQuery()

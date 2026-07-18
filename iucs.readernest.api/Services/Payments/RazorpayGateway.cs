@@ -24,7 +24,17 @@ namespace iucs.readernest.api.Services.Payments
 
         public string IntegrationKey => "razorpay";
 
-        public IReadOnlyList<string> RequiredConfigKeys { get; } = ["keyId", "keySecret"];
+        public string ConfigHint => "Key Id (keyId) and Key Secret (keySecret)";
+
+        // Tolerant to a few common field names the admin may use for the same values.
+        private static string? KeyId(IReadOnlyDictionary<string, string?> c) =>
+            Val(c, "keyId") ?? Val(c, "razorpayKey") ?? Val(c, "keyid") ?? Val(c, "apiKey");
+
+        private static string? KeySecret(IReadOnlyDictionary<string, string?> c) =>
+            Val(c, "keySecret") ?? Val(c, "razorpaySecret") ?? Val(c, "secret") ?? Val(c, "apiSecret");
+
+        public bool IsConfigured(IReadOnlyDictionary<string, string?> config) =>
+            KeyId(config) is not null && KeySecret(config) is not null;
 
         public async Task<PaymentLinkResult> CreatePaymentLinkAsync(
             Invoice invoice,
@@ -32,8 +42,8 @@ namespace iucs.readernest.api.Services.Payments
             IReadOnlyDictionary<string, string?> config,
             CancellationToken cancellationToken)
         {
-            var keyId = config["keyId"]!;
-            var keySecret = config["keySecret"]!;
+            var keyId = KeyId(config)!;
+            var keySecret = KeySecret(config)!;
             var remaining = invoice.Amount - invoice.AmountPaid;
 
             var payload = JsonSerializer.Serialize(new
@@ -59,8 +69,11 @@ namespace iucs.readernest.api.Services.Payments
                 _logger.LogWarning(
                     "Razorpay payment-link creation failed for invoice {Invoice}: {Status} {Body}",
                     invoice.InvoiceNumber, (int)response.StatusCode, body);
-                throw new DomainValidationException(
-                    $"The payment gateway rejected the request ({(int)response.StatusCode}). Please try again or contact the centre.");
+                // 401 = Razorpay refused the credentials themselves — a config problem the
+                // centre must fix, not something the payer can retry through.
+                throw new DomainValidationException(response.StatusCode == System.Net.HttpStatusCode.Unauthorized
+                    ? "Razorpay rejected the centre's API credentials (401). The Key Id and Key Secret in Settings → Integrations are invalid or not from the same key pair."
+                    : $"The payment gateway rejected the request ({(int)response.StatusCode}). Please try again or contact the centre.");
             }
 
             using var json = JsonDocument.Parse(body);
@@ -80,8 +93,8 @@ namespace iucs.readernest.api.Services.Payments
             IReadOnlyDictionary<string, string?> config,
             CancellationToken cancellationToken)
         {
-            var keyId = config["keyId"]!;
-            var keySecret = config["keySecret"]!;
+            var keyId = KeyId(config)!;
+            var keySecret = KeySecret(config)!;
 
             var payload = JsonSerializer.Serialize(new { amount = (long)Math.Round(amount * 100m) });
 
@@ -107,5 +120,75 @@ namespace iucs.readernest.api.Services.Payments
             using var json = JsonDocument.Parse(body);
             return new RefundResult { GatewayRefundId = json.RootElement.GetProperty("id").GetString()! };
         }
+
+        public async Task<GatewayPaymentStatus> GetPaymentStatusAsync(
+            string gatewayReference,
+            IReadOnlyDictionary<string, string?> config,
+            CancellationToken cancellationToken)
+        {
+            // Razorpay payment-link ids look like "plink_…"; anything else isn't ours.
+            if (string.IsNullOrWhiteSpace(gatewayReference) || !gatewayReference.StartsWith("plink_", StringComparison.Ordinal))
+            {
+                return new GatewayPaymentStatus { State = GatewayPaymentState.Unknown };
+            }
+
+            var keyId = KeyId(config);
+            var keySecret = KeySecret(config);
+            if (keyId is null || keySecret is null)
+            {
+                return new GatewayPaymentStatus { State = GatewayPaymentState.Unknown };
+            }
+
+            var client = _httpClientFactory.CreateClient(nameof(RazorpayGateway));
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get, $"https://api.razorpay.com/v1/payment_links/{gatewayReference}");
+            request.Headers.Add(
+                "Authorization",
+                "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"{keyId}:{keySecret}")));
+
+            var response = await client.SendAsync(request, cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "Razorpay status lookup for {Reference} failed: {Status} {Body}",
+                    gatewayReference, (int)response.StatusCode, body);
+                return new GatewayPaymentStatus { State = GatewayPaymentState.Unknown };
+            }
+
+            using var json = JsonDocument.Parse(body);
+            var root = json.RootElement;
+            // status: created | partially_paid | paid | cancelled | expired
+            var status = root.TryGetProperty("status", out var s) ? s.GetString() : null;
+
+            return status switch
+            {
+                "paid" => new GatewayPaymentStatus
+                {
+                    State = GatewayPaymentState.Paid,
+                    PaymentId = FirstPaymentId(root),
+                },
+                "cancelled" or "expired" => new GatewayPaymentStatus { State = GatewayPaymentState.Failed },
+                _ => new GatewayPaymentStatus { State = GatewayPaymentState.Pending },
+            };
+        }
+
+        /// <summary>The captured payment id from a paid link's payments array, if present.</summary>
+        private static string? FirstPaymentId(JsonElement linkRoot)
+        {
+            if (linkRoot.TryGetProperty("payments", out var payments)
+                && payments.ValueKind == JsonValueKind.Array
+                && payments.GetArrayLength() > 0
+                && payments[0].TryGetProperty("payment_id", out var pid))
+            {
+                return pid.GetString();
+            }
+
+            return null;
+        }
+
+        // Trimmed so a stray space/newline pasted into Settings → Integrations can't corrupt Basic auth.
+        private static string? Val(IReadOnlyDictionary<string, string?> config, string key) =>
+            config.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value.Trim() : null;
     }
 }

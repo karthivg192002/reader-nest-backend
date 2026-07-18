@@ -69,6 +69,9 @@ namespace iucs.readernest.application.Dto.Enrollment
     {
         public Guid Id { get; set; }
 
+        /// <summary>The owning parent profile — needed to start a subscription for this child.</summary>
+        public Guid ParentProfileId { get; set; }
+
         public string FullName { get; set; } = null!;
 
         public int? Age { get; set; }

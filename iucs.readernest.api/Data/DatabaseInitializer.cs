@@ -37,6 +37,7 @@ namespace iucs.readernest.api.Data
             await SeedMenusAsync(context);
             await RemoveRetiredMenusAsync(context);
             await EnsureSubAdminIntegrationsMenuAsync(context);
+            await EnsurePackagesAndStudentViewMenusAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
             await EnsureCashPaymentMethodAsync(context);
@@ -332,6 +333,7 @@ namespace iucs.readernest.api.Data
             ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck", PermissionModule.Admission),
             ("admin", "Content", "Content & Resources", "/admin/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
             ("admin", "Finance", "Billing & Finance", "/admin/billing", "Receipt", PermissionModule.BillingFinance),
+            ("admin", "Finance", "Packages & Subscriptions", "/admin/packages", "CreditCard", PermissionModule.BillingFinance),
             ("admin", "Finance", "Payment Gateway Mapping", "/admin/payment-mapping", "Landmark", PermissionModule.BillingFinance),
             ("admin", "Finance", "Teacher Payouts", "/admin/payouts", "Wallet", PermissionModule.Payouts),
             ("admin", "Finance", "Fee Suspension", "/admin/fee-suspension", "Ban", PermissionModule.BillingFinance),
@@ -349,6 +351,7 @@ namespace iucs.readernest.api.Data
             ("parent", null, "Dashboard", "/parent", "LayoutDashboard", null),
             ("parent", "Learning", "Schedule & Live Class", "/parent/schedule", "CalendarClock", PermissionModule.SessionCalendarManagement),
             ("parent", "Learning", "Resources & Recordings", "/parent/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
+            ("parent", "Learning", "Student View", "/student", "Sparkles", null),
             ("parent", "Account", "Payments & Billing", "/parent/billing", "CreditCard", PermissionModule.BillingFinance),
             ("parent", "Account", "Notifications & Reports", "/parent/notifications", "Bell", PermissionModule.Communication),
             ("parent", "Account", "Add Child", "/parent/add-child", "UserPlus", null),
@@ -433,6 +436,62 @@ namespace iucs.readernest.api.Data
                 IsActive = true,
                 RequiredModule = PermissionModule.Settings,
             });
+        }
+
+        /// <summary>
+        /// Inserts the Admin "Packages &amp; Subscriptions" and Parent "Student View" menu
+        /// items into databases seeded before those screens existed (SeedMenusAsync only
+        /// ever creates rows once). Idempotent: each insert is skipped when the row exists.
+        /// </summary>
+        private static async Task EnsurePackagesAndStudentViewMenusAsync(ReaderNestDbContext context)
+        {
+            if (!await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == "/admin/packages"))
+            {
+                // Slot directly after "Billing & Finance"; push the rest of Finance down one.
+                var billing = await context.MenuItems
+                    .FirstOrDefaultAsync(m => m.Portal == "admin" && m.Path == "/admin/billing");
+                var financeItems = await context.MenuItems
+                    .Where(m => m.Portal == "admin" && m.Section == "Finance")
+                    .ToListAsync();
+                var insertAt = (billing?.SortOrder ?? -1) + 1;
+                foreach (var item in financeItems.Where(m => m.SortOrder >= insertAt))
+                {
+                    item.SortOrder += 1;
+                }
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "admin",
+                    Section = "Finance",
+                    SectionOrder = billing?.SectionOrder ?? 3,
+                    Label = "Packages & Subscriptions",
+                    Path = "/admin/packages",
+                    Icon = "CreditCard",
+                    SortOrder = insertAt,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.BillingFinance,
+                });
+            }
+
+            if (!await context.MenuItems.AnyAsync(m => m.Portal == "parent" && m.Path == "/student"))
+            {
+                var learningItems = await context.MenuItems
+                    .Where(m => m.Portal == "parent" && m.Section == "Learning")
+                    .ToListAsync();
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "parent",
+                    Section = "Learning",
+                    SectionOrder = learningItems.FirstOrDefault()?.SectionOrder ?? 1,
+                    Label = "Student View",
+                    Path = "/student",
+                    Icon = "Sparkles",
+                    SortOrder = learningItems.Count == 0 ? 0 : learningItems.Max(m => m.SortOrder) + 1,
+                    IsActive = true,
+                    RequiredModule = null,
+                });
+            }
         }
 
         private static async Task SeedMenusAsync(ReaderNestDbContext context)

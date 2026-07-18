@@ -91,6 +91,18 @@ namespace iucs.readernest.application.Services
             RejectCashIntentRequest request,
             CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// Pull-based settlement: polls the gateway for each of the invoice's pending checkout
+        /// links and settles the invoice if the gateway reports it paid. This is what lets a
+        /// completed payment flip the invoice to Paid without waiting on an inbound webhook
+        /// (essential on localhost, a safety net in production). Ownership-checked to the parent;
+        /// returns the (possibly updated) invoice.
+        /// </summary>
+        Task<InvoiceDto> ReconcileInvoicePaymentAsync(
+            Guid parentUserId,
+            Guid invoiceId,
+            CancellationToken cancellationToken = default);
+
         // Renewal tracking workflow: subscriptions drive recurring billing and renew/lapse explicitly
         Task<IReadOnlyList<SubscriptionDto>> ListSubscriptionsAsync(
             SubscriptionStatus? status,

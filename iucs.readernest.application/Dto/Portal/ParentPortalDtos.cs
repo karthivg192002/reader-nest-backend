@@ -72,6 +72,37 @@ namespace iucs.readernest.application.Dto.Reports
 
         /// <summary>Admission funnel counts: demo booked → completed → follow-up → enrolled.</summary>
         public IReadOnlyList<FunnelStageDto> EnrollmentFunnel { get; set; } = [];
+
+        /// <summary>Student attendance % per week for the last 6 weeks (oldest first).</summary>
+        public IReadOnlyList<AttendanceWeekDto> WeeklyAttendanceTrend { get; set; } = [];
+
+        /// <summary>Active-batch fill rate per course (highest first).</summary>
+        public IReadOnlyList<CourseOccupancyDto> BatchOccupancyByCourse { get; set; } = [];
+
+        /// <summary>Demo→enrolled conversion % per booking-month for the last 6 calendar months (oldest first).</summary>
+        public IReadOnlyList<ConversionPointDto> ConversionRateTrend { get; set; } = [];
+    }
+
+    public class AttendanceWeekDto
+    {
+        /// <summary>Week label — the Monday the week starts on (e.g. "23 Jun").</summary>
+        public string Week { get; set; } = null!;
+
+        public double Attendance { get; set; }
+    }
+
+    public class CourseOccupancyDto
+    {
+        public string Course { get; set; } = null!;
+
+        public double Occupancy { get; set; }
+    }
+
+    public class ConversionPointDto
+    {
+        public string Month { get; set; } = null!;
+
+        public double Rate { get; set; }
     }
 
     public class RevenuePointDto

@@ -138,6 +138,20 @@ namespace iucs.readernest.api.Controllers
             return Ok(await billingService.InitiateParentPaymentAsync(UserId(), id, request, cancellationToken));
         }
 
+        /// <summary>
+        /// After returning from the gateway checkout, asks the gateway directly whether the
+        /// link is paid and settles the invoice if so — no webhook required. Returns the
+        /// refreshed invoice so the UI can flip to Paid.
+        /// </summary>
+        [HttpPost("invoices/{id:guid}/refresh-payment")]
+        public async Task<ActionResult<InvoiceDto>> RefreshPayment(
+            Guid id,
+            [FromServices] IBillingService billingService,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await billingService.ReconcileInvoicePaymentAsync(UserId(), id, cancellationToken));
+        }
+
         /// <summary>Grant-checked worksheet download (books stay view-only).</summary>
         [HttpGet("resources/{id:guid}/download")]
         public async Task<IActionResult> DownloadResource(

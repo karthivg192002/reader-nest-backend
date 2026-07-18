@@ -63,6 +63,24 @@ namespace iucs.readernest.api.Controllers
             return NoContent();
         }
 
+        /// <summary>The signed-in user's own account (any role) — for the Profile screen.</summary>
+        [HttpGet("me")]
+        [Microsoft.AspNetCore.Authorization.Authorize]
+        public async Task<ActionResult<UserDto>> Me(CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value);
+            return Ok(await _userService.GetAsync(userId, cancellationToken));
+        }
+
+        /// <summary>Self-service update of the signed-in user's own name, phone and timezone.</summary>
+        [HttpPut("me")]
+        [Microsoft.AspNetCore.Authorization.Authorize]
+        public async Task<ActionResult<UserDto>> UpdateMe(UpdateUserRequest request, CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value);
+            return Ok(await _userService.UpdateAsync(userId, request, cancellationToken));
+        }
+
         /// <summary>
         /// The signed-in member's permanent personal meeting room (Zoom-style): one
         /// stable room id, startable any time. Minted on first request.

@@ -53,6 +53,8 @@ namespace iucs.readernest.tests
 
         private BillingService CreateBillingService() => new(_db.UnitOfWork, _auditLog, new FakePaymentGateway(), _notifications);
 
+        private BillingService CreateBillingService(FakePaymentGateway gateway) => new(_db.UnitOfWork, _auditLog, gateway, _notifications);
+
         private EnrollmentService CreateEnrollmentService() => new(_db.UnitOfWork, _auditLog);
 
         private MenuService CreateMenuService() => new(_db.UnitOfWork, _auditLog);
@@ -293,7 +295,10 @@ namespace iucs.readernest.tests
             var parentUser = await _db.SeedUserAsync($"sub-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
             var parentProfile = new ParentProfile { UserId = parentUser.Id };
             var plan = new PackagePlan { Name = "Monthly", BillingType = BillingType.Subscription, BillingCycle = BillingCycle.Monthly, Price = 2000 };
-            _db.Context.AddRange(parentProfile, plan);
+            // Starting/renewing a subscription now issues its first invoice immediately,
+            // which routes through the department's payment account.
+            var account = new PaymentAccount { Name = "Phonics", Department = Department.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" };
+            _db.Context.AddRange(parentProfile, plan, account);
             await _db.Context.SaveChangesAsync();
             var child = new Child { ParentProfileId = parentProfile.Id, FirstName = "Kid", LastName = "One", IsActive = true };
             _db.Context.Children.Add(child);
@@ -308,6 +313,48 @@ namespace iucs.readernest.tests
 
             var renewed = await billing.RenewSubscriptionAsync(sub.Id);
             Assert.Equal(SubscriptionStatus.Active, renewed.Status);
+        }
+
+        [Fact]
+        public async Task ScheduleSession_OnHoliday_IsBlocked()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync();
+            var holiday = new DateOnly(2026, 8, 15);
+            _db.Context.Holidays.Add(new Holiday { Name = "Independence Day", Date = holiday });
+            await _db.Context.SaveChangesAsync();
+
+            var start = holiday.ToDateTime(new TimeOnly(10, 0), DateTimeKind.Utc);
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+                {
+                    BatchId = batch.Id,
+                    TeacherProfileId = teacher.Id,
+                    Type = SessionType.Regular,
+                    ScheduledStartAtUtc = start,
+                    ScheduledEndAtUtc = start.AddMinutes(45),
+                }));
+        }
+
+        [Fact]
+        public async Task CreateHoliday_CarriesForwardClashingSessions()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            var holidayDate = DateOnly.FromDateTime(session.ScheduledStartAtUtc);
+            _db.Context.ChangeTracker.Clear();
+
+            await CreateAcademicOpsService().CreateHolidayAsync(new SaveHolidayRequest
+            {
+                Name = "Surprise Holiday",
+                Date = holidayDate,
+            });
+
+            var original = await _db.Context.ClassSessions.FirstAsync(s => s.Id == session.Id);
+            Assert.Equal(SessionStatus.Cancelled, original.Status); // freed from the holiday
+            var carried = await _db.Context.ClassSessions
+                .FirstAsync(s => s.CarriedForwardFromSessionId == session.Id);
+            Assert.Equal(SessionStatus.CarriedForward, carried.Status);
+            Assert.Equal(session.ScheduledStartAtUtc.AddDays(7), carried.ScheduledStartAtUtc); // next available week
         }
 
         [Fact]
@@ -685,6 +732,53 @@ namespace iucs.readernest.tests
             Assert.Equal(TransactionStatus.Success, settled.Status);
             Assert.StartsWith("RCP-", settled.ReceiptNumber);
             Assert.Contains("pay_123", settled.GatewayTransactionId);
+        }
+
+        [Fact]
+        public async Task ReconcileInvoicePayment_SettlesFromGatewayStatus_WithoutWebhook()
+        {
+            var parentUser = await _db.SeedUserAsync($"reconcile-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            _db.Context.ParentProfiles.Add(parentProfile);
+            _db.Context.PaymentAccounts.Add(new PaymentAccount
+            {
+                Name = "Phonics",
+                Department = Department.Phonics,
+                GatewayProvider = "razorpay",
+                GatewayAccountRef = "acc-1",
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var gateway = new FakePaymentGateway();
+            var billing = CreateBillingService(gateway);
+            var invoice = await billing.CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = parentProfile.Id,
+                Department = Department.Phonics,
+                Amount = 950,
+                DueDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)),
+            });
+
+            var result = await billing.InitiateParentPaymentAsync(
+                parentUser.Id, invoice.Id, new InitiateParentPaymentRequest { MethodKey = "razorpay" });
+
+            // Before reconcile: the invoice is still unpaid (no webhook arrived).
+            var before = await _db.Context.Invoices.FirstAsync(i => i.Id == invoice.Id);
+            Assert.NotEqual(InvoiceStatus.Paid, before.Status);
+
+            // The gateway now reports the link paid; a pull-based reconcile settles it.
+            gateway.PaidReferences.Add(result.GatewayReference!);
+            _db.Context.ChangeTracker.Clear();
+
+            var refreshed = await billing.ReconcileInvoicePaymentAsync(parentUser.Id, invoice.Id);
+
+            Assert.Equal(InvoiceStatus.Paid, refreshed.Status);
+            var storedInvoice = await _db.Context.Invoices.FirstAsync(i => i.Id == invoice.Id);
+            Assert.Equal(InvoiceStatus.Paid, storedInvoice.Status);
+            Assert.Equal(950, storedInvoice.AmountPaid);
+            var settled = await _db.Context.PaymentTransactions.SingleAsync(t => t.InvoiceId == invoice.Id);
+            Assert.Equal(TransactionStatus.Success, settled.Status);
+            Assert.StartsWith("RCP-", settled.ReceiptNumber);
         }
 
         [Fact]

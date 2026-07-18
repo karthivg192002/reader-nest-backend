@@ -26,7 +26,10 @@ namespace iucs.readernest.api.Services.Payments
 
         public string IntegrationKey => "cashfree";
 
-        public IReadOnlyList<string> RequiredConfigKeys { get; } = ["appId", "secretKey"];
+        public string ConfigHint => "App Id (appId) and Secret Key (secretKey)";
+
+        public bool IsConfigured(IReadOnlyDictionary<string, string?> config) =>
+            Value(config, "appId") is not null && Value(config, "secretKey") is not null;
 
         public async Task<PaymentLinkResult> CreatePaymentLinkAsync(
             Invoice invoice,
@@ -137,7 +140,59 @@ namespace iucs.readernest.api.Services.Payments
             return new RefundResult { GatewayRefundId = id };
         }
 
+        public async Task<GatewayPaymentStatus> GetPaymentStatusAsync(
+            string gatewayReference,
+            IReadOnlyDictionary<string, string?> config,
+            CancellationToken cancellationToken)
+        {
+            // Our Cashfree link ids are minted as "RN-…"; anything else isn't ours.
+            if (string.IsNullOrWhiteSpace(gatewayReference) || !gatewayReference.StartsWith("RN-", StringComparison.Ordinal))
+            {
+                return new GatewayPaymentStatus { State = GatewayPaymentState.Unknown };
+            }
+
+            var appId = Value(config, "appId");
+            var secretKey = Value(config, "secretKey");
+            if (appId is null || secretKey is null)
+            {
+                return new GatewayPaymentStatus { State = GatewayPaymentState.Unknown };
+            }
+
+            var baseUrl = string.Equals(Value(config, "mode"), "live", StringComparison.OrdinalIgnoreCase)
+                ? "https://api.cashfree.com"
+                : "https://sandbox.cashfree.com";
+
+            var client = _httpClientFactory.CreateClient(nameof(CashfreeGateway));
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/pg/links/{gatewayReference}");
+            request.Headers.Add("x-client-id", appId);
+            request.Headers.Add("x-client-secret", secretKey);
+            request.Headers.Add("x-api-version", ApiVersion);
+
+            var response = await client.SendAsync(request, cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "Cashfree status lookup for {Reference} failed: {Status} {Body}",
+                    gatewayReference, (int)response.StatusCode, body);
+                return new GatewayPaymentStatus { State = GatewayPaymentState.Unknown };
+            }
+
+            using var json = JsonDocument.Parse(body);
+            var root = json.RootElement;
+            // link_status: ACTIVE | PAID | PARTIALLY_PAID | EXPIRED | CANCELLED
+            var status = root.TryGetProperty("link_status", out var s) ? s.GetString() : null;
+
+            return (status?.ToUpperInvariant()) switch
+            {
+                "PAID" => new GatewayPaymentStatus { State = GatewayPaymentState.Paid },
+                "EXPIRED" or "CANCELLED" => new GatewayPaymentStatus { State = GatewayPaymentState.Failed },
+                _ => new GatewayPaymentStatus { State = GatewayPaymentState.Pending },
+            };
+        }
+
+        // Trimmed so a stray space/newline pasted into Settings → Integrations can't corrupt the auth headers.
         private static string? Value(IReadOnlyDictionary<string, string?> config, string key) =>
-            config.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : null;
+            config.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value.Trim() : null;
     }
 }

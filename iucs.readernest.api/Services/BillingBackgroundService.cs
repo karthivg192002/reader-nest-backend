@@ -1,3 +1,4 @@
+using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Billing;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Entities.Billing;
@@ -130,10 +131,74 @@ namespace iucs.readernest.api.Services
                     dueSubscriptions.Count, overdueInvoices.Count, suspendedCount);
             }
 
+            // Pull-based payment settlement: catch any gateway payment whose webhook never
+            // arrived (localhost has no public webhook URL; production webhooks can be missed).
+            await ReconcilePendingGatewayPaymentsAsync(scope.ServiceProvider, unitOfWork, billingService, now, cancellationToken);
+
             // Payment reminders go out once a day (the 08:00 UTC cycle), not every hour
             if (now.Hour == 8)
             {
                 await SendPaymentRemindersAsync(scope.ServiceProvider, unitOfWork, today, cancellationToken);
+            }
+        }
+
+        /// <summary>
+        /// Polls the gateway for recent pending checkout links and settles the invoice when
+        /// the provider reports the link paid. Bounded to the last few days (abandoned links
+        /// expire and won't suddenly pay) and a sane cap, so it stays cheap.
+        /// </summary>
+        private async Task ReconcilePendingGatewayPaymentsAsync(
+            IServiceProvider services,
+            IUnitOfWork unitOfWork,
+            IBillingService billingService,
+            DateTime now,
+            CancellationToken cancellationToken)
+        {
+            var since = now.AddDays(-4);
+            var pending = await unitOfWork.Repository<PaymentTransaction>().Query()
+                .Where(t => t.Status == TransactionStatus.Pending
+                            && t.GatewayTransactionId != null
+                            && (t.Method == null || t.Method != PaymentMethod.Cash)
+                            && t.CreatedAtUtc >= since)
+                .OrderBy(t => t.CreatedAtUtc)
+                .Take(200)
+                .ToListAsync(cancellationToken);
+
+            if (pending.Count == 0)
+            {
+                return;
+            }
+
+            var gateway = services.GetRequiredService<IPaymentGateway>();
+            var settled = 0;
+            foreach (var transaction in pending)
+            {
+                try
+                {
+                    var status = await gateway.GetPaymentStatusAsync(transaction.GatewayTransactionId!, cancellationToken);
+                    if (status.State == GatewayPaymentState.Paid)
+                    {
+                        await billingService.SettleGatewayTransactionAsync(
+                            transaction.GatewayTransactionId!, succeeded: true, status.PaymentId, null, cancellationToken);
+                        settled++;
+                    }
+                    else if (status.State == GatewayPaymentState.Failed)
+                    {
+                        await billingService.SettleGatewayTransactionAsync(
+                            transaction.GatewayTransactionId!, succeeded: false, null,
+                            "The payment link was cancelled or expired.", cancellationToken);
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Reconcile failed for gateway reference {Reference}; will retry next cycle.",
+                        transaction.GatewayTransactionId);
+                }
+            }
+
+            if (settled > 0)
+            {
+                _logger.LogInformation("Payment reconcile: settled {Count} previously-pending gateway payment(s).", settled);
             }
         }
 

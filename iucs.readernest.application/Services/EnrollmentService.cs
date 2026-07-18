@@ -224,6 +224,7 @@ namespace iucs.readernest.application.Services
             return children.Select(c => new StudentDto
             {
                 Id = c.Id,
+                ParentProfileId = c.ParentProfileId,
                 FullName = $"{c.FirstName} {c.LastName}".Trim(),
                 Age = c.DateOfBirth is { } dob ? Math.Max(0, (today.DayNumber - dob.DayNumber) / 365) : null,
                 AcademicLevel = c.AcademicLevel,

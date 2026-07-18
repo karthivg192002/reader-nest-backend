@@ -12,8 +12,11 @@ namespace iucs.readernest.api.Services.Payments
         /// <summary>Integration key this adapter serves ("razorpay", "cashfree").</summary>
         string IntegrationKey { get; }
 
-        /// <summary>Config keys that must be non-empty for the adapter to run live.</summary>
-        IReadOnlyList<string> RequiredConfigKeys { get; }
+        /// <summary>True when the integration config carries everything this adapter needs to charge for real.</summary>
+        bool IsConfigured(IReadOnlyDictionary<string, string?> config);
+
+        /// <summary>Human-readable list of the credentials this adapter needs, for a config error message.</summary>
+        string ConfigHint { get; }
 
         Task<PaymentLinkResult> CreatePaymentLinkAsync(
             Invoice invoice,
@@ -26,6 +29,16 @@ namespace iucs.readernest.api.Services.Payments
             string gatewayPaymentId,
             decimal amount,
             string currency,
+            IReadOnlyDictionary<string, string?> config,
+            CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Polls this provider for a checkout link's current state. Returns
+        /// <see cref="GatewayPaymentState.Unknown"/> when the reference isn't one of this
+        /// provider's (so the dispatcher can try the next adapter) or the status can't be read.
+        /// </summary>
+        Task<GatewayPaymentStatus> GetPaymentStatusAsync(
+            string gatewayReference,
             IReadOnlyDictionary<string, string?> config,
             CancellationToken cancellationToken);
     }

@@ -39,25 +39,50 @@ namespace iucs.readernest.api.Services.Payments
             string? preferredMethodKey = null,
             CancellationToken cancellationToken = default)
         {
-            var adapter = ResolveAdapter(account, preferredMethodKey);
+            // The payer's chosen gateway wins; otherwise fall back to the account's provider.
+            var explicitlyChosen = !string.IsNullOrWhiteSpace(preferredMethodKey);
+            var adapter = ResolveAdapter(preferredMethodKey) ?? ResolveAdapter(account.GatewayProvider);
+
             if (adapter is null)
             {
+                // Unknown/unset provider and no explicit gateway → demo/simulated link so the
+                // platform still works before real accounts are wired.
                 _logger.LogInformation(
                     "No gateway adapter matches method '{Method}' / provider '{Provider}' for account {Account}; using the simulated gateway.",
                     preferredMethodKey, account.GatewayProvider, account.Name);
                 return await _simulated.CreatePaymentLinkAsync(invoice, account, preferredMethodKey, cancellationToken);
             }
 
-            var (live, config) = await ResolveLiveConfigAsync(adapter, cancellationToken);
-            if (!live)
+            var integration = await _unitOfWork.Repository<Integration>().Query()
+                .FirstOrDefaultAsync(i => i.Key == adapter.IntegrationKey, cancellationToken);
+            var config = DecodeConfig(integration?.ConfigJson);
+            var enabled = integration is { IsEnabled: true };
+            var configured = adapter.IsConfigured(config);
+
+            if (enabled && configured)
             {
-                _logger.LogInformation(
-                    "Integration '{Key}' is disabled or missing credentials; using the simulated gateway for invoice {Invoice}.",
-                    adapter.IntegrationKey, invoice.InvoiceNumber);
-                return await _simulated.CreatePaymentLinkAsync(invoice, account, preferredMethodKey, cancellationToken);
+                return await adapter.CreatePaymentLinkAsync(invoice, account, config, cancellationToken);
             }
 
-            return await adapter.CreatePaymentLinkAsync(invoice, account, config, cancellationToken);
+            // The payer picked this gateway explicitly → hand back a clear reason instead of
+            // silently redirecting to a fake link. Returning (not throwing) keeps this expected,
+            // payer-actionable case off the exception path so the UI shows it inline.
+            if (explicitlyChosen)
+            {
+                var reason = !enabled
+                    ? $"{adapter.IntegrationKey} payments are turned off. Enable it in Settings → Integrations."
+                    : $"{adapter.IntegrationKey} is not fully configured. Add its {adapter.ConfigHint} in Settings → Integrations.";
+
+                _logger.LogInformation(
+                    "Payer chose '{Key}' but it is disabled/unconfigured for invoice {Invoice}: {Reason}",
+                    adapter.IntegrationKey, invoice.InvoiceNumber, reason);
+                return new PaymentLinkResult { UnavailableReason = reason };
+            }
+
+            _logger.LogInformation(
+                "Integration '{Key}' disabled/unconfigured; using the simulated gateway for invoice {Invoice}.",
+                adapter.IntegrationKey, invoice.InvoiceNumber);
+            return await _simulated.CreatePaymentLinkAsync(invoice, account, preferredMethodKey, cancellationToken);
         }
 
         /// <summary>
@@ -74,7 +99,7 @@ namespace iucs.readernest.api.Services.Payments
             CancellationToken cancellationToken = default)
         {
             var gatewayPaymentId = ExtractSettledPaymentId(transaction.GatewayTransactionId);
-            var adapter = ResolveAdapter(account, preferredMethodKey: null);
+            var adapter = ResolveAdapter(account.GatewayProvider);
 
             if (adapter is null || gatewayPaymentId is null)
             {
@@ -94,6 +119,28 @@ namespace iucs.readernest.api.Services.Payments
             }
 
             return await adapter.RefundAsync(gatewayPaymentId, amount, transaction.Currency, config, cancellationToken);
+        }
+
+        public async Task<GatewayPaymentStatus> GetPaymentStatusAsync(
+            string gatewayReference,
+            CancellationToken cancellationToken = default)
+        {
+            // The pending transaction doesn't record which provider minted the reference, so
+            // ask each configured adapter; each returns Unknown unless the reference is its own.
+            foreach (var adapter in _adapters)
+            {
+                var integration = await _unitOfWork.Repository<Integration>().Query()
+                    .FirstOrDefaultAsync(i => i.Key == adapter.IntegrationKey, cancellationToken);
+                var config = DecodeConfig(integration?.ConfigJson);
+
+                var status = await adapter.GetPaymentStatusAsync(gatewayReference, config, cancellationToken);
+                if (status.State != GatewayPaymentState.Unknown)
+                {
+                    return status;
+                }
+            }
+
+            return new GatewayPaymentStatus { State = GatewayPaymentState.Unknown };
         }
 
         /// <summary>GatewayTransactionId becomes "linkRef|paymentId" once a webhook settles it (see BillingService.SettleGatewayTransactionAsync); null before that.</summary>
@@ -116,11 +163,7 @@ namespace iucs.readernest.api.Services.Payments
             var integration = await _unitOfWork.Repository<Integration>().Query()
                 .FirstOrDefaultAsync(i => i.Key == adapter.IntegrationKey, cancellationToken);
             var config = DecodeConfig(integration?.ConfigJson);
-
-            var live = integration is not null
-                && integration.IsEnabled
-                && adapter.RequiredConfigKeys.All(k =>
-                    config.TryGetValue(k, out var v) && !string.IsNullOrWhiteSpace(v));
+            var live = integration is { IsEnabled: true } && adapter.IsConfigured(config);
 
             return (live, config);
         }
@@ -129,16 +172,14 @@ namespace iucs.readernest.api.Services.Payments
         /// The payer's explicit method choice wins; the department account's GatewayProvider
         /// is the fallback for callers that don't carry one (e.g. admin share links, refunds).
         /// </summary>
-        private IGatewayAdapter? ResolveAdapter(PaymentAccount account, string? preferredMethodKey)
+        private IGatewayAdapter? ResolveAdapter(string? providerKey)
         {
-            var method = (preferredMethodKey ?? string.Empty).Trim().ToLowerInvariant();
-            var byMethod = _adapters.FirstOrDefault(a => method.Contains(a.IntegrationKey));
-            if (byMethod is not null)
+            var provider = (providerKey ?? string.Empty).Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(provider))
             {
-                return byMethod;
+                return null;
             }
 
-            var provider = (account.GatewayProvider ?? string.Empty).ToLowerInvariant();
             return _adapters.FirstOrDefault(a => provider.Contains(a.IntegrationKey));
         }
 

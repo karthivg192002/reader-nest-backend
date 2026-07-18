@@ -51,6 +51,9 @@ namespace iucs.readernest.tests
 
     public class FakePaymentGateway : IPaymentGateway
     {
+        /// <summary>References set here report Paid on the next status poll (drives reconcile tests).</summary>
+        public HashSet<string> PaidReferences { get; } = new();
+
         public Task<PaymentLinkResult> CreatePaymentLinkAsync(
             Invoice invoice,
             PaymentAccount account,
@@ -71,6 +74,16 @@ namespace iucs.readernest.tests
             CancellationToken cancellationToken = default)
         {
             return Task.FromResult(new RefundResult { GatewayRefundId = $"TEST-REFUND-{transaction.Id}" });
+        }
+
+        public Task<GatewayPaymentStatus> GetPaymentStatusAsync(
+            string gatewayReference,
+            CancellationToken cancellationToken = default)
+        {
+            var state = PaidReferences.Contains(gatewayReference)
+                ? GatewayPaymentState.Paid
+                : GatewayPaymentState.Pending;
+            return Task.FromResult(new GatewayPaymentStatus { State = state, PaymentId = $"pay_{gatewayReference}" });
         }
     }
 

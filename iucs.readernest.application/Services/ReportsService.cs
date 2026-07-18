@@ -208,6 +208,73 @@ namespace iucs.readernest.application.Services
                 })
                 .ToList();
 
+            // Weekly attendance trend: student attendance % per week for the last 6 weeks (oldest first).
+            var today = DateTime.UtcNow.Date;
+            var mondayThisWeek = today.AddDays(-(((int)today.DayOfWeek + 6) % 7));
+            var attendanceWindowStart = mondayThisWeek.AddDays(-7 * 5);
+            var attendanceRows = await _unitOfWork.Repository<SessionAttendance>().Query()
+                .Where(a => a.ParticipantType == ParticipantType.Student
+                    && a.ClassSession.ScheduledStartAtUtc >= attendanceWindowStart)
+                .Select(a => new { a.Status, a.ClassSession.ScheduledStartAtUtc })
+                .ToListAsync(cancellationToken);
+            var weeklyAttendanceTrend = Enumerable.Range(0, 6)
+                .Select(offset =>
+                {
+                    var weekStart = attendanceWindowStart.AddDays(7 * offset);
+                    var weekEnd = weekStart.AddDays(7);
+                    var week = attendanceRows.Where(r => r.ScheduledStartAtUtc >= weekStart && r.ScheduledStartAtUtc < weekEnd).ToList();
+                    return new AttendanceWeekDto
+                    {
+                        Week = weekStart.ToString("dd MMM"),
+                        Attendance = week.Count == 0
+                            ? 0
+                            : Math.Round(100.0 * week.Count(r => r.Status != AttendanceStatus.Absent) / week.Count, 1),
+                    };
+                })
+                .ToList();
+
+            // Batch occupancy split by course (active batches only, highest fill first).
+            var occupancyByCourseRows = await _unitOfWork.Repository<Batch>().Query()
+                .Where(b => b.Status == BatchStatus.Active && b.Capacity > 0)
+                .Select(b => new
+                {
+                    CourseName = b.Course.Name,
+                    b.Capacity,
+                    Enrolled = b.Enrollments.Count(e => e.Status == EnrollmentStatus.Active),
+                })
+                .ToListAsync(cancellationToken);
+            var batchOccupancyByCourse = occupancyByCourseRows
+                .GroupBy(x => x.CourseName)
+                .Select(g => new CourseOccupancyDto
+                {
+                    Course = g.Key,
+                    Occupancy = Math.Round(100.0 * g.Sum(x => x.Enrolled) / g.Sum(x => x.Capacity), 1),
+                })
+                .OrderByDescending(c => c.Occupancy)
+                .ToList();
+
+            // Conversion trend: demo→enrolled % per booking-month over the same 6-month window.
+            var trendBookings = await _unitOfWork.Repository<DemoBooking>().Query()
+                .Where(b => b.CreatedAtUtc >= trendStart)
+                .Select(b => new { b.CreatedAtUtc, b.ConversionStatus })
+                .ToListAsync(cancellationToken);
+            var conversionRateTrend = Enumerable.Range(0, 6)
+                .Select(offset =>
+                {
+                    var month = trendStart.AddMonths(offset);
+                    var monthRows = trendBookings
+                        .Where(b => b.CreatedAtUtc.Year == month.Year && b.CreatedAtUtc.Month == month.Month)
+                        .ToList();
+                    return new ConversionPointDto
+                    {
+                        Month = month.ToString("MMM"),
+                        Rate = monthRows.Count == 0
+                            ? 0
+                            : Math.Round(100.0 * monthRows.Count(b => b.ConversionStatus == ConversionStatus.Enrolled) / monthRows.Count, 1),
+                    };
+                })
+                .ToList();
+
             // Enrollment funnel: cumulative demo-booking stage counts.
             var demoByStatus = await _unitOfWork.Repository<DemoBooking>().Query()
                 .GroupBy(b => b.ConversionStatus)
@@ -241,6 +308,9 @@ namespace iucs.readernest.application.Services
                 RevenueByDepartment = revenueByDepartment,
                 RevenueTrend = revenueTrend,
                 EnrollmentFunnel = enrollmentFunnel,
+                WeeklyAttendanceTrend = weeklyAttendanceTrend,
+                BatchOccupancyByCourse = batchOccupancyByCourse,
+                ConversionRateTrend = conversionRateTrend,
             };
         }
 

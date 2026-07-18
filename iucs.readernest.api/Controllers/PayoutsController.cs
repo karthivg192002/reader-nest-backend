@@ -21,7 +21,7 @@ namespace iucs.readernest.api.Controllers
 
         /// <summary>Visibility rule: admin (or granted sub-admin) sees all payouts.</summary>
         [HttpGet]
-        [HasPermission(PermissionModule.Payouts, PermissionAction.View)]
+        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
         public async Task<ActionResult<IReadOnlyList<PayoutDto>>> List(
             [FromQuery] int? year,
             [FromQuery] int? month,
@@ -42,14 +42,14 @@ namespace iucs.readernest.api.Controllers
 
         /// <summary>Locks the month's total and emails the statement to the teacher.</summary>
         [HttpPost("{id:guid}/finalize")]
-        [HasPermission(PermissionModule.Payouts, PermissionAction.Approve)]
+        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
         public async Task<ActionResult<PayoutDto>> Finalize(Guid id, CancellationToken cancellationToken)
         {
             return Ok(await _payoutService.FinalizeAsync(id, cancellationToken));
         }
 
         [HttpPost("{id:guid}/mark-paid")]
-        [HasPermission(PermissionModule.Payouts, PermissionAction.Approve)]
+        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
         public async Task<ActionResult<PayoutDto>> MarkPaid(Guid id, CancellationToken cancellationToken)
         {
             return Ok(await _payoutService.MarkPaidAsync(id, cancellationToken));
@@ -68,7 +68,7 @@ namespace iucs.readernest.api.Controllers
         }
 
         [HttpGet]
-        [HasPermission(PermissionModule.Payouts, PermissionAction.View)]
+        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
         public async Task<ActionResult<IReadOnlyList<PayoutRateDto>>> List(
             [FromQuery] Guid? teacherProfileId,
             CancellationToken cancellationToken)
@@ -78,7 +78,7 @@ namespace iucs.readernest.api.Controllers
 
         /// <summary>Configurable per-session rate by teacher and class duration.</summary>
         [HttpPost]
-        [HasPermission(PermissionModule.Payouts, PermissionAction.Edit)]
+        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
         public async Task<ActionResult<PayoutRateDto>> SetRate(
             SavePayoutRateRequest request,
             CancellationToken cancellationToken)

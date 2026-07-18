@@ -53,5 +53,12 @@ namespace iucs.readernest.api.Services
 
             return Task.FromResult(new RefundResult { GatewayRefundId = reference });
         }
+
+        // The simulated gateway has no provider to poll; reconciliation leaves its (demo-only)
+        // references untouched. Real settlement of a SIM- link is done by admin manual entry.
+        public Task<GatewayPaymentStatus> GetPaymentStatusAsync(
+            string gatewayReference,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new GatewayPaymentStatus { State = GatewayPaymentState.Unknown });
     }
 }
