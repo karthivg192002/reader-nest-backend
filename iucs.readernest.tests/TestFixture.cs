@@ -54,6 +54,7 @@ namespace iucs.readernest.tests
         public Task<PaymentLinkResult> CreatePaymentLinkAsync(
             Invoice invoice,
             PaymentAccount account,
+            string? preferredMethodKey = null,
             CancellationToken cancellationToken = default)
         {
             return Task.FromResult(new PaymentLinkResult
@@ -61,6 +62,15 @@ namespace iucs.readernest.tests
                 Url = $"https://pay.test/{invoice.Id}",
                 GatewayReference = $"TEST-{invoice.InvoiceNumber}",
             });
+        }
+
+        public Task<RefundResult> RefundAsync(
+            PaymentTransaction transaction,
+            PaymentAccount account,
+            decimal amount,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new RefundResult { GatewayRefundId = $"TEST-REFUND-{transaction.Id}" });
         }
     }
 

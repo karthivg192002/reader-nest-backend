@@ -18,5 +18,12 @@ namespace iucs.readernest.domain.Entities.Billing
         public RefundStatus Status { get; set; } = RefundStatus.Requested;
 
         public DateTime? ProcessedAtUtc { get; set; }
+
+        /// <summary>
+        /// The gateway's refund id once disbursed through Razorpay/Cashfree; null for cash
+        /// transactions (nothing to call a gateway for) or while still Requested/Rejected.
+        /// </summary>
+        [MaxLength(256)]
+        public string? GatewayRefundId { get; set; }
     }
 }

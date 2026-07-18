@@ -33,8 +33,11 @@ namespace iucs.readernest.api.Data
             await SeedPaymentAccountsAsync(context);
             await SeedSettingsAsync(context);
             await SeedRolesAsync(context);
+            await BackfillSystemRolePermissionsAsync(context);
             await SeedMenusAsync(context);
             await RemoveRetiredMenusAsync(context);
+            await EnsureSubAdminIntegrationsMenuAsync(context);
+            await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
             await EnsureCashPaymentMethodAsync(context);
             await EnsureSmsIntegrationAsync(context);
@@ -77,19 +80,23 @@ namespace iucs.readernest.api.Data
                 return;
             }
 
+            // Defaults match the dual-gateway requirement (Phonics -> Razorpay, Maths -> Cashfree).
+            // These only route live once the matching Settings -> Integrations record is enabled
+            // with real credentials; until then PaymentGatewayDispatcher falls back to the
+            // simulated gateway. Admin can repoint either account from Payment Gateway Mapping.
             context.PaymentAccounts.AddRange(
                 new PaymentAccount
                 {
                     Name = "Phonics Department Account",
                     Department = Department.Phonics,
-                    GatewayProvider = "pending-client-decision",
+                    GatewayProvider = "razorpay",
                     GatewayAccountRef = "phonics-account",
                 },
                 new PaymentAccount
                 {
                     Name = "Maths Department Account",
                     Department = Department.Maths,
-                    GatewayProvider = "pending-client-decision",
+                    GatewayProvider = "cashfree",
                     GatewayAccountRef = "maths-account",
                 });
         }
@@ -195,6 +202,51 @@ namespace iucs.readernest.api.Data
             }
         }
 
+        /// <summary>
+        /// Additive-only upgrade for system roles seeded before a given module was part
+        /// of their default grant (e.g. Admission gaining Billing &amp; Finance for cash
+        /// confirmation). Only inserts a module row the role doesn't already have — an
+        /// admin who has since edited/removed that module's grant is never overwritten.
+        /// </summary>
+        private static async Task BackfillSystemRolePermissionsAsync(ReaderNestDbContext context)
+        {
+            (string RoleName, PermissionModule Module, bool View, bool Create, bool Edit, bool Delete, bool Approve)[] additions =
+            [
+                ("teacher", PermissionModule.Payouts, true, false, false, false, false),
+                ("parent", PermissionModule.SessionCalendarManagement, true, false, false, false, false),
+                ("parent", PermissionModule.ContentAccessManagement, true, false, false, false, false),
+                ("parent", PermissionModule.BillingFinance, true, false, false, false, false),
+                ("parent", PermissionModule.Communication, true, false, false, false, false),
+                ("admission", PermissionModule.BillingFinance, true, false, true, false, true),
+            ];
+
+            var roleNames = additions.Select(a => a.RoleName).Distinct().ToList();
+            var roles = await context.RoleDefinitions
+                .Include(r => r.Permissions)
+                .Where(r => roleNames.Contains(r.Name))
+                .ToListAsync();
+
+            foreach (var (roleName, module, view, create, edit, delete, approve) in additions)
+            {
+                var role = roles.FirstOrDefault(r => r.Name == roleName);
+                if (role is null || role.Permissions.Any(p => p.Module == module))
+                {
+                    continue;
+                }
+
+                context.RolePermissions.Add(new RolePermission
+                {
+                    RoleDefinitionId = role.Id,
+                    Module = module,
+                    CanView = view,
+                    CanCreate = create,
+                    CanEdit = edit,
+                    CanDelete = delete,
+                    CanApprove = approve,
+                });
+            }
+        }
+
         private static IReadOnlyList<(string Name, string DisplayName, string Description, string DefaultRoute, PermissionDto[] Permissions)> SystemRoleSeeds()
         {
             PermissionDto Grant(PermissionModule module, bool view = false, bool create = false, bool edit = false, bool delete = false, bool approve = false) =>
@@ -213,14 +265,23 @@ namespace iucs.readernest.api.Data
                     Grant(PermissionModule.SessionCalendarManagement, view: true),
                     Grant(PermissionModule.ContentAccessManagement, view: true),
                     Grant(PermissionModule.LeaveManagement, view: true),
+                    Grant(PermissionModule.Payouts, view: true),
                 ]),
-                ("parent", "Parent", "Family account holder; managed through the parent portal.", "/parent", []),
+                ("parent", "Parent", "Family account holder; managed through the parent portal.", "/parent",
+                [
+                    Grant(PermissionModule.SessionCalendarManagement, view: true),
+                    Grant(PermissionModule.ContentAccessManagement, view: true),
+                    Grant(PermissionModule.BillingFinance, view: true),
+                    Grant(PermissionModule.Communication, view: true),
+                ]),
                 ("sub-admin", "Parent Relationship Manager", "Parent relationship management account; grant modules as needed.", "/subadmin", []),
                 ("admission", "Admission", "Demo-to-enrollment pipeline and lead follow-up.", "/admission",
                 [
                     Grant(PermissionModule.Admission, view: true, create: true, edit: true, approve: true),
                     Grant(PermissionModule.UserManagement, view: true),
                     Grant(PermissionModule.ReportsAnalytics, view: true),
+                    // Payment Tracking + cash confirmation: Approve gates the "confirm collected" action itself.
+                    Grant(PermissionModule.BillingFinance, view: true, edit: true, approve: true),
                 ]),
                 ("coordinator", "Coordinator", "Scheduling and calendar coordination with leave approval.", "/coordinator",
                 [
@@ -252,6 +313,128 @@ namespace iucs.readernest.api.Data
             }
         }
 
+        /// <summary>
+        /// (portal, section, label, path, lucide icon, required module); orders derive from
+        /// array position. Shared by the first-boot seed and the existing-database backfill
+        /// so the module mapping lives in exactly one place. A null module means the item is
+        /// always visible (dashboards and other mandatory, non-delegable actions); Admin
+        /// bypasses gating entirely regardless of what's set here.
+        /// </summary>
+        private static (string Portal, string? Section, string Label, string Path, string Icon, PermissionModule? RequiredModule)[] MenuSeedItems() =>
+        [
+            ("admin", null, "Dashboard", "/admin", "LayoutDashboard", null),
+            ("admin", "Academics", "Courses", "/admin/courses", "BookOpen", PermissionModule.CourseBatchManagement),
+            ("admin", "Academics", "Batches", "/admin/batches", "Layers", PermissionModule.CourseBatchManagement),
+            ("admin", "Academics", "Academic Calendar", "/admin/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement),
+            ("admin", "Academics", "Sessions", "/admin/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement),
+            ("admin", "People", "Users", "/admin/users", "Users", PermissionModule.UserManagement),
+            ("admin", "People", "Roles & Permissions", "/admin/permissions", "ShieldCheck", PermissionModule.UserManagement),
+            ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck", PermissionModule.Admission),
+            ("admin", "Content", "Content & Resources", "/admin/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
+            ("admin", "Finance", "Billing & Finance", "/admin/billing", "Receipt", PermissionModule.BillingFinance),
+            ("admin", "Finance", "Payment Gateway Mapping", "/admin/payment-mapping", "Landmark", PermissionModule.BillingFinance),
+            ("admin", "Finance", "Teacher Payouts", "/admin/payouts", "Wallet", PermissionModule.Payouts),
+            ("admin", "Finance", "Fee Suspension", "/admin/fee-suspension", "Ban", PermissionModule.BillingFinance),
+            ("admin", "Insights", "Reports & Analytics", "/admin/reports", "BarChart3", PermissionModule.ReportsAnalytics),
+            ("admin", "Insights", "Bulk Email", "/admin/bulk-email", "Mail", PermissionModule.Communication),
+            ("admin", "System", "Settings & Branding", "/admin/settings", "Settings", PermissionModule.Settings),
+            ("teacher", null, "Dashboard", "/teacher", "LayoutDashboard", null),
+            ("teacher", "Teaching", "My Classes", "/teacher/classes", "CalendarClock", PermissionModule.SessionCalendarManagement),
+            ("teacher", "Teaching", "Live Classroom", "/teacher/live/s-1", "Video", PermissionModule.SessionCalendarManagement),
+            ("teacher", "Teaching", "Attendance & Records", "/teacher/attendance", "ClipboardList", PermissionModule.SessionCalendarManagement),
+            ("teacher", "Teaching", "Demo Feedback", "/teacher/demo-feedback", "ClipboardCheck", PermissionModule.SessionCalendarManagement),
+            ("teacher", "My Account", "Leave Management", "/teacher/leave", "CalendarOff", PermissionModule.LeaveManagement),
+            ("teacher", "My Account", "My Payout", "/teacher/payout", "Banknote", PermissionModule.Payouts),
+            ("teacher", "My Account", "Resources", "/teacher/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
+            ("parent", null, "Dashboard", "/parent", "LayoutDashboard", null),
+            ("parent", "Learning", "Schedule & Live Class", "/parent/schedule", "CalendarClock", PermissionModule.SessionCalendarManagement),
+            ("parent", "Learning", "Resources & Recordings", "/parent/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
+            ("parent", "Account", "Payments & Billing", "/parent/billing", "CreditCard", PermissionModule.BillingFinance),
+            ("parent", "Account", "Notifications & Reports", "/parent/notifications", "Bell", PermissionModule.Communication),
+            ("parent", "Account", "Add Child", "/parent/add-child", "UserPlus", null),
+            ("subadmin", null, "Dashboard", "/subadmin", "LayoutDashboard", null),
+            ("subadmin", "Access", "My Permissions", "/subadmin/permissions", "ShieldCheck", null),
+            ("subadmin", "Access", "Integrations", "/subadmin/integrations", "Plug", PermissionModule.Settings),
+            ("subadmin", "Delegated Work", "Assigned Reports", "/subadmin/reports", "BarChart3", PermissionModule.ReportsAnalytics),
+            ("subadmin", "Delegated Work", "Audit Log", "/subadmin/audit-log", "History", null),
+            ("admission", null, "Dashboard", "/admission", "LayoutDashboard", null),
+            ("admission", "Pipeline", "Demo Scheduling", "/admission/demo-scheduling", "CalendarClock", PermissionModule.Admission),
+            ("admission", "Pipeline", "Demo Feedback", "/admission/demo-feedback", "ClipboardCheck", PermissionModule.Admission),
+            ("admission", "Pipeline", "Conversion Board", "/admission/conversion", "KanbanSquare", PermissionModule.Admission),
+            ("admission", "CRM", "Leads & Parents", "/admission/leads", "UserSearch", PermissionModule.Admission),
+            ("admission", "CRM", "Payment Tracking", "/admission/payments", "Link2", PermissionModule.BillingFinance),
+            ("admission", "Insights", "Reports", "/admission/reports", "BarChart3", PermissionModule.ReportsAnalytics),
+            ("coordinator", null, "Dashboard", "/coordinator", "LayoutDashboard", null),
+            ("coordinator", "Monitoring", "Academic Calendar", "/coordinator/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement),
+            ("coordinator", "Monitoring", "Teacher Availability", "/coordinator/availability", "CalendarRange", PermissionModule.SessionCalendarManagement),
+            ("management", null, "Executive Overview", "/management", "LayoutDashboard", null),
+            ("management", "Performance", "Revenue & Courses", "/management/revenue", "TrendingUp", PermissionModule.ReportsAnalytics),
+            ("management", "Performance", "Teacher & Batch Performance", "/management/performance", "Gauge", PermissionModule.ReportsAnalytics),
+            ("management", "Insights", "Reports", "/management/reports", "FileBarChart", PermissionModule.ReportsAnalytics),
+            ("student", null, "My Learning", "/student", "Sparkles", null),
+        ];
+
+        /// <summary>
+        /// Additive-only upgrade for menu items seeded before they carried a module gate:
+        /// sets RequiredModule from the canonical mapping above, but only where it's still
+        /// null — an admin who has since cleared or repointed an item's gate is never
+        /// overwritten. New (portal, path) rows found here that don't exist yet are ignored;
+        /// item creation is SeedMenusAsync's job, this only patches gating on existing rows.
+        /// </summary>
+        private static async Task BackfillMenuRequiredModulesAsync(ReaderNestDbContext context)
+        {
+            var existing = await context.MenuItems.ToListAsync();
+            foreach (var (portal, _, _, path, _, requiredModule) in MenuSeedItems())
+            {
+                if (requiredModule is null)
+                {
+                    continue;
+                }
+
+                var item = existing.FirstOrDefault(m => m.Portal == portal && m.Path == path);
+                if (item is not null && item.RequiredModule is null)
+                {
+                    item.RequiredModule = requiredModule;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Inserts the Sub Admin "Integrations" menu item into a database that was seeded
+        /// before this screen existed (SeedMenusAsync only ever creates rows once). Placed
+        /// right after "My Permissions" in the "Access" section, nudging Reports/Audit Log
+        /// down a slot so nothing collides.
+        /// </summary>
+        private static async Task EnsureSubAdminIntegrationsMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/subadmin/integrations";
+            if (await context.MenuItems.AnyAsync(m => m.Portal == "subadmin" && m.Path == path))
+            {
+                return;
+            }
+
+            var delegatedWork = await context.MenuItems
+                .Where(m => m.Portal == "subadmin" && m.Section == "Delegated Work")
+                .ToListAsync();
+            foreach (var item in delegatedWork)
+            {
+                item.SortOrder += 1;
+            }
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "subadmin",
+                Section = "Access",
+                SectionOrder = 1,
+                Label = "Integrations",
+                Path = path,
+                Icon = "Plug",
+                SortOrder = 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.Settings,
+            });
+        }
+
         private static async Task SeedMenusAsync(ReaderNestDbContext context)
         {
             if (await context.MenuItems.AnyAsync())
@@ -259,63 +442,10 @@ namespace iucs.readernest.api.Data
                 return;
             }
 
-            // (portal, section, label, path, lucide icon); orders derive from array position.
-            (string Portal, string? Section, string Label, string Path, string Icon)[] items =
-            [
-                ("admin", null, "Dashboard", "/admin", "LayoutDashboard"),
-                ("admin", "Academics", "Courses", "/admin/courses", "BookOpen"),
-                ("admin", "Academics", "Batches", "/admin/batches", "Layers"),
-                ("admin", "Academics", "Academic Calendar", "/admin/calendar", "CalendarDays"),
-                ("admin", "Academics", "Sessions", "/admin/sessions", "CalendarClock"),
-                ("admin", "People", "Users", "/admin/users", "Users"),
-                ("admin", "People", "Roles & Permissions", "/admin/permissions", "ShieldCheck"),
-                ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck"),
-                ("admin", "Content", "Content & Resources", "/admin/resources", "FolderOpen"),
-                ("admin", "Finance", "Billing & Finance", "/admin/billing", "Receipt"),
-                ("admin", "Finance", "Payment Gateway Mapping", "/admin/payment-mapping", "Landmark"),
-                ("admin", "Finance", "Teacher Payouts", "/admin/payouts", "Wallet"),
-                ("admin", "Finance", "Fee Suspension", "/admin/fee-suspension", "Ban"),
-                ("admin", "Insights", "Reports & Analytics", "/admin/reports", "BarChart3"),
-                ("admin", "Insights", "Bulk Email", "/admin/bulk-email", "Mail"),
-                ("admin", "System", "Settings & Branding", "/admin/settings", "Settings"),
-                ("teacher", null, "Dashboard", "/teacher", "LayoutDashboard"),
-                ("teacher", "Teaching", "My Classes", "/teacher/classes", "CalendarClock"),
-                ("teacher", "Teaching", "Live Classroom", "/teacher/live/s-1", "Video"),
-                ("teacher", "Teaching", "Attendance & Records", "/teacher/attendance", "ClipboardList"),
-                ("teacher", "Teaching", "Demo Feedback", "/teacher/demo-feedback", "ClipboardCheck"),
-                ("teacher", "My Account", "Leave Management", "/teacher/leave", "CalendarOff"),
-                ("teacher", "My Account", "My Payout", "/teacher/payout", "Banknote"),
-                ("teacher", "My Account", "Resources", "/teacher/resources", "FolderOpen"),
-                ("parent", null, "Dashboard", "/parent", "LayoutDashboard"),
-                ("parent", "Learning", "Schedule & Live Class", "/parent/schedule", "CalendarClock"),
-                ("parent", "Learning", "Resources & Recordings", "/parent/resources", "FolderOpen"),
-                ("parent", "Account", "Payments & Billing", "/parent/billing", "CreditCard"),
-                ("parent", "Account", "Notifications & Reports", "/parent/notifications", "Bell"),
-                ("parent", "Account", "Add Child", "/parent/add-child", "UserPlus"),
-                ("subadmin", null, "Dashboard", "/subadmin", "LayoutDashboard"),
-                ("subadmin", "Access", "My Permissions", "/subadmin/permissions", "ShieldCheck"),
-                ("subadmin", "Delegated Work", "Assigned Reports", "/subadmin/reports", "BarChart3"),
-                ("subadmin", "Delegated Work", "Audit Log", "/subadmin/audit-log", "History"),
-                ("admission", null, "Dashboard", "/admission", "LayoutDashboard"),
-                ("admission", "Pipeline", "Demo Scheduling", "/admission/demo-scheduling", "CalendarClock"),
-                ("admission", "Pipeline", "Demo Feedback", "/admission/demo-feedback", "ClipboardCheck"),
-                ("admission", "Pipeline", "Conversion Board", "/admission/conversion", "KanbanSquare"),
-                ("admission", "CRM", "Leads & Parents", "/admission/leads", "UserSearch"),
-                ("admission", "CRM", "Payment Tracking", "/admission/payments", "Link2"),
-                ("admission", "Insights", "Reports", "/admission/reports", "BarChart3"),
-                ("coordinator", null, "Dashboard", "/coordinator", "LayoutDashboard"),
-                ("coordinator", "Monitoring", "Academic Calendar", "/coordinator/calendar", "CalendarDays"),
-                ("coordinator", "Monitoring", "Teacher Availability", "/coordinator/availability", "CalendarRange"),
-                ("management", null, "Executive Overview", "/management", "LayoutDashboard"),
-                ("management", "Performance", "Revenue & Courses", "/management/revenue", "TrendingUp"),
-                ("management", "Performance", "Teacher & Batch Performance", "/management/performance", "Gauge"),
-                ("management", "Insights", "Reports", "/management/reports", "FileBarChart"),
-                ("student", null, "My Learning", "/student", "Sparkles"),
-            ];
-
+            var items = MenuSeedItems();
             var sectionOrders = new Dictionary<string, int>();
             var sortOrders = new Dictionary<string, int>();
-            foreach (var (portal, section, label, path, icon) in items)
+            foreach (var (portal, section, label, path, icon, requiredModule) in items)
             {
                 var sectionKey = $"{portal}|{section}";
                 if (!sectionOrders.TryGetValue(sectionKey, out var sectionOrder))
@@ -336,6 +466,7 @@ namespace iucs.readernest.api.Data
                     Path = path,
                     Icon = icon,
                     SortOrder = sortOrder,
+                    RequiredModule = requiredModule,
                     IsActive = true,
                 });
             }

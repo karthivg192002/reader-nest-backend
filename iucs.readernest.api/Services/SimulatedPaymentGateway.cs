@@ -25,18 +25,33 @@ namespace iucs.readernest.api.Services
         public Task<PaymentLinkResult> CreatePaymentLinkAsync(
             Invoice invoice,
             PaymentAccount account,
+            string? preferredMethodKey = null,
             CancellationToken cancellationToken = default)
         {
             var reference = $"SIM-{Guid.NewGuid():N}";
             _logger.LogInformation(
-                "Simulated payment link for invoice {InvoiceNumber} via {Provider}/{AccountRef} ({Department}): ref {Reference}",
-                invoice.InvoiceNumber, account.GatewayProvider, account.GatewayAccountRef, account.Department, reference);
+                "Simulated payment link for invoice {InvoiceNumber} via {Method}/{Provider}/{AccountRef} ({Department}): ref {Reference}",
+                invoice.InvoiceNumber, preferredMethodKey, account.GatewayProvider, account.GatewayAccountRef, account.Department, reference);
 
             return Task.FromResult(new PaymentLinkResult
             {
                 Url = $"{_payBaseUrl.TrimEnd('/')}/parent/billing?invoice={invoice.Id}&ref={reference}",
                 GatewayReference = reference,
             });
+        }
+
+        public Task<RefundResult> RefundAsync(
+            PaymentTransaction transaction,
+            PaymentAccount account,
+            decimal amount,
+            CancellationToken cancellationToken = default)
+        {
+            var reference = $"SIM-REFUND-{Guid.NewGuid():N}";
+            _logger.LogInformation(
+                "Simulated refund of {Amount} for transaction {Transaction} via {Provider}/{AccountRef}: ref {Reference}",
+                amount, transaction.Id, account.GatewayProvider, account.GatewayAccountRef, reference);
+
+            return Task.FromResult(new RefundResult { GatewayRefundId = reference });
         }
     }
 }

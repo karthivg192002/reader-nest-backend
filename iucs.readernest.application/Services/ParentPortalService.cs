@@ -158,6 +158,8 @@ namespace iucs.readernest.application.Services
             var parent = await GetParentAsync(parentUserId, cancellationToken);
             var invoices = await _unitOfWork.Repository<Invoice>().Query()
                 .Where(i => i.ParentProfileId == parent.Id)
+                .Include(i => i.Child)
+                .Include(i => i.Subscription).ThenInclude(s => s!.PackagePlan).ThenInclude(p => p.Course)
                 .OrderByDescending(i => i.IssuedAtUtc)
                 .ToListAsync(cancellationToken);
             return invoices.Select(i => i.ToDto()).ToList();

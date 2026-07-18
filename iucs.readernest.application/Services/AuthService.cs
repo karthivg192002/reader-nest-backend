@@ -99,17 +99,51 @@ namespace iucs.readernest.application.Services
             };
         }
 
+        /// <summary>System RoleDefinition name backing each fixed-portal UserRole's default grant.</summary>
+        private static string? SystemRoleNameFor(UserRole role) => role switch
+        {
+            UserRole.Teacher => "teacher",
+            UserRole.Parent => "parent",
+            UserRole.AdmissionTeam => "admission",
+            _ => null,
+        };
+
+        /// <summary>
+        /// Sub Admins carry their own per-user grant (SubAdminPermission — possibly seeded
+        /// from a preset but editable per person from then on). Every other non-Admin role
+        /// (Teacher/Parent/Admission Team) shares one grant: its matching system
+        /// RoleDefinition, editable from the same Roles &amp; Permissions → Role Presets screen
+        /// as every other role — there is no separate hardcoded baseline to keep in sync.
+        /// Admin needs no claims; the authorization handler grants it every permission by role.
+        /// </summary>
         private async Task<IReadOnlyList<string>> LoadPermissionClaimsAsync(User user, CancellationToken cancellationToken)
         {
-            if (user.Role != UserRole.SubAdmin)
+            if (user.Role == UserRole.SubAdmin)
+            {
+                var grants = await _unitOfWork.Repository<SubAdminPermission>().Query()
+                    .Where(p => p.UserId == user.Id)
+                    .ToListAsync(cancellationToken);
+                return ToClaims(grants.Select(g => (g.Module, g.CanView, g.CanCreate, g.CanEdit, g.CanDelete, g.CanApprove)));
+            }
+
+            var roleName = SystemRoleNameFor(user.Role);
+            if (roleName is null)
             {
                 return [];
             }
 
-            var grants = await _unitOfWork.Repository<SubAdminPermission>().Query()
-                .Where(p => p.UserId == user.Id)
-                .ToListAsync(cancellationToken);
+            var role = await _unitOfWork.Repository<RoleDefinition>().Query()
+                .Include(r => r.Permissions)
+                .FirstOrDefaultAsync(r => r.Name == roleName, cancellationToken);
 
+            return role is null
+                ? []
+                : ToClaims(role.Permissions.Select(p => (p.Module, p.CanView, p.CanCreate, p.CanEdit, p.CanDelete, p.CanApprove)));
+        }
+
+        private static List<string> ToClaims(
+            IEnumerable<(PermissionModule Module, bool CanView, bool CanCreate, bool CanEdit, bool CanDelete, bool CanApprove)> grants)
+        {
             var claims = new List<string>();
             foreach (var grant in grants)
             {

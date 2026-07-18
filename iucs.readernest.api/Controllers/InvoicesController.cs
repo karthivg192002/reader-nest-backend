@@ -53,6 +53,41 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _billingService.CreatePaymentLinkAsync(id, cancellationToken));
         }
 
+        /// <summary>Pending parent cash intents awaiting staff confirmation.</summary>
+        [HttpGet("cash-intents")]
+        [HasPermission(PermissionModule.BillingFinance, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<CashIntentDto>>> ListCashIntents(CancellationToken cancellationToken)
+        {
+            return Ok(await _billingService.ListPendingCashIntentsAsync(cancellationToken));
+        }
+
+        /// <summary>
+        /// Confirms the cash was collected: settles the intent, generates the receipt and updates
+        /// the invoice. Gated on Approve specifically (not Edit) — a login only sees the confirm
+        /// action once an Admin has explicitly granted it Approve on Billing &amp; Finance.
+        /// </summary>
+        [HttpPost("cash-intents/{transactionId:guid}/confirm")]
+        [HasPermission(PermissionModule.BillingFinance, PermissionAction.Approve)]
+        public async Task<ActionResult<CashIntentDto>> ConfirmCashIntent(
+            Guid transactionId,
+            ConfirmCashIntentRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _billingService.ConfirmCashIntentAsync(transactionId, request, cancellationToken));
+        }
+
+        /// <summary>Same Approve gate as confirmation — rejecting is the other half of the same decision.</summary>
+        [HttpPost("cash-intents/{transactionId:guid}/reject")]
+        [HasPermission(PermissionModule.BillingFinance, PermissionAction.Approve)]
+        public async Task<IActionResult> RejectCashIntent(
+            Guid transactionId,
+            RejectCashIntentRequest request,
+            CancellationToken cancellationToken)
+        {
+            await _billingService.RejectCashIntentAsync(transactionId, request, cancellationToken);
+            return NoContent();
+        }
+
         [HttpGet("suspensions")]
         [HasPermission(PermissionModule.BillingFinance, PermissionAction.View)]
         public async Task<ActionResult<IReadOnlyList<FeeSuspensionDto>>> ListSuspensions(

@@ -36,17 +36,83 @@ namespace iucs.readernest.api.Services.Payments
         public async Task<PaymentLinkResult> CreatePaymentLinkAsync(
             Invoice invoice,
             PaymentAccount account,
+            string? preferredMethodKey = null,
             CancellationToken cancellationToken = default)
         {
-            var adapter = ResolveAdapter(account);
+            var adapter = ResolveAdapter(account, preferredMethodKey);
             if (adapter is null)
             {
                 _logger.LogInformation(
-                    "No gateway adapter matches provider '{Provider}' for account {Account}; using the simulated gateway.",
-                    account.GatewayProvider, account.Name);
-                return await _simulated.CreatePaymentLinkAsync(invoice, account, cancellationToken);
+                    "No gateway adapter matches method '{Method}' / provider '{Provider}' for account {Account}; using the simulated gateway.",
+                    preferredMethodKey, account.GatewayProvider, account.Name);
+                return await _simulated.CreatePaymentLinkAsync(invoice, account, preferredMethodKey, cancellationToken);
             }
 
+            var (live, config) = await ResolveLiveConfigAsync(adapter, cancellationToken);
+            if (!live)
+            {
+                _logger.LogInformation(
+                    "Integration '{Key}' is disabled or missing credentials; using the simulated gateway for invoice {Invoice}.",
+                    adapter.IntegrationKey, invoice.InvoiceNumber);
+                return await _simulated.CreatePaymentLinkAsync(invoice, account, preferredMethodKey, cancellationToken);
+            }
+
+            return await adapter.CreatePaymentLinkAsync(invoice, account, config, cancellationToken);
+        }
+
+        /// <summary>
+        /// Disburses through whichever gateway the department account uses. Cash transactions
+        /// never reach here — BillingService only calls this for gateway-settled ones, whose
+        /// GatewayTransactionId carries the concrete payment id after webhook settlement
+        /// ("linkRef|paymentId"); anything else (never settled by a webhook, e.g. a payment
+        /// still Pending) has no real payment to refund, so it also falls back to simulated.
+        /// </summary>
+        public async Task<RefundResult> RefundAsync(
+            PaymentTransaction transaction,
+            PaymentAccount account,
+            decimal amount,
+            CancellationToken cancellationToken = default)
+        {
+            var gatewayPaymentId = ExtractSettledPaymentId(transaction.GatewayTransactionId);
+            var adapter = ResolveAdapter(account, preferredMethodKey: null);
+
+            if (adapter is null || gatewayPaymentId is null)
+            {
+                _logger.LogInformation(
+                    "No live gateway match (or no settled payment id) for transaction {Transaction}; using the simulated refund.",
+                    transaction.Id);
+                return await _simulated.RefundAsync(transaction, account, amount, cancellationToken);
+            }
+
+            var (live, config) = await ResolveLiveConfigAsync(adapter, cancellationToken);
+            if (!live)
+            {
+                _logger.LogInformation(
+                    "Integration '{Key}' is disabled or missing credentials; using the simulated refund for transaction {Transaction}.",
+                    adapter.IntegrationKey, transaction.Id);
+                return await _simulated.RefundAsync(transaction, account, amount, cancellationToken);
+            }
+
+            return await adapter.RefundAsync(gatewayPaymentId, amount, transaction.Currency, config, cancellationToken);
+        }
+
+        /// <summary>GatewayTransactionId becomes "linkRef|paymentId" once a webhook settles it (see BillingService.SettleGatewayTransactionAsync); null before that.</summary>
+        private static string? ExtractSettledPaymentId(string? gatewayTransactionId)
+        {
+            if (string.IsNullOrEmpty(gatewayTransactionId))
+            {
+                return null;
+            }
+
+            var separatorIndex = gatewayTransactionId.IndexOf('|');
+            return separatorIndex >= 0 && separatorIndex < gatewayTransactionId.Length - 1
+                ? gatewayTransactionId[(separatorIndex + 1)..]
+                : null;
+        }
+
+        private async Task<(bool Live, Dictionary<string, string?> Config)> ResolveLiveConfigAsync(
+            IGatewayAdapter adapter, CancellationToken cancellationToken)
+        {
             var integration = await _unitOfWork.Repository<Integration>().Query()
                 .FirstOrDefaultAsync(i => i.Key == adapter.IntegrationKey, cancellationToken);
             var config = DecodeConfig(integration?.ConfigJson);
@@ -56,19 +122,22 @@ namespace iucs.readernest.api.Services.Payments
                 && adapter.RequiredConfigKeys.All(k =>
                     config.TryGetValue(k, out var v) && !string.IsNullOrWhiteSpace(v));
 
-            if (!live)
-            {
-                _logger.LogInformation(
-                    "Integration '{Key}' is disabled or missing credentials; using the simulated gateway for invoice {Invoice}.",
-                    adapter.IntegrationKey, invoice.InvoiceNumber);
-                return await _simulated.CreatePaymentLinkAsync(invoice, account, cancellationToken);
-            }
-
-            return await adapter.CreatePaymentLinkAsync(invoice, account, config, cancellationToken);
+            return (live, config);
         }
 
-        private IGatewayAdapter? ResolveAdapter(PaymentAccount account)
+        /// <summary>
+        /// The payer's explicit method choice wins; the department account's GatewayProvider
+        /// is the fallback for callers that don't carry one (e.g. admin share links, refunds).
+        /// </summary>
+        private IGatewayAdapter? ResolveAdapter(PaymentAccount account, string? preferredMethodKey)
         {
+            var method = (preferredMethodKey ?? string.Empty).Trim().ToLowerInvariant();
+            var byMethod = _adapters.FirstOrDefault(a => method.Contains(a.IntegrationKey));
+            if (byMethod is not null)
+            {
+                return byMethod;
+            }
+
             var provider = (account.GatewayProvider ?? string.Empty).ToLowerInvariant();
             return _adapters.FirstOrDefault(a => provider.Contains(a.IntegrationKey));
         }

@@ -7,9 +7,9 @@ namespace iucs.readernest.domain.Entities.Integrations
 {
     /// <summary>
     /// Master record for one third-party integration (Email, WhatsApp, Razorpay,
-    /// Cashfree, Zoom, Jitsi Meet, ...). Admin-managed reference/config data;
-    /// runtime services still read their own credentials from appsettings until
-    /// those are wired to read from here.
+    /// Cashfree, Zoom, Jitsi Meet, ...). Admin-managed via Settings → Integrations;
+    /// ConfigJson is the live source of truth read by PaymentGatewayDispatcher and
+    /// PaymentsWebhookController at request time — there is no appsettings fallback.
     /// </summary>
     [Index(nameof(Key), IsUnique = true)]
     public class Integration : AuditEntity

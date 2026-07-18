@@ -20,5 +20,13 @@ namespace iucs.readernest.api.Services.Payments
             PaymentAccount account,
             IReadOnlyDictionary<string, string?> config,
             CancellationToken cancellationToken);
+
+        /// <param name="gatewayPaymentId">The concrete payment id captured at settlement (not the payment-link reference).</param>
+        Task<RefundResult> RefundAsync(
+            string gatewayPaymentId,
+            decimal amount,
+            string currency,
+            IReadOnlyDictionary<string, string?> config,
+            CancellationToken cancellationToken);
     }
 }

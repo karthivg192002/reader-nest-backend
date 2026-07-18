@@ -56,6 +56,12 @@ namespace iucs.readernest.application.Dto.Billing
 
         public Guid? ChildId { get; set; }
 
+        /// <summary>Resolved display name for the invoiced child; null when the invoice has no child linked.</summary>
+        public string? ChildName { get; set; }
+
+        /// <summary>Resolved course/plan name via the invoice's subscription, when it has one.</summary>
+        public string? CourseName { get; set; }
+
         public Department Department { get; set; }
 
         public decimal Amount { get; set; }
@@ -170,6 +176,9 @@ namespace iucs.readernest.application.Dto.Billing
         public RefundStatus Status { get; set; }
 
         public DateTime? ProcessedAtUtc { get; set; }
+
+        /// <summary>Gateway refund id once disbursed for real; null for cash or while still Requested/Rejected.</summary>
+        public string? GatewayRefundId { get; set; }
     }
 
     public class RequestRefundRequest

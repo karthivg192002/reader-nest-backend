@@ -71,5 +71,41 @@ namespace iucs.readernest.api.Services.Payments
                 GatewayReference = root.GetProperty("id").GetString()!,
             };
         }
+
+        /// <summary>Razorpay Payments Refund (https://api.razorpay.com/v1/payments/{id}/refund) — full or partial.</summary>
+        public async Task<RefundResult> RefundAsync(
+            string gatewayPaymentId,
+            decimal amount,
+            string currency,
+            IReadOnlyDictionary<string, string?> config,
+            CancellationToken cancellationToken)
+        {
+            var keyId = config["keyId"]!;
+            var keySecret = config["keySecret"]!;
+
+            var payload = JsonSerializer.Serialize(new { amount = (long)Math.Round(amount * 100m) });
+
+            var client = _httpClientFactory.CreateClient(nameof(RazorpayGateway));
+            using var request = new HttpRequestMessage(
+                HttpMethod.Post, $"https://api.razorpay.com/v1/payments/{gatewayPaymentId}/refund");
+            request.Headers.Add(
+                "Authorization",
+                "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"{keyId}:{keySecret}")));
+            request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+
+            var response = await client.SendAsync(request, cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "Razorpay refund failed for payment {Payment}: {Status} {Body}",
+                    gatewayPaymentId, (int)response.StatusCode, body);
+                throw new DomainValidationException(
+                    $"The payment gateway rejected the refund ({(int)response.StatusCode}). Please try again or contact support.");
+            }
+
+            using var json = JsonDocument.Parse(body);
+            return new RefundResult { GatewayRefundId = json.RootElement.GetProperty("id").GetString()! };
+        }
     }
 }

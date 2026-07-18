@@ -86,6 +86,57 @@ namespace iucs.readernest.api.Services.Payments
             };
         }
 
+        /// <summary>
+        /// Cashfree order refund (POST {base}/pg/orders/{order_id}/refunds). Cashfree keys
+        /// refunds by the order, not the payment — the webhook only ever gives us the
+        /// settled transaction id (PaymentsWebhookController.Cashfree), so that's what's
+        /// passed here as the order reference. Verify this still matches Cashfree's current
+        /// API once real production credentials are configured.
+        /// </summary>
+        public async Task<RefundResult> RefundAsync(
+            string gatewayPaymentId,
+            decimal amount,
+            string currency,
+            IReadOnlyDictionary<string, string?> config,
+            CancellationToken cancellationToken)
+        {
+            var baseUrl = string.Equals(Value(config, "mode"), "live", StringComparison.OrdinalIgnoreCase)
+                ? "https://api.cashfree.com"
+                : "https://sandbox.cashfree.com";
+            var refundId = $"RFND-{Guid.NewGuid():N}"[..24];
+
+            var payload = JsonSerializer.Serialize(new
+            {
+                refund_amount = amount,
+                refund_id = refundId,
+                refund_note = "The Reader Nest — refund",
+            });
+
+            var client = _httpClientFactory.CreateClient(nameof(CashfreeGateway));
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/pg/orders/{gatewayPaymentId}/refunds");
+            request.Headers.Add("x-client-id", config["appId"]!);
+            request.Headers.Add("x-client-secret", config["secretKey"]!);
+            request.Headers.Add("x-api-version", ApiVersion);
+            request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+
+            var response = await client.SendAsync(request, cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "Cashfree refund failed for order {Order}: {Status} {Body}",
+                    gatewayPaymentId, (int)response.StatusCode, body);
+                throw new DomainValidationException(
+                    $"The payment gateway rejected the refund ({(int)response.StatusCode}). Please try again or contact support.");
+            }
+
+            using var json = JsonDocument.Parse(body);
+            var id = json.RootElement.TryGetProperty("cf_refund_id", out var cfId)
+                ? cfId.ToString()
+                : refundId;
+            return new RefundResult { GatewayRefundId = id };
+        }
+
         private static string? Value(IReadOnlyDictionary<string, string?> config, string key) =>
             config.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : null;
     }

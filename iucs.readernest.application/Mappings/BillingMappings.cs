@@ -22,6 +22,10 @@ namespace iucs.readernest.application.Mappings
             };
         }
 
+        /// <summary>
+        /// Requires the invoice loaded with Child and Subscription.PackagePlan.Course included
+        /// for ChildName/CourseName to resolve — both are display-only and stay null otherwise.
+        /// </summary>
         public static InvoiceDto ToDto(this Invoice invoice)
         {
             return new InvoiceDto
@@ -30,6 +34,8 @@ namespace iucs.readernest.application.Mappings
                 InvoiceNumber = invoice.InvoiceNumber,
                 ParentProfileId = invoice.ParentProfileId,
                 ChildId = invoice.ChildId,
+                ChildName = invoice.Child is null ? null : $"{invoice.Child.FirstName} {invoice.Child.LastName}",
+                CourseName = invoice.Subscription?.PackagePlan?.Course?.Name,
                 Department = invoice.Department,
                 Amount = invoice.Amount,
                 AmountPaid = invoice.AmountPaid,

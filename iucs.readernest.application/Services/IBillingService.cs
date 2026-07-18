@@ -72,6 +72,25 @@ namespace iucs.readernest.application.Services
             string? failureReason,
             CancellationToken cancellationToken = default);
 
+        // Cash confirmation workflow: a parent's Pay Now "cash" choice records a pending
+        // intent; billing staff review it here and confirm once the money is collected.
+        Task<IReadOnlyList<CashIntentDto>> ListPendingCashIntentsAsync(CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Confirms a pending cash intent: settles the same transaction row (no duplicate),
+        /// generates the receipt and applies the amount to the invoice.
+        /// </summary>
+        Task<CashIntentDto> ConfirmCashIntentAsync(
+            Guid transactionId,
+            ConfirmCashIntentRequest request,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>Marks a pending cash intent Failed (parent never paid / withdrew).</summary>
+        Task RejectCashIntentAsync(
+            Guid transactionId,
+            RejectCashIntentRequest request,
+            CancellationToken cancellationToken = default);
+
         // Renewal tracking workflow: subscriptions drive recurring billing and renew/lapse explicitly
         Task<IReadOnlyList<SubscriptionDto>> ListSubscriptionsAsync(
             SubscriptionStatus? status,

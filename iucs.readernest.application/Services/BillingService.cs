@@ -181,7 +181,9 @@ namespace iucs.readernest.application.Services
             Guid? parentProfileId,
             CancellationToken cancellationToken = default)
         {
-            var query = _unitOfWork.Repository<Invoice>().Query();
+            IQueryable<Invoice> query = _unitOfWork.Repository<Invoice>().Query()
+                .Include(i => i.Child)
+                .Include(i => i.Subscription).ThenInclude(s => s!.PackagePlan).ThenInclude(p => p.Course);
             if (status.HasValue)
             {
                 query = query.Where(i => i.Status == status.Value);
@@ -282,20 +284,42 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException($"Payment of {request.Amount} exceeds the outstanding balance of {remaining}.");
             }
 
-            await _unitOfWork.Repository<PaymentTransaction>().AddAsync(
-                new PaymentTransaction
-                {
-                    InvoiceId = invoice.Id,
-                    PaymentAccountId = invoice.PaymentAccountId,
-                    Amount = request.Amount,
-                    Currency = invoice.Currency,
-                    Status = TransactionStatus.Success,
-                    GatewayTransactionId = request.GatewayTransactionId,
-                    Method = request.Method,
-                    PaidAtUtc = DateTime.UtcNow,
-                    ReceiptNumber = GenerateNumber("RCP"),
-                },
-                cancellationToken);
+            // A cash recording settles the parent's pending cash intent when one exists,
+            // so the intent doesn't linger Pending next to a duplicate Success row.
+            var pendingIntent = request.Method == PaymentMethod.Cash
+                ? await _unitOfWork.Repository<PaymentTransaction>()
+                    .FirstOrDefaultAsync(
+                        t => t.InvoiceId == invoice.Id
+                            && t.Method == PaymentMethod.Cash
+                            && t.Status == TransactionStatus.Pending,
+                        cancellationToken)
+                : null;
+
+            if (pendingIntent is not null)
+            {
+                pendingIntent.Amount = request.Amount;
+                pendingIntent.Status = TransactionStatus.Success;
+                pendingIntent.PaidAtUtc = DateTime.UtcNow;
+                pendingIntent.ReceiptNumber = GenerateNumber("RCP");
+                _unitOfWork.Repository<PaymentTransaction>().Update(pendingIntent);
+            }
+            else
+            {
+                await _unitOfWork.Repository<PaymentTransaction>().AddAsync(
+                    new PaymentTransaction
+                    {
+                        InvoiceId = invoice.Id,
+                        PaymentAccountId = invoice.PaymentAccountId,
+                        Amount = request.Amount,
+                        Currency = invoice.Currency,
+                        Status = TransactionStatus.Success,
+                        GatewayTransactionId = request.GatewayTransactionId,
+                        Method = request.Method,
+                        PaidAtUtc = DateTime.UtcNow,
+                        ReceiptNumber = GenerateNumber("RCP"),
+                    },
+                    cancellationToken);
+            }
 
             await ApplyPaymentToInvoiceAsync(invoice, request.Amount, cancellationToken);
 
@@ -358,6 +382,8 @@ namespace iucs.readernest.application.Services
                 ?? throw new NotFoundException("No parent profile is linked to the current account.");
 
             var invoice = await _unitOfWork.Repository<Invoice>().Query()
+                .Include(i => i.Child)
+                .Include(i => i.Subscription).ThenInclude(s => s!.PackagePlan).ThenInclude(p => p.Course)
                 .FirstOrDefaultAsync(i => i.Id == invoiceId && i.ParentProfileId == parent.Id, cancellationToken)
                 ?? throw new NotFoundException(nameof(Invoice), invoiceId);
 
@@ -407,7 +433,8 @@ namespace iucs.readernest.application.Services
                     changesJson: $"{{\"cashIntent\":\"{reference}\"}}", cancellationToken: cancellationToken);
                 await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-                await NotifyAdminsAsync(
+                // Admission Team owns payment follow-up day-to-day; Admin stays in the loop too.
+                await NotifyBillingStaffAsync(
                     NotificationType.PaymentReceived,
                     "Cash payment intent",
                     $"A parent chose to pay {remaining:0.00} {invoice.Currency} in cash for invoice {invoice.InvoiceNumber}. Record the payment once collected.",
@@ -421,11 +448,13 @@ namespace iucs.readernest.application.Services
                 };
             }
 
-            // Gateway path: checkout link + a pending transaction the webhook settles
+            // Gateway path: checkout link + a pending transaction the webhook settles.
+            // The parent's chosen method key routes to that gateway regardless of the
+            // department account's provider default.
             var account = await _unitOfWork.Repository<PaymentAccount>().GetByIdAsync(invoice.PaymentAccountId, cancellationToken)
                 ?? throw new NotFoundException(nameof(PaymentAccount), invoice.PaymentAccountId);
 
-            var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, cancellationToken);
+            var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, methodKey, cancellationToken);
 
             await _unitOfWork.Repository<PaymentTransaction>().AddAsync(
                 new PaymentTransaction
@@ -507,6 +536,126 @@ namespace iucs.readernest.application.Services
                 "Payment received",
                 $"Gateway payment of {transaction.Amount:0.00} {invoice.Currency} confirmed for invoice {invoice.InvoiceNumber} ({invoice.Status}).",
                 cancellationToken);
+        }
+
+        public async Task<IReadOnlyList<CashIntentDto>> ListPendingCashIntentsAsync(CancellationToken cancellationToken = default)
+        {
+            var intents = await _unitOfWork.Repository<PaymentTransaction>().Query()
+                .Where(t => t.Method == PaymentMethod.Cash && t.Status == TransactionStatus.Pending)
+                .Include(t => t.Invoice)
+                .OrderBy(t => t.CreatedAtUtc)
+                .ToListAsync(cancellationToken);
+
+            var parentProfileIds = intents.Select(t => t.Invoice.ParentProfileId).Distinct().ToList();
+            var parentNames = await _unitOfWork.Repository<ParentProfile>().Query()
+                .Where(p => parentProfileIds.Contains(p.Id))
+                .Select(p => new { p.Id, Name = p.User.FirstName + " " + p.User.LastName })
+                .ToDictionaryAsync(p => p.Id, p => p.Name, cancellationToken);
+
+            return intents.Select(t => ToCashIntentDto(t, parentNames.GetValueOrDefault(t.Invoice.ParentProfileId, "—"))).ToList();
+        }
+
+        public async Task<CashIntentDto> ConfirmCashIntentAsync(
+            Guid transactionId,
+            ConfirmCashIntentRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var transaction = await LoadPendingCashIntentAsync(transactionId, cancellationToken);
+            var invoice = await _unitOfWork.Repository<Invoice>().GetByIdAsync(transaction.InvoiceId, cancellationToken)
+                ?? throw new NotFoundException(nameof(Invoice), transaction.InvoiceId);
+
+            var amount = request.Amount ?? transaction.Amount;
+            var remaining = invoice.Amount - invoice.AmountPaid;
+            if (amount > remaining)
+            {
+                throw new DomainValidationException($"Confirmed amount {amount} exceeds the outstanding balance of {remaining}.");
+            }
+
+            transaction.Amount = amount;
+            transaction.Status = TransactionStatus.Success;
+            transaction.PaidAtUtc = DateTime.UtcNow;
+            transaction.ReceiptNumber = GenerateNumber("RCP");
+            _unitOfWork.Repository<PaymentTransaction>().Update(transaction);
+
+            await ApplyPaymentToInvoiceAsync(invoice, amount, cancellationToken);
+
+            await _auditLog.StageAsync(AuditAction.Payment, nameof(Invoice), invoice.Id.ToString(),
+                changesJson: $"{{\"cashConfirmed\":{amount},\"reference\":\"{transaction.GatewayTransactionId}\"}}",
+                cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            // Close the loop with the parent: their portal invoice flips as soon as staff confirm.
+            var parentUser = await _unitOfWork.Repository<ParentProfile>().Query()
+                .Where(p => p.Id == invoice.ParentProfileId)
+                .Select(p => p.User)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (parentUser is not null)
+            {
+                await NotifyUserAsync(
+                    parentUser,
+                    NotificationType.PaymentReceived,
+                    $"Cash payment received — invoice {invoice.InvoiceNumber}",
+                    $"We have received your cash payment of {amount:0.00} {invoice.Currency} for invoice {invoice.InvoiceNumber}. " +
+                    $"Receipt no: {transaction.ReceiptNumber}. Thank you.",
+                    cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+
+            var parentName = parentUser is null ? "—" : $"{parentUser.FirstName} {parentUser.LastName}";
+            transaction.Invoice = invoice;
+            return ToCashIntentDto(transaction, parentName);
+        }
+
+        public async Task RejectCashIntentAsync(
+            Guid transactionId,
+            RejectCashIntentRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var transaction = await LoadPendingCashIntentAsync(transactionId, cancellationToken);
+
+            transaction.Status = TransactionStatus.Failed;
+            transaction.FailureReason = string.IsNullOrWhiteSpace(request.Reason)
+                ? "Cash intent rejected by billing staff."
+                : request.Reason.Trim();
+            _unitOfWork.Repository<PaymentTransaction>().Update(transaction);
+
+            await _auditLog.StageAsync(AuditAction.Payment, nameof(PaymentTransaction), transaction.Id.ToString(),
+                changesJson: $"{{\"cashRejected\":\"{transaction.GatewayTransactionId}\"}}", cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
+        private async Task<PaymentTransaction> LoadPendingCashIntentAsync(Guid transactionId, CancellationToken cancellationToken)
+        {
+            var transaction = await _unitOfWork.Repository<PaymentTransaction>()
+                .FirstOrDefaultAsync(t => t.Id == transactionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(PaymentTransaction), transactionId);
+
+            if (transaction.Method != PaymentMethod.Cash)
+            {
+                throw new DomainValidationException("Only cash payment intents can be confirmed or rejected here.");
+            }
+
+            if (transaction.Status != TransactionStatus.Pending)
+            {
+                throw new DomainValidationException($"This cash intent is already {transaction.Status}.");
+            }
+
+            return transaction;
+        }
+
+        private static CashIntentDto ToCashIntentDto(PaymentTransaction transaction, string parentName)
+        {
+            return new CashIntentDto
+            {
+                TransactionId = transaction.Id,
+                InvoiceId = transaction.InvoiceId,
+                InvoiceNumber = transaction.Invoice.InvoiceNumber,
+                ParentName = parentName,
+                Amount = transaction.Amount,
+                Currency = transaction.Currency,
+                Reference = transaction.GatewayTransactionId ?? "—",
+                RequestedAtUtc = transaction.CreatedAtUtc,
+            };
         }
 
         public async Task<IReadOnlyList<FeeSuspensionDto>> ListSuspensionsAsync(
@@ -598,7 +747,22 @@ namespace iucs.readernest.application.Services
 
             if (request.Approve)
             {
-                // Gateway disbursement follows once real accounts exist; recorded as processed here
+                // Cash has nothing to call a gateway for — the money was handed back at the
+                // centre. A gateway-settled transaction gets disbursed for real through the
+                // same department account (and gateway) the original payment used.
+                var transaction = await _unitOfWork.Repository<PaymentTransaction>()
+                    .GetByIdAsync(refund.PaymentTransactionId, cancellationToken)
+                    ?? throw new NotFoundException(nameof(PaymentTransaction), refund.PaymentTransactionId);
+
+                if (transaction.Method != PaymentMethod.Cash)
+                {
+                    var account = await _unitOfWork.Repository<PaymentAccount>()
+                        .GetByIdAsync(transaction.PaymentAccountId, cancellationToken)
+                        ?? throw new NotFoundException(nameof(PaymentAccount), transaction.PaymentAccountId);
+                    var result = await _paymentGateway.RefundAsync(transaction, account, refund.Amount, cancellationToken);
+                    refund.GatewayRefundId = result.GatewayRefundId;
+                }
+
                 refund.Status = RefundStatus.Processed;
                 refund.ProcessedAtUtc = DateTime.UtcNow;
             }
@@ -641,6 +805,22 @@ namespace iucs.readernest.application.Services
             }
         }
 
+        /// <summary>Admin + Admission Team — the two roles that actually own cash confirmation.</summary>
+        private async Task NotifyBillingStaffAsync(
+            NotificationType type,
+            string subject,
+            string body,
+            CancellationToken cancellationToken)
+        {
+            var staff = await _unitOfWork.Repository<User>().Query()
+                .Where(u => (u.Role == UserRole.Admin || u.Role == UserRole.AdmissionTeam) && u.Status == UserStatus.Active)
+                .ToListAsync(cancellationToken);
+            foreach (var user in staff)
+            {
+                await _notificationService.SendEmailAsync(user.Id, user.Email, type, subject, body, cancellationToken);
+            }
+        }
+
         private static FeeSuspensionDto ToDto(FeeSuspension suspension)
         {
             return new FeeSuspensionDto
@@ -669,6 +849,7 @@ namespace iucs.readernest.application.Services
                 Reason = refund.Reason,
                 Status = refund.Status,
                 ProcessedAtUtc = refund.ProcessedAtUtc,
+                GatewayRefundId = refund.GatewayRefundId,
             };
         }
 
@@ -685,7 +866,7 @@ namespace iucs.readernest.application.Services
             var account = await _unitOfWork.Repository<PaymentAccount>().GetByIdAsync(invoice.PaymentAccountId, cancellationToken)
                 ?? throw new NotFoundException(nameof(PaymentAccount), invoice.PaymentAccountId);
 
-            var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, cancellationToken);
+            var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, cancellationToken: cancellationToken);
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(Invoice), invoice.Id.ToString(),
                 changesJson: $"{{\"paymentLinkRef\":\"{link.GatewayReference}\"}}", cancellationToken: cancellationToken);
