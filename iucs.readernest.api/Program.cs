@@ -81,6 +81,14 @@ builder.Services.AddHostedService<ReportsDigestBackgroundService>();
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
 var jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>()
     ?? throw new InvalidOperationException("Missing 'Jwt' configuration section.");
+if (string.IsNullOrWhiteSpace(jwt.SigningKey) || Encoding.UTF8.GetByteCount(jwt.SigningKey) < 32)
+{
+    // Fail at startup with an actionable message instead of letting every request
+    // die in the JWT handler with IDX10703 (zero-length key). HS256 needs >= 256 bits.
+    throw new InvalidOperationException(
+        "Jwt:SigningKey is missing or shorter than 32 bytes. " +
+        "Set the Jwt__SigningKey environment variable (or appsettings) to a random secret of at least 32 characters.");
+}
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
