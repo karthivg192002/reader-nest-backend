@@ -48,6 +48,48 @@ namespace iucs.readernest.application.Common.Interfaces
     }
 
     /// <summary>
+    /// Everything the browser needs to open the gateway's in-page checkout popup
+    /// (Razorpay Standard Checkout over an Order). The order id is the gateway
+    /// reference the pending transaction is keyed on.
+    /// </summary>
+    public class InlineCheckoutResult
+    {
+        public string? KeyId { get; set; }
+
+        /// <summary>Gateway order reference (e.g. Razorpay "order_…").</summary>
+        public string? OrderId { get; set; }
+
+        /// <summary>Amount in the currency's minor unit (paise for INR).</summary>
+        public long AmountMinor { get; set; }
+
+        public string Currency { get; set; } = "INR";
+
+        public string? Description { get; set; }
+
+        public string? PrefillName { get; set; }
+
+        public string? PrefillEmail { get; set; }
+
+        public string? PrefillContact { get; set; }
+
+        /// <summary>
+        /// Set when this gateway can't run an in-page checkout (unsupported provider,
+        /// turned off, or missing keys); callers fall back or surface the reason.
+        /// </summary>
+        public string? UnavailableReason { get; set; }
+    }
+
+    /// <summary>Who is paying, for the checkout popup's prefill fields.</summary>
+    public class InlinePayerInfo
+    {
+        public string? Name { get; set; }
+
+        public string? Email { get; set; }
+
+        public string? Contact { get; set; }
+    }
+
+    /// <summary>
     /// Payment gateway abstraction behind the dual-account requirement: every call
     /// carries the department's PaymentAccount so Phonics and Maths revenue stays
     /// separated at the gateway. Production swaps in the real provider via DI +
@@ -89,5 +131,31 @@ namespace iucs.readernest.application.Common.Interfaces
         Task<GatewayPaymentStatus> GetPaymentStatusAsync(
             string gatewayReference,
             CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Creates a gateway order for an in-page checkout popup (no redirect). Default:
+        /// unsupported — only providers with an inline checkout (Razorpay) override this.
+        /// </summary>
+        Task<InlineCheckoutResult> CreateInlineCheckoutAsync(
+            Invoice invoice,
+            PaymentAccount account,
+            string methodKey,
+            InlinePayerInfo payer,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new InlineCheckoutResult
+            {
+                UnavailableReason = "In-page checkout is not supported by this payment gateway.",
+            });
+
+        /// <summary>
+        /// Verifies the signature the checkout popup hands back after a successful payment
+        /// (Razorpay: HMAC-SHA256 of "orderId|paymentId" with the key secret). False means
+        /// the proof doesn't check out and the payment must NOT be settled from it.
+        /// </summary>
+        Task<bool> VerifyInlineCheckoutAsync(
+            string orderReference,
+            string gatewayPaymentId,
+            string signature,
+            CancellationToken cancellationToken = default) => Task.FromResult(false);
     }
 }

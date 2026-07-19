@@ -13,6 +13,9 @@ namespace iucs.readernest.application.Services
         /// <summary>Bulk email to all active parents, or to the parents of one batch.</summary>
         Task<BulkEmailResultDto> SendBulkEmailAsync(BulkEmailRequest request, CancellationToken cancellationToken = default);
 
+        /// <summary>Recipient count for the compose screen, resolved by the same rule the send uses.</summary>
+        Task<BulkEmailResultDto> PreviewBulkEmailAsync(Guid? batchId, CancellationToken cancellationToken = default);
+
         /// <summary>Teacher performance view: sessions delivered, no-shows, attendance, summaries.</summary>
         Task<IReadOnlyList<TeacherPerformanceDto>> GetTeacherPerformanceAsync(CancellationToken cancellationToken = default);
 

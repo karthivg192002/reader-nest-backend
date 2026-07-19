@@ -12,7 +12,7 @@ namespace iucs.readernest.application.Dto.Users
 
         public string LastName { get; set; } = null!;
 
-        public string FullName => $"{FirstName} {LastName}";
+        public string FullName => $"{FirstName} {LastName}".Trim();
 
         public string? Phone { get; set; }
 

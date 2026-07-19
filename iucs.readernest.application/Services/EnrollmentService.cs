@@ -1,7 +1,9 @@
 using System.Text.Json;
 using iucs.readernest.application.Common.Exceptions;
+using iucs.readernest.application.Dto.Billing;
 using iucs.readernest.application.Dto.Enrollment;
 using iucs.readernest.domain.Entities.Academics;
+using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using iucs.readernest.domain.Repository;
@@ -13,11 +15,13 @@ namespace iucs.readernest.application.Services
     {
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
+        private readonly IBillingService _billingService;
 
-        public EnrollmentService(IUnitOfWork unitOfWork, IAuditLogService auditLog)
+        public EnrollmentService(IUnitOfWork unitOfWork, IAuditLogService auditLog, IBillingService billingService)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
+            _billingService = billingService;
         }
 
         public async Task<EnrollmentFormDto> SubmitAsync(
@@ -138,10 +142,24 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException($"Only a submitted form can be reviewed; this one is {form.Status}.");
             }
 
+            Child? child = null;
             if (request.Approve)
             {
+                // Load the profile tracked so the unlock flag saves; also needed for the
+                // billing pre-checks (parents can be pinned to a specific payment account).
+                var parentProfile = await _unitOfWork.Repository<ParentProfile>()
+                    .GetByIdAsync(form.ParentProfileId, cancellationToken);
+
+                // Billing plan chosen at approval: validate everything the subscription's
+                // first invoice will need BEFORE mutating anything, so a bad pick fails the
+                // review cleanly instead of leaving an approved form with broken billing.
+                if (request.PackagePlanId.HasValue)
+                {
+                    await ValidatePlanForBillingAsync(request.PackagePlanId.Value, parentProfile, cancellationToken);
+                }
+
                 var (firstName, lastName) = ResolveChildName(form, request);
-                var child = new Child
+                child = new Child
                 {
                     ParentProfileId = form.ParentProfileId,
                     FirstName = firstName,
@@ -153,9 +171,6 @@ namespace iucs.readernest.application.Services
                 form.Child = child;
                 form.Status = EnrollmentFormStatus.Approved;
 
-                // Unlock the parent's dashboard — load the profile tracked so the flag saves.
-                var parentProfile = await _unitOfWork.Repository<ParentProfile>()
-                    .GetByIdAsync(form.ParentProfileId, cancellationToken);
                 if (parentProfile is not null)
                 {
                     parentProfile.EnrollmentFormCompleted = true;
@@ -173,7 +188,63 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Update, nameof(EnrollmentForm), form.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
+            // Auto billing (WBS p.29/32): starting the plan today issues the first invoice
+            // immediately and schedules the recurring cycle, so the amount shows up on the
+            // parent's Payments & Billing the moment the enrollment is approved.
+            if (request.Approve && request.PackagePlanId.HasValue && child is not null)
+            {
+                await _billingService.CreateSubscriptionAsync(
+                    new CreateSubscriptionRequest
+                    {
+                        ParentProfileId = form.ParentProfileId,
+                        ChildId = child.Id,
+                        PackagePlanId = request.PackagePlanId.Value,
+                        StartDate = DateOnly.FromDateTime(DateTime.UtcNow),
+                    },
+                    cancellationToken);
+            }
+
             return await GetAsync(form.Id, cancellationToken);
+        }
+
+        /// <summary>
+        /// Mirrors what CreateSubscription/CreateInvoice will require: an active plan and an
+        /// active payment account to route the invoice to (the parent's pinned account or the
+        /// plan department's default). Throws an actionable error while nothing is saved yet.
+        /// </summary>
+        private async Task ValidatePlanForBillingAsync(
+            Guid packagePlanId,
+            ParentProfile? parentProfile,
+            CancellationToken cancellationToken)
+        {
+            var plan = await _unitOfWork.Repository<PackagePlan>().Query()
+                .Include(p => p.Course)
+                .FirstOrDefaultAsync(p => p.Id == packagePlanId, cancellationToken)
+                ?? throw new NotFoundException(nameof(PackagePlan), packagePlanId);
+
+            if (!plan.IsActive)
+            {
+                throw new DomainValidationException(
+                    $"Package plan '{plan.Name}' is inactive — pick an active plan or approve without billing.");
+            }
+
+            var pinnedAccountActive = parentProfile?.PaymentAccountId is { } pinned
+                && await _unitOfWork.Repository<PaymentAccount>().ExistsAsync(
+                    a => a.Id == pinned && a.IsActive, cancellationToken);
+            if (pinnedAccountActive)
+            {
+                return;
+            }
+
+            var department = plan.Course?.Department ?? Department.Phonics;
+            var departmentAccountActive = await _unitOfWork.Repository<PaymentAccount>().ExistsAsync(
+                a => a.Department == department && a.IsActive, cancellationToken);
+            if (!departmentAccountActive)
+            {
+                throw new DomainValidationException(
+                    $"Cannot start billing: no active payment account is configured for the {department} department. " +
+                    "Set one up under Payment Gateway Mapping, or approve without a plan and assign it later.");
+            }
         }
 
         public async Task<IReadOnlyList<ChildDto>> ListChildrenForParentUserAsync(

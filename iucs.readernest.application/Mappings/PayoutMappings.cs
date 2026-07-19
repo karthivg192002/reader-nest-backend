@@ -14,6 +14,7 @@ namespace iucs.readernest.application.Mappings
                 TeacherName = $"{rate.TeacherProfile.User.FirstName} {rate.TeacherProfile.User.LastName}",
                 DurationMinutes = rate.DurationMinutes,
                 RatePerSession = rate.RatePerSession,
+                TeacherNoShowPenaltyPercent = rate.TeacherNoShowPenaltyPercent,
                 EffectiveFrom = rate.EffectiveFrom,
                 IsActive = rate.IsActive,
             };

@@ -55,7 +55,7 @@ namespace iucs.readernest.tests
 
         private BillingService CreateBillingService(FakePaymentGateway gateway) => new(_db.UnitOfWork, _auditLog, gateway, _notifications);
 
-        private EnrollmentService CreateEnrollmentService() => new(_db.UnitOfWork, _auditLog);
+        private EnrollmentService CreateEnrollmentService() => new(_db.UnitOfWork, _auditLog, CreateBillingService());
 
         private MenuService CreateMenuService() => new(_db.UnitOfWork, _auditLog);
 
@@ -85,6 +85,29 @@ namespace iucs.readernest.tests
             Assert.Equal(SessionStatus.CarriedForward, (await _db.Context.ClassSessions.FindAsync(carried.Id))!.Status);
             var item = Assert.Single(_db.Context.PayoutItems.ToList());
             Assert.Equal(PayoutItemType.TeacherNoShowDeduction, item.Type);
+            Assert.Equal(-1000m, item.Amount); // default penalty: 100% of the session rate
+        }
+
+        [Fact]
+        public async Task TeacherNoShow_AppliesConfiguredPenaltyPercent()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            await CreatePayoutService().SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = session.TeacherProfileId,
+                DurationMinutes = 45,
+                RatePerSession = 1000,
+                TeacherNoShowPenaltyPercent = 150, // WBS p.31 "Penalty configuration"
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
+            });
+
+            await CreateSessionService().MarkNoShowAsync(
+                session.Id, new MarkNoShowRequest { Party = NoShowParty.Teacher });
+
+            var item = Assert.Single(_db.Context.PayoutItems.ToList());
+            Assert.Equal(PayoutItemType.TeacherNoShowDeduction, item.Type);
+            Assert.Equal(-1500m, item.Amount);
+            Assert.Contains("150% of session rate", item.Note);
         }
 
         [Fact]
@@ -230,6 +253,44 @@ namespace iucs.readernest.tests
 
             var full = await billing.RecordPaymentAsync(invoice.Id, new RecordPaymentRequest { Amount = 600 });
             Assert.Equal(InvoiceStatus.Paid, full.Status);
+        }
+
+        [Fact]
+        public async Task InlineCheckout_SettlesOnlyWithVerifiedSignature()
+        {
+            var parentUser = await _db.SeedUserAsync($"inline-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            _db.Context.AddRange(parentProfile,
+                new PaymentAccount { Name = "P", Department = Department.Phonics, GatewayProvider = "razorpay", GatewayAccountRef = "p" });
+            await _db.Context.SaveChangesAsync();
+            var billing = CreateBillingService();
+            var invoice = await billing.CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = parentProfile.Id, Department = Department.Phonics, Amount = 1000,
+                DueDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)),
+            });
+
+            var checkout = await billing.StartParentInlineCheckoutAsync(
+                parentUser.Id, invoice.Id, new InitiateParentPaymentRequest { MethodKey = "razorpay" });
+            Assert.Equal("inline", checkout.Mode);
+            Assert.NotNull(checkout.OrderId);
+            Assert.Equal(100_000, checkout.Amount); // minor units: 1000.00 → paise
+
+            // A forged/failed signature must not settle the invoice.
+            await Assert.ThrowsAsync<DomainValidationException>(() => billing.VerifyParentInlineCheckoutAsync(
+                parentUser.Id, invoice.Id,
+                new VerifyInlineCheckoutRequest { OrderId = checkout.OrderId!, PaymentId = "pay_1", Signature = "forged" }));
+            Assert.Equal(InvoiceStatus.Pending, (await _db.Context.Invoices.FindAsync(invoice.Id))!.Status);
+
+            // An order belonging to a different invoice must not settle this one either.
+            await Assert.ThrowsAsync<NotFoundException>(() => billing.VerifyParentInlineCheckoutAsync(
+                parentUser.Id, invoice.Id,
+                new VerifyInlineCheckoutRequest { OrderId = "order_someone_elses", PaymentId = "pay_1", Signature = "valid" }));
+
+            var settled = await billing.VerifyParentInlineCheckoutAsync(
+                parentUser.Id, invoice.Id,
+                new VerifyInlineCheckoutRequest { OrderId = checkout.OrderId!, PaymentId = "pay_1", Signature = "valid" });
+            Assert.Equal(InvoiceStatus.Paid, settled.Status);
         }
 
         [Fact]
@@ -964,6 +1025,65 @@ namespace iucs.readernest.tests
             var refreshedParent = await _db.Context.ParentProfiles.FirstAsync(p => p.Id == parentProfile.Id);
             Assert.True(refreshedParent.EnrollmentFormCompleted);
             Assert.Single(_db.Context.Children.ToList());
+        }
+
+        [Fact]
+        public async Task ApproveEnrollment_WithPackagePlan_StartsSubscription_AndIssuesFirstInvoice()
+        {
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var plan = new PackagePlan { Name = "Phonics Monthly", BillingType = BillingType.Subscription, BillingCycle = BillingCycle.Monthly, Price = 2500 };
+            _db.Context.AddRange(parentProfile, plan,
+                new PaymentAccount { Name = "P", Department = Department.Phonics, GatewayProvider = "t", GatewayAccountRef = "p" });
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateEnrollmentService();
+            await service.SubmitAsync(parentUser.Id, new SubmitEnrollmentFormRequest { FormDataJson = "{\"childName\":\"Kid One\"}" });
+            var formId = (await service.ListAsync(null)).Single().Id;
+
+            var result = await service.ReviewAsync(formId, new ReviewEnrollmentFormRequest
+            {
+                Approve = true,
+                ChildFirstName = "Kid",
+                ChildLastName = "One",
+                PackagePlanId = plan.Id,
+            });
+
+            Assert.Equal(EnrollmentFormStatus.Approved, result.Status);
+            var child = Assert.Single(_db.Context.Children.ToList());
+            var subscription = Assert.Single(_db.Context.Subscriptions.ToList());
+            Assert.Equal(child.Id, subscription.ChildId);
+            Assert.Equal(plan.Id, subscription.PackagePlanId);
+            Assert.Equal(SubscriptionStatus.Active, subscription.Status);
+            var invoice = Assert.Single(_db.Context.Invoices.ToList());
+            Assert.Equal(plan.Price, invoice.Amount);
+            Assert.Equal(child.Id, invoice.ChildId);
+        }
+
+        [Fact]
+        public async Task ApproveEnrollment_WithPlanButNoPaymentAccount_FailsWithoutApproving()
+        {
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var plan = new PackagePlan { Name = "Unroutable", BillingType = BillingType.Subscription, BillingCycle = BillingCycle.Monthly, Price = 900 };
+            _db.Context.AddRange(parentProfile, plan);
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateEnrollmentService();
+            await service.SubmitAsync(parentUser.Id, new SubmitEnrollmentFormRequest { FormDataJson = "{\"childName\":\"Kid One\"}" });
+            var formId = (await service.ListAsync(null)).Single().Id;
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.ReviewAsync(formId, new ReviewEnrollmentFormRequest
+            {
+                Approve = true,
+                ChildFirstName = "Kid",
+                PackagePlanId = plan.Id,
+            }));
+
+            // The bad billing pick must not leave a half-approved form behind.
+            Assert.Equal(EnrollmentFormStatus.Submitted, (await service.GetAsync(formId)).Status);
+            Assert.Empty(_db.Context.Children.ToList());
+            Assert.Empty(_db.Context.Subscriptions.ToList());
         }
 
         [Fact]

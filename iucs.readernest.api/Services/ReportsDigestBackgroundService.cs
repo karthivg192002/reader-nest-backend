@@ -1,3 +1,4 @@
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
@@ -50,6 +51,13 @@ namespace iucs.readernest.api.Services
             var reports = scope.ServiceProvider.GetRequiredService<IReportsService>();
             var notifications = scope.ServiceProvider.GetRequiredService<INotificationService>();
             var unitOfWork = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+
+            // Settings → Notifications → "Weekly summary digest" turns this sender off.
+            if (!await NotificationToggles.IsEnabledAsync(unitOfWork, NotificationToggles.WeeklyDigest, cancellationToken))
+            {
+                _logger.LogInformation("Weekly KPI digest skipped: turned off in Settings → Notifications.");
+                return;
+            }
 
             var summary = await reports.GetDashboardSummaryAsync(cancellationToken);
             var body =

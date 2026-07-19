@@ -328,21 +328,7 @@ namespace iucs.readernest.application.Services
 
         public async Task<BulkEmailResultDto> SendBulkEmailAsync(BulkEmailRequest request, CancellationToken cancellationToken = default)
         {
-            List<User> recipients;
-            if (request.BatchId.HasValue)
-            {
-                recipients = await _unitOfWork.Repository<BatchEnrollment>().Query()
-                    .Where(e => e.BatchId == request.BatchId.Value && e.Status == EnrollmentStatus.Active)
-                    .Select(e => e.Child.ParentProfile.User)
-                    .Distinct()
-                    .ToListAsync(cancellationToken);
-            }
-            else
-            {
-                recipients = await _unitOfWork.Repository<User>().Query()
-                    .Where(u => u.Role == UserRole.Parent && u.Status == UserStatus.Active)
-                    .ToListAsync(cancellationToken);
-            }
+            var recipients = await ResolveBulkEmailRecipientsAsync(request.BatchId, cancellationToken);
 
             foreach (var user in recipients)
             {
@@ -351,6 +337,33 @@ namespace iucs.readernest.application.Services
             }
 
             return new BulkEmailResultDto { RecipientCount = recipients.Count };
+        }
+
+        public async Task<BulkEmailResultDto> PreviewBulkEmailAsync(Guid? batchId, CancellationToken cancellationToken = default)
+        {
+            var recipients = await ResolveBulkEmailRecipientsAsync(batchId, cancellationToken);
+            return new BulkEmailResultDto { RecipientCount = recipients.Count };
+        }
+
+        /// <summary>
+        /// One recipient rule for both the compose-screen preview and the actual send, so the
+        /// count the admin sees is exactly who the email goes to: every active parent, or the
+        /// parents of the batch's actively-enrolled students.
+        /// </summary>
+        private async Task<List<User>> ResolveBulkEmailRecipientsAsync(Guid? batchId, CancellationToken cancellationToken)
+        {
+            if (batchId.HasValue)
+            {
+                return await _unitOfWork.Repository<BatchEnrollment>().Query()
+                    .Where(e => e.BatchId == batchId.Value && e.Status == EnrollmentStatus.Active)
+                    .Select(e => e.Child.ParentProfile.User)
+                    .Distinct()
+                    .ToListAsync(cancellationToken);
+            }
+
+            return await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.Role == UserRole.Parent && u.Status == UserStatus.Active)
+                .ToListAsync(cancellationToken);
         }
 
         private async Task<string> AttendanceCsvAsync(CancellationToken cancellationToken)

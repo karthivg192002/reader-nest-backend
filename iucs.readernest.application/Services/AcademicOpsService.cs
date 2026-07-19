@@ -1,3 +1,4 @@
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Academics;
 using iucs.readernest.domain.Entities.Academics;
@@ -155,11 +156,15 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Create, nameof(LeaveRequest), leave.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            await NotifyAdminsAsync(
-                "Teacher leave application",
-                $"{teacher.User.FirstName} {teacher.User.LastName} applied for leave {request.StartAtUtc:u} – {request.EndAtUtc:u} " +
-                $"({affectedSessions} scheduled session(s) affected). Reason: {request.Reason}",
-                cancellationToken);
+            // Settings → Notifications → "Teacher leave requests" turns this alert off.
+            if (await NotificationToggles.IsEnabledAsync(_unitOfWork, NotificationToggles.LeaveRequests, cancellationToken))
+            {
+                await NotifyAdminsAsync(
+                    "Teacher leave application",
+                    $"{teacher.User.FirstName} {teacher.User.LastName} applied for leave {request.StartAtUtc:u} – {request.EndAtUtc:u} " +
+                    $"({affectedSessions} scheduled session(s) affected). Reason: {request.Reason}",
+                    cancellationToken);
+            }
 
             leave.TeacherProfile = teacher;
             return await ToDtoAsync(leave, cancellationToken);
@@ -229,6 +234,11 @@ namespace iucs.readernest.application.Services
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(LeaveRequest), leave.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            // The review is committed from here on; the notification fan-out must not be
+            // torn down by the caller aborting the HTTP request (browser closed/navigated),
+            // or the teacher/team/parents silently miss the update mid-loop.
+            cancellationToken = CancellationToken.None;
 
             var teacherProfile = await _unitOfWork.Repository<TeacherProfile>().Query()
                 .Include(t => t.User)

@@ -8,9 +8,9 @@ namespace iucs.readernest.application.Dto.Users
         [MaxLength(100)]
         public string FirstName { get; set; } = null!;
 
-        [Required]
+        /// <summary>Optional — single-word names are stored with an empty last name, not a duplicate.</summary>
         [MaxLength(100)]
-        public string LastName { get; set; } = null!;
+        public string? LastName { get; set; }
 
         [MaxLength(20)]
         public string? Phone { get; set; }

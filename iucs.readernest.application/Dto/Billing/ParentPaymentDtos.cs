@@ -11,6 +11,52 @@ namespace iucs.readernest.application.Dto.Billing
     }
 
     /// <summary>
+    /// In-page checkout bootstrap for the Pay Now popup. Mode "inline" carries everything
+    /// checkout.js needs; "unavailable" carries the reason the payer sees.
+    /// </summary>
+    public class InlineCheckoutDto
+    {
+        public string Mode { get; set; } = null!;
+
+        public string? Message { get; set; }
+
+        public string? KeyId { get; set; }
+
+        public string? OrderId { get; set; }
+
+        /// <summary>Amount in the currency's minor unit (paise for INR), as the popup expects.</summary>
+        public long Amount { get; set; }
+
+        public string Currency { get; set; } = "INR";
+
+        public string? DisplayName { get; set; }
+
+        public string? Description { get; set; }
+
+        public string? PrefillName { get; set; }
+
+        public string? PrefillEmail { get; set; }
+
+        public string? PrefillContact { get; set; }
+    }
+
+    /// <summary>The success proof the checkout popup hands back, verified server-side before settling.</summary>
+    public class VerifyInlineCheckoutRequest
+    {
+        [Required]
+        [MaxLength(100)]
+        public string OrderId { get; set; } = null!;
+
+        [Required]
+        [MaxLength(100)]
+        public string PaymentId { get; set; } = null!;
+
+        [Required]
+        [MaxLength(200)]
+        public string Signature { get; set; } = null!;
+    }
+
+    /// <summary>
     /// Outcome of a Pay-Now initiation. "redirect" carries a gateway checkout URL;
     /// "cash" means a pending cash intent was recorded for admin confirmation.
     /// </summary>

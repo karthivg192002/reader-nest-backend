@@ -61,6 +61,28 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Parent Pay-Now, in-page variant: creates a gateway order + pending transaction and
+        /// returns what the browser popup (checkout.js) needs — the payer never leaves the page.
+        /// Mode "unavailable" carries the reason when the gateway can't run an inline checkout.
+        /// </summary>
+        Task<InlineCheckoutDto> StartParentInlineCheckoutAsync(
+            Guid parentUserId,
+            Guid invoiceId,
+            InitiateParentPaymentRequest request,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Settles an inline checkout from the popup's success proof after verifying its
+        /// signature with the gateway secret. Returns the refreshed invoice so the UI can
+        /// flip to Paid immediately.
+        /// </summary>
+        Task<InvoiceDto> VerifyParentInlineCheckoutAsync(
+            Guid parentUserId,
+            Guid invoiceId,
+            VerifyInlineCheckoutRequest request,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Gateway webhook settlement: marks the pending transaction with this gateway reference
         /// Success/Failed and, on success, applies the payment to the invoice (receipt, status,
         /// suspension auto-lift). Idempotent — an already-settled reference is a no-op.

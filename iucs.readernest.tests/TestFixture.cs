@@ -85,6 +85,35 @@ namespace iucs.readernest.tests
                 : GatewayPaymentState.Pending;
             return Task.FromResult(new GatewayPaymentStatus { State = state, PaymentId = $"pay_{gatewayReference}" });
         }
+
+        public Task<InlineCheckoutResult> CreateInlineCheckoutAsync(
+            Invoice invoice,
+            PaymentAccount account,
+            string methodKey,
+            InlinePayerInfo payer,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new InlineCheckoutResult
+            {
+                KeyId = "rzp_test_fake",
+                OrderId = $"order_TEST-{invoice.InvoiceNumber}",
+                AmountMinor = (long)Math.Round((invoice.Amount - invoice.AmountPaid) * 100m),
+                Currency = invoice.Currency,
+                Description = $"Test order for {invoice.InvoiceNumber}",
+                PrefillName = payer.Name,
+                PrefillEmail = payer.Email,
+            });
+        }
+
+        /// <summary>Signature "valid" verifies; anything else fails — drives both verify-flow tests.</summary>
+        public Task<bool> VerifyInlineCheckoutAsync(
+            string orderReference,
+            string gatewayPaymentId,
+            string signature,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(signature == "valid");
+        }
     }
 
     public class FakeTokenService : ITokenService

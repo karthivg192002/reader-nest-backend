@@ -20,6 +20,13 @@ namespace iucs.readernest.domain.Entities.Payouts
 
         public decimal RatePerSession { get; set; }
 
+        /// <summary>
+        /// Teacher no-show deduction as a percentage of the session rate (WBS p.31
+        /// "Penalty configuration"): 100 deducts the full rate, 50 half, 150 a stiffer
+        /// deterrent. Applied when a session is marked TeacherNoShow.
+        /// </summary>
+        public decimal TeacherNoShowPenaltyPercent { get; set; } = 100m;
+
         public DateOnly EffectiveFrom { get; set; }
 
         public bool IsActive { get; set; } = true;

@@ -515,6 +515,116 @@ namespace iucs.readernest.application.Services
             };
         }
 
+        public async Task<InlineCheckoutDto> StartParentInlineCheckoutAsync(
+            Guid parentUserId,
+            Guid invoiceId,
+            InitiateParentPaymentRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var parent = await _unitOfWork.Repository<ParentProfile>().Query()
+                .Include(p => p.User)
+                .FirstOrDefaultAsync(p => p.UserId == parentUserId, cancellationToken)
+                ?? throw new NotFoundException("No parent profile is linked to the current account.");
+
+            // Ownership: a parent can only pay their own invoice
+            var invoice = await _unitOfWork.Repository<Invoice>()
+                .FirstOrDefaultAsync(i => i.Id == invoiceId && i.ParentProfileId == parent.Id, cancellationToken)
+                ?? throw new NotFoundException(nameof(Invoice), invoiceId);
+
+            if (invoice.Status is InvoiceStatus.Paid or InvoiceStatus.Cancelled)
+            {
+                throw new DomainValidationException($"Invoice '{invoice.InvoiceNumber}' is already {invoice.Status}.");
+            }
+
+            var account = await _unitOfWork.Repository<PaymentAccount>().GetByIdAsync(invoice.PaymentAccountId, cancellationToken)
+                ?? throw new NotFoundException(nameof(PaymentAccount), invoice.PaymentAccountId);
+
+            var checkout = await _paymentGateway.CreateInlineCheckoutAsync(
+                invoice,
+                account,
+                request.MethodKey.Trim().ToLowerInvariant(),
+                new InlinePayerInfo
+                {
+                    Name = $"{parent.User.FirstName} {parent.User.LastName}".Trim(),
+                    Email = parent.User.Email,
+                    Contact = parent.User.Phone,
+                },
+                cancellationToken);
+
+            if (checkout.UnavailableReason is not null)
+            {
+                return new InlineCheckoutDto { Mode = "unavailable", Message = checkout.UnavailableReason };
+            }
+
+            await _unitOfWork.Repository<PaymentTransaction>().AddAsync(
+                new PaymentTransaction
+                {
+                    InvoiceId = invoice.Id,
+                    PaymentAccountId = invoice.PaymentAccountId,
+                    Amount = invoice.Amount - invoice.AmountPaid,
+                    Currency = invoice.Currency,
+                    Status = TransactionStatus.Pending,
+                    GatewayTransactionId = checkout.OrderId,
+                },
+                cancellationToken);
+
+            await _auditLog.StageAsync(AuditAction.Payment, nameof(Invoice), invoice.Id.ToString(),
+                changesJson: $"{{\"inlineCheckoutRef\":\"{checkout.OrderId}\"}}", cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return new InlineCheckoutDto
+            {
+                Mode = "inline",
+                KeyId = checkout.KeyId,
+                OrderId = checkout.OrderId,
+                Amount = checkout.AmountMinor,
+                Currency = checkout.Currency,
+                DisplayName = "The Reader Nest",
+                Description = checkout.Description,
+                PrefillName = checkout.PrefillName,
+                PrefillEmail = checkout.PrefillEmail,
+                PrefillContact = checkout.PrefillContact,
+            };
+        }
+
+        public async Task<InvoiceDto> VerifyParentInlineCheckoutAsync(
+            Guid parentUserId,
+            Guid invoiceId,
+            VerifyInlineCheckoutRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var parent = await _unitOfWork.Repository<ParentProfile>()
+                .FirstOrDefaultAsync(p => p.UserId == parentUserId, cancellationToken)
+                ?? throw new NotFoundException("No parent profile is linked to the current account.");
+
+            var invoice = await _unitOfWork.Repository<Invoice>()
+                .FirstOrDefaultAsync(i => i.Id == invoiceId && i.ParentProfileId == parent.Id, cancellationToken)
+                ?? throw new NotFoundException(nameof(Invoice), invoiceId);
+
+            // The order must be one of THIS invoice's pending checkouts — a valid signature
+            // for some other invoice's order must not settle this one.
+            var belongs = await _unitOfWork.Repository<PaymentTransaction>().ExistsAsync(
+                t => t.InvoiceId == invoice.Id && t.GatewayTransactionId == request.OrderId, cancellationToken);
+            if (!belongs)
+            {
+                throw new NotFoundException($"No pending checkout matches order '{request.OrderId}' on this invoice.");
+            }
+
+            var verified = await _paymentGateway.VerifyInlineCheckoutAsync(
+                request.OrderId, request.PaymentId, request.Signature, cancellationToken);
+            if (!verified)
+            {
+                throw new DomainValidationException(
+                    "The payment could not be verified. If you were charged, it will reconcile automatically within the hour — or use 'I've paid — verify now'.");
+            }
+
+            await SettleGatewayTransactionAsync(request.OrderId, succeeded: true, request.PaymentId, null, cancellationToken);
+
+            var refreshed = await _unitOfWork.Repository<Invoice>().Query()
+                .FirstOrDefaultAsync(i => i.Id == invoice.Id, cancellationToken) ?? invoice;
+            return refreshed.ToDto();
+        }
+
         public async Task SettleGatewayTransactionAsync(
             string gatewayReference,
             bool succeeded,

@@ -72,5 +72,15 @@ namespace iucs.readernest.api.Controllers
         {
             return Ok(await _reportsService.SendBulkEmailAsync(request, cancellationToken));
         }
+
+        /// <summary>Live recipient count for the compose screen (same rule as the send).</summary>
+        [HttpGet("bulk-email/recipients")]
+        [HasPermission(PermissionModule.Communication, PermissionAction.View)]
+        public async Task<ActionResult<BulkEmailResultDto>> BulkEmailRecipients(
+            [FromQuery] Guid? batchId,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _reportsService.PreviewBulkEmailAsync(batchId, cancellationToken));
+        }
     }
 }

@@ -139,6 +139,35 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>
+        /// Pay Now, in-page variant: creates a gateway order and returns what the Razorpay
+        /// popup (checkout.js) needs, so the payer completes payment without leaving the page.
+        /// </summary>
+        [HttpPost("invoices/{id:guid}/checkout")]
+        public async Task<ActionResult<InlineCheckoutDto>> StartInlineCheckout(
+            Guid id,
+            InitiateParentPaymentRequest request,
+            [FromServices] IBillingService billingService,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await billingService.StartParentInlineCheckoutAsync(UserId(), id, request, cancellationToken));
+        }
+
+        /// <summary>
+        /// Settles an in-page checkout from the popup's success proof (order id, payment id,
+        /// signature) after server-side signature verification. Returns the refreshed invoice
+        /// so the UI flips to Paid immediately.
+        /// </summary>
+        [HttpPost("invoices/{id:guid}/checkout/verify")]
+        public async Task<ActionResult<InvoiceDto>> VerifyInlineCheckout(
+            Guid id,
+            VerifyInlineCheckoutRequest request,
+            [FromServices] IBillingService billingService,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await billingService.VerifyParentInlineCheckoutAsync(UserId(), id, request, cancellationToken));
+        }
+
+        /// <summary>
         /// After returning from the gateway checkout, asks the gateway directly whether the
         /// link is paid and settles the invoice if so — no webhook required. Returns the
         /// refreshed invoice so the UI can flip to Paid.

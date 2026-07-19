@@ -106,7 +106,7 @@ namespace iucs.readernest.application.Services
                 {
                     TeacherProfileId = t.Id,
                     UserId = t.UserId,
-                    FullName = $"{t.User.FirstName} {t.User.LastName}",
+                    FullName = $"{t.User.FirstName} {t.User.LastName}".Trim(),
                     Department = t.Department,
                 })
                 .ToList();
@@ -147,7 +147,7 @@ namespace iucs.readernest.application.Services
                 Email = email,
                 PasswordHash = _passwordHasher.Hash(temporaryPassword),
                 FirstName = request.FirstName.Trim(),
-                LastName = request.LastName.Trim(),
+                LastName = request.LastName?.Trim() ?? string.Empty,
                 Phone = request.Phone,
                 Role = request.Role,
                 TimeZoneId = string.IsNullOrWhiteSpace(request.TimeZoneId) ? "Asia/Kolkata" : request.TimeZoneId,
@@ -210,7 +210,7 @@ namespace iucs.readernest.application.Services
                 ?? throw new NotFoundException(nameof(User), id);
 
             user.FirstName = request.FirstName.Trim();
-            user.LastName = request.LastName.Trim();
+            user.LastName = request.LastName?.Trim() ?? string.Empty;
             user.Phone = request.Phone;
             if (!string.IsNullOrWhiteSpace(request.TimeZoneId))
             {

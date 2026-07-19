@@ -86,6 +86,68 @@ namespace iucs.readernest.api.Services.Payments
         }
 
         /// <summary>
+        /// In-page checkout (popup, no redirect). Always an explicit payer choice, so a
+        /// disabled/unconfigured/unsupporting gateway comes back as an actionable
+        /// UnavailableReason — the UI then falls back to the redirect flow or shows why.
+        /// </summary>
+        public async Task<InlineCheckoutResult> CreateInlineCheckoutAsync(
+            Invoice invoice,
+            PaymentAccount account,
+            string methodKey,
+            InlinePayerInfo payer,
+            CancellationToken cancellationToken = default)
+        {
+            var adapter = ResolveAdapter(methodKey);
+            if (adapter is null)
+            {
+                return new InlineCheckoutResult
+                {
+                    UnavailableReason = $"'{methodKey}' does not support in-page checkout.",
+                };
+            }
+
+            var (live, config) = await ResolveLiveConfigAsync(adapter, cancellationToken);
+            if (!live)
+            {
+                return new InlineCheckoutResult
+                {
+                    UnavailableReason =
+                        $"{adapter.IntegrationKey} is turned off or missing its {adapter.ConfigHint} in Settings → Integrations.",
+                };
+            }
+
+            var result = await adapter.CreateInlineCheckoutAsync(invoice, account, payer, config, cancellationToken);
+            return result ?? new InlineCheckoutResult
+            {
+                UnavailableReason = $"{adapter.IntegrationKey} does not support in-page checkout.",
+            };
+        }
+
+        /// <summary>
+        /// Signature check for an inline-checkout success. Each adapter claims only its own
+        /// order references; an unclaimed reference is treated as NOT verified.
+        /// </summary>
+        public async Task<bool> VerifyInlineCheckoutAsync(
+            string orderReference,
+            string gatewayPaymentId,
+            string signature,
+            CancellationToken cancellationToken = default)
+        {
+            foreach (var adapter in _adapters)
+            {
+                var (_, config) = await ResolveLiveConfigAsync(adapter, cancellationToken);
+                var verdict = adapter.VerifyInlineCheckoutSignature(orderReference, gatewayPaymentId, signature, config);
+                if (verdict.HasValue)
+                {
+                    return verdict.Value;
+                }
+            }
+
+            _logger.LogWarning("No gateway adapter claimed inline-checkout reference {Reference}; treating as unverified.", orderReference);
+            return false;
+        }
+
+        /// <summary>
         /// Disburses through whichever gateway the department account uses. Cash transactions
         /// never reach here — BillingService only calls this for gateway-settled ones, whose
         /// GatewayTransactionId carries the concrete payment id after webhook settlement

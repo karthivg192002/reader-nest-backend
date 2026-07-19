@@ -78,6 +78,7 @@ namespace iucs.readernest.application.Services
             }
 
             rate.RatePerSession = request.RatePerSession;
+            rate.TeacherNoShowPenaltyPercent = request.TeacherNoShowPenaltyPercent;
             rate.IsActive = true;
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(PayoutRate), rate.Id.ToString(), cancellationToken: cancellationToken);
@@ -152,7 +153,11 @@ namespace iucs.readernest.application.Services
             {
                 PayoutItemType.SessionEarning => rate?.RatePerSession ?? 0m,
                 PayoutItemType.StudentNoShowWaiting => rate?.RatePerSession ?? 0m,
-                PayoutItemType.TeacherNoShowDeduction => -(rate?.RatePerSession ?? 0m),
+                // The configured no-show penalty (WBS "Penalty configuration"): a percentage
+                // of the session rate, so centres can deduct less, exactly, or more than
+                // the missed session was worth.
+                PayoutItemType.TeacherNoShowDeduction =>
+                    -Math.Round((rate?.RatePerSession ?? 0m) * (rate?.TeacherNoShowPenaltyPercent ?? 100m) / 100m, 2),
                 _ => 0m,
             };
 
@@ -161,6 +166,10 @@ namespace iucs.readernest.application.Services
                 note = string.IsNullOrEmpty(note)
                     ? $"No payout rate configured for {durationMinutes}-minute sessions."
                     : $"{note} (no payout rate configured for {durationMinutes}-minute sessions)";
+            }
+            else if (type == PayoutItemType.TeacherNoShowDeduction && rate.TeacherNoShowPenaltyPercent != 100m)
+            {
+                note = $"{note} ({rate.TeacherNoShowPenaltyPercent:0.#}% of session rate)";
             }
 
             var payout = await GetOrCreateCurrentPayoutAsync(

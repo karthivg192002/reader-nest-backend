@@ -41,5 +41,27 @@ namespace iucs.readernest.api.Services.Payments
             string gatewayReference,
             IReadOnlyDictionary<string, string?> config,
             CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Creates a gateway order for an in-page checkout popup. Null means this provider
+        /// has no inline checkout (the dispatcher reports it unavailable); providers that
+        /// do (Razorpay) override.
+        /// </summary>
+        Task<InlineCheckoutResult?> CreateInlineCheckoutAsync(
+            Invoice invoice,
+            PaymentAccount account,
+            InlinePayerInfo payer,
+            IReadOnlyDictionary<string, string?> config,
+            CancellationToken cancellationToken) => Task.FromResult<InlineCheckoutResult?>(null);
+
+        /// <summary>
+        /// Verifies an inline-checkout success signature. Null = the order reference isn't
+        /// this provider's (dispatcher tries the next adapter); true/false = verdict.
+        /// </summary>
+        bool? VerifyInlineCheckoutSignature(
+            string orderReference,
+            string gatewayPaymentId,
+            string signature,
+            IReadOnlyDictionary<string, string?> config) => null;
     }
 }

@@ -45,6 +45,14 @@ namespace iucs.readernest.application.Dto.Enrollment
         public string? ChildLastName { get; set; }
 
         public DateOnly? ChildDateOfBirth { get; set; }
+
+        /// <summary>
+        /// Billing plan to start the child on the moment the approval lands: a subscription
+        /// is created and its first invoice issued immediately, so the amount appears on the
+        /// parent's Payments &amp; Billing without any further admin step. Null approves
+        /// without billing (a plan can still be assigned later from Packages).
+        /// </summary>
+        public Guid? PackagePlanId { get; set; }
     }
 
     public class ChildDto

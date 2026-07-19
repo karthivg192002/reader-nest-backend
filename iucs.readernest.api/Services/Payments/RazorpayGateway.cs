@@ -85,6 +85,94 @@ namespace iucs.readernest.api.Services.Payments
             };
         }
 
+        /// <summary>
+        /// Razorpay Orders (https://api.razorpay.com/v1/orders) for the in-page Standard
+        /// Checkout popup: the browser opens checkout.js against this order and hands back
+        /// a payment id + signature that <see cref="VerifyInlineCheckoutSignature"/> proves.
+        /// </summary>
+        public async Task<InlineCheckoutResult?> CreateInlineCheckoutAsync(
+            Invoice invoice,
+            PaymentAccount account,
+            InlinePayerInfo payer,
+            IReadOnlyDictionary<string, string?> config,
+            CancellationToken cancellationToken)
+        {
+            var keyId = KeyId(config)!;
+            var keySecret = KeySecret(config)!;
+            var remaining = invoice.Amount - invoice.AmountPaid;
+            var amountMinor = (long)Math.Round(remaining * 100m); // paise
+
+            var payload = JsonSerializer.Serialize(new
+            {
+                amount = amountMinor,
+                currency = invoice.Currency,
+                receipt = $"{invoice.InvoiceNumber}-{Guid.NewGuid():N}"[..40],
+                notes = new { invoiceId = invoice.Id.ToString(), department = account.Department.ToString() },
+            });
+
+            var client = _httpClientFactory.CreateClient(nameof(RazorpayGateway));
+            using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.razorpay.com/v1/orders");
+            request.Headers.Add(
+                "Authorization",
+                "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"{keyId}:{keySecret}")));
+            request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+
+            var response = await client.SendAsync(request, cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "Razorpay order creation failed for invoice {Invoice}: {Status} {Body}",
+                    invoice.InvoiceNumber, (int)response.StatusCode, body);
+                throw new DomainValidationException(response.StatusCode == System.Net.HttpStatusCode.Unauthorized
+                    ? "Razorpay rejected the centre's API credentials (401). The Key Id and Key Secret in Settings → Integrations are invalid or not from the same key pair."
+                    : $"The payment gateway rejected the request ({(int)response.StatusCode}). Please try again or contact the centre.");
+            }
+
+            using var json = JsonDocument.Parse(body);
+            return new InlineCheckoutResult
+            {
+                KeyId = keyId,
+                OrderId = json.RootElement.GetProperty("id").GetString()!,
+                AmountMinor = amountMinor,
+                Currency = invoice.Currency,
+                Description = $"The Reader Nest — invoice {invoice.InvoiceNumber} ({account.Department})",
+                PrefillName = payer.Name,
+                PrefillEmail = payer.Email,
+                PrefillContact = payer.Contact,
+            };
+        }
+
+        /// <summary>
+        /// Standard Checkout success proof: HMAC-SHA256("orderId|paymentId", keySecret)
+        /// must equal the signature the popup returned. Constant-time compare.
+        /// </summary>
+        public bool? VerifyInlineCheckoutSignature(
+            string orderReference,
+            string gatewayPaymentId,
+            string signature,
+            IReadOnlyDictionary<string, string?> config)
+        {
+            if (!orderReference.StartsWith("order_", StringComparison.Ordinal))
+            {
+                return null; // not a Razorpay order — let another adapter claim it
+            }
+
+            var keySecret = KeySecret(config);
+            if (keySecret is null)
+            {
+                return false;
+            }
+
+            using var hmac = new System.Security.Cryptography.HMACSHA256(Encoding.UTF8.GetBytes(keySecret));
+            var expected = Convert.ToHexString(
+                hmac.ComputeHash(Encoding.UTF8.GetBytes($"{orderReference}|{gatewayPaymentId}"))).ToLowerInvariant();
+
+            return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(expected),
+                Encoding.UTF8.GetBytes(signature.Trim().ToLowerInvariant()));
+        }
+
         /// <summary>Razorpay Payments Refund (https://api.razorpay.com/v1/payments/{id}/refund) — full or partial.</summary>
         public async Task<RefundResult> RefundAsync(
             string gatewayPaymentId,
@@ -126,8 +214,15 @@ namespace iucs.readernest.api.Services.Payments
             IReadOnlyDictionary<string, string?> config,
             CancellationToken cancellationToken)
         {
-            // Razorpay payment-link ids look like "plink_…"; anything else isn't ours.
-            if (string.IsNullOrWhiteSpace(gatewayReference) || !gatewayReference.StartsWith("plink_", StringComparison.Ordinal))
+            // Razorpay references: payment links are "plink_…", inline-checkout orders "order_…".
+            if (string.IsNullOrWhiteSpace(gatewayReference))
+            {
+                return new GatewayPaymentStatus { State = GatewayPaymentState.Unknown };
+            }
+
+            var isLink = gatewayReference.StartsWith("plink_", StringComparison.Ordinal);
+            var isOrder = gatewayReference.StartsWith("order_", StringComparison.Ordinal);
+            if (!isLink && !isOrder)
             {
                 return new GatewayPaymentStatus { State = GatewayPaymentState.Unknown };
             }
@@ -137,6 +232,11 @@ namespace iucs.readernest.api.Services.Payments
             if (keyId is null || keySecret is null)
             {
                 return new GatewayPaymentStatus { State = GatewayPaymentState.Unknown };
+            }
+
+            if (isOrder)
+            {
+                return await GetOrderStatusAsync(gatewayReference, keyId, keySecret, cancellationToken);
             }
 
             var client = _httpClientFactory.CreateClient(nameof(RazorpayGateway));
@@ -171,6 +271,54 @@ namespace iucs.readernest.api.Services.Payments
                 "cancelled" or "expired" => new GatewayPaymentStatus { State = GatewayPaymentState.Failed },
                 _ => new GatewayPaymentStatus { State = GatewayPaymentState.Pending },
             };
+        }
+
+        /// <summary>
+        /// Order-based status (inline checkout): a captured payment on the order settles it —
+        /// the pull-based safety net for popups closed after paying but before the verify call.
+        /// Orders don't expire like links, so an unpaid one just stays Pending.
+        /// </summary>
+        private async Task<GatewayPaymentStatus> GetOrderStatusAsync(
+            string orderId,
+            string keyId,
+            string keySecret,
+            CancellationToken cancellationToken)
+        {
+            var client = _httpClientFactory.CreateClient(nameof(RazorpayGateway));
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get, $"https://api.razorpay.com/v1/orders/{orderId}/payments");
+            request.Headers.Add(
+                "Authorization",
+                "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"{keyId}:{keySecret}")));
+
+            var response = await client.SendAsync(request, cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "Razorpay order-payments lookup for {Order} failed: {Status} {Body}",
+                    orderId, (int)response.StatusCode, body);
+                return new GatewayPaymentStatus { State = GatewayPaymentState.Unknown };
+            }
+
+            using var json = JsonDocument.Parse(body);
+            if (json.RootElement.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var payment in items.EnumerateArray())
+                {
+                    var status = payment.TryGetProperty("status", out var s) ? s.GetString() : null;
+                    if (status is "captured")
+                    {
+                        return new GatewayPaymentStatus
+                        {
+                            State = GatewayPaymentState.Paid,
+                            PaymentId = payment.TryGetProperty("id", out var pid) ? pid.GetString() : null,
+                        };
+                    }
+                }
+            }
+
+            return new GatewayPaymentStatus { State = GatewayPaymentState.Pending };
         }
 
         /// <summary>The captured payment id from a paid link's payments array, if present.</summary>

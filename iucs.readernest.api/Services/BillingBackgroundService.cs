@@ -1,3 +1,4 @@
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Billing;
 using iucs.readernest.application.Services;
@@ -208,6 +209,12 @@ namespace iucs.readernest.api.Services
             DateOnly today,
             CancellationToken cancellationToken)
         {
+            // Settings → Notifications → "Fee payment reminders" turns this sender off.
+            if (!await NotificationToggles.IsEnabledAsync(unitOfWork, NotificationToggles.FeeReminders, cancellationToken))
+            {
+                return;
+            }
+
             var notifications = services.GetRequiredService<INotificationService>();
             var reminderWindow = today.AddDays(3);
 
