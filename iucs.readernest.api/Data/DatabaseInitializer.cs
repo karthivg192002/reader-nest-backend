@@ -411,7 +411,11 @@ namespace iucs.readernest.api.Data
         private static async Task EnsureSubAdminIntegrationsMenuAsync(ReaderNestDbContext context)
         {
             const string path = "/subadmin/integrations";
-            if (await context.MenuItems.AnyAsync(m => m.Portal == "subadmin" && m.Path == path))
+            // On a fresh database SeedMenusAsync has already queued this row in the change
+            // tracker (nothing is saved until the single SaveChangesAsync at the end), so a
+            // database-only check would insert it twice (23505 on ix_menu_items_portal_path).
+            if (context.MenuItems.Local.Any(m => m.Portal == "subadmin" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "subadmin" && m.Path == path))
             {
                 return;
             }
@@ -445,7 +449,10 @@ namespace iucs.readernest.api.Data
         /// </summary>
         private static async Task EnsurePackagesAndStudentViewMenusAsync(ReaderNestDbContext context)
         {
-            if (!await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == "/admin/packages"))
+            // Local checks mirror EnsureSubAdminIntegrationsMenuAsync: on a fresh database
+            // these rows are already pending in the change tracker from SeedMenusAsync.
+            if (!context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == "/admin/packages") &&
+                !await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == "/admin/packages"))
             {
                 // Slot directly after "Billing & Finance"; push the rest of Finance down one.
                 var billing = await context.MenuItems
@@ -473,7 +480,8 @@ namespace iucs.readernest.api.Data
                 });
             }
 
-            if (!await context.MenuItems.AnyAsync(m => m.Portal == "parent" && m.Path == "/student"))
+            if (!context.MenuItems.Local.Any(m => m.Portal == "parent" && m.Path == "/student") &&
+                !await context.MenuItems.AnyAsync(m => m.Portal == "parent" && m.Path == "/student"))
             {
                 var learningItems = await context.MenuItems
                     .Where(m => m.Portal == "parent" && m.Section == "Learning")
