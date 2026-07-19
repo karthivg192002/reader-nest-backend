@@ -131,8 +131,22 @@ builder.Services.AddAuthorization();
 builder.Services.AddSingleton<IAuthorizationPolicyProvider, PermissionPolicyProvider>();
 builder.Services.AddSingleton<IAuthorizationHandler, PermissionAuthorizationHandler>();
 
-var allowedOrigins = builder.Configuration
-    .GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
+// Origins must be exact scheme+host values (no trailing slash, no paths); a
+// trailing slash never matches the browser's Origin header, so trim it here.
+var allowedOrigins = (builder.Configuration
+    .GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [])
+    .Select(origin => origin?.Trim().TrimEnd('/') ?? string.Empty)
+    .Where(origin => origin.Length > 0)
+    .ToArray();
+if (allowedOrigins.Contains("*"))
+{
+    // The policy below uses AllowCredentials(), which the CORS protocol forbids
+    // combining with a wildcard origin — surface the fix instead of the framework's
+    // generic startup crash.
+    throw new InvalidOperationException(
+        "Cors:AllowedOrigins must list explicit origins — '*' is not allowed because the CORS policy " +
+        "sends credentials. Set Cors__AllowedOrigins__0 to the frontend's URL, e.g. https://app.example.com.");
+}
 builder.Services.AddCors(options =>
     options.AddDefaultPolicy(policy =>
         policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod().AllowCredentials()));
