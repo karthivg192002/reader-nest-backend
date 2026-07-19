@@ -11,7 +11,9 @@ namespace iucs.readernest.application.Mappings
             {
                 Id = rate.Id,
                 TeacherProfileId = rate.TeacherProfileId,
-                TeacherName = $"{rate.TeacherProfile.User.FirstName} {rate.TeacherProfile.User.LastName}",
+                TeacherName = rate.TeacherProfile is null
+                    ? "All teachers (default)"
+                    : $"{rate.TeacherProfile.User.FirstName} {rate.TeacherProfile.User.LastName}".Trim(),
                 DurationMinutes = rate.DurationMinutes,
                 RatePerSession = rate.RatePerSession,
                 TeacherNoShowPenaltyPercent = rate.TeacherNoShowPenaltyPercent,

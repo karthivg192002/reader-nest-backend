@@ -7,7 +7,8 @@ namespace iucs.readernest.application.Dto.Payouts
     {
         public Guid Id { get; set; }
 
-        public Guid TeacherProfileId { get; set; }
+        /// <summary>Null identifies the centre-wide default rate card.</summary>
+        public Guid? TeacherProfileId { get; set; }
 
         public string TeacherName { get; set; } = null!;
 
@@ -24,8 +25,8 @@ namespace iucs.readernest.application.Dto.Payouts
 
     public class SavePayoutRateRequest
     {
-        [Required]
-        public Guid TeacherProfileId { get; set; }
+        /// <summary>Omit (null) to save the centre-wide default rate card that pays teachers without their own rates.</summary>
+        public Guid? TeacherProfileId { get; set; }
 
         /// <summary>Allowed values: 30, 45 or 60 (validated in the service).</summary>
         [Required]

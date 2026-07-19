@@ -111,6 +111,52 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task DefaultRateCard_PaysTeachersWithoutOwnRates_AndTeacherRateOverridesIt()
+        {
+            var (batch, _, session) = await SeedBatchWithSessionAsync(totalSessions: 3);
+            var payoutService = CreatePayoutService();
+
+            // Only the centre-wide default card exists (TeacherProfileId = null)
+            await payoutService.SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = null,
+                DurationMinutes = 45,
+                RatePerSession = 800,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
+            });
+
+            await CreateSessionService().CompleteAsync(session.Id);
+            var defaultPaid = Assert.Single(_db.Context.PayoutItems.ToList());
+            Assert.Equal(PayoutItemType.SessionEarning, defaultPaid.Type);
+            Assert.Equal(800m, defaultPaid.Amount); // paid from the default card
+
+            // The teacher's own rate takes precedence over the default from then on
+            await payoutService.SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = session.TeacherProfileId,
+                DurationMinutes = 45,
+                RatePerSession = 1200,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
+            });
+
+            var secondStart = session.ScheduledStartAtUtc.AddDays(1);
+            var second = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = session.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = secondStart,
+                ScheduledEndAtUtc = secondStart.AddMinutes(45),
+            };
+            _db.Context.ClassSessions.Add(second);
+            await _db.Context.SaveChangesAsync();
+
+            await CreateSessionService().CompleteAsync(second.Id);
+            var overridden = _db.Context.PayoutItems.Single(i => i.ClassSessionId == second.Id);
+            Assert.Equal(1200m, overridden.Amount);
+        }
+
+        [Fact]
         public async Task SubmitLeave_WithinSixHoursOfClass_IsBlocked()
         {
             var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);

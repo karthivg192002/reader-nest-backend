@@ -51,11 +51,15 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("Duration must be 30, 45 or 60 minutes.");
             }
 
-            var teacherExists = await _unitOfWork.Repository<TeacherProfile>()
-                .ExistsAsync(t => t.Id == request.TeacherProfileId, cancellationToken);
-            if (!teacherExists)
+            // Null teacher = the centre-wide default card; only concrete teachers need to exist.
+            if (request.TeacherProfileId is { } teacherProfileId)
             {
-                throw new NotFoundException(nameof(TeacherProfile), request.TeacherProfileId);
+                var teacherExists = await _unitOfWork.Repository<TeacherProfile>()
+                    .ExistsAsync(t => t.Id == teacherProfileId, cancellationToken);
+                if (!teacherExists)
+                {
+                    throw new NotFoundException(nameof(TeacherProfile), teacherProfileId);
+                }
             }
 
             // Same teacher/duration/effective-date updates in place; a new effective
@@ -139,10 +143,20 @@ namespace iucs.readernest.application.Services
             var sessionDate = DateOnly.FromDateTime(session.ScheduledStartAtUtc);
             var durationMinutes = (int)Math.Round((session.ScheduledEndAtUtc - session.ScheduledStartAtUtc).TotalMinutes);
 
-            // The rate effective on the session date for this teacher/duration; a missing
-            // rate accrues a zero item so the gap is visible on the statement, never silent.
+            // The rate effective on the session date: the teacher's own rate wins; teachers
+            // without one are paid from the centre-wide default card (null teacher). Only
+            // when neither exists does a zero item accrue, so the gap is visible on the
+            // statement, never silent.
             var rate = await _unitOfWork.Repository<PayoutRate>().Query()
                 .Where(r => r.TeacherProfileId == session.TeacherProfileId
+                            && r.DurationMinutes == durationMinutes
+                            && r.IsActive
+                            && r.EffectiveFrom <= sessionDate)
+                .OrderByDescending(r => r.EffectiveFrom)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            rate ??= await _unitOfWork.Repository<PayoutRate>().Query()
+                .Where(r => r.TeacherProfileId == null
                             && r.DurationMinutes == durationMinutes
                             && r.IsActive
                             && r.EffectiveFrom <= sessionDate)
@@ -283,13 +297,14 @@ namespace iucs.readernest.application.Services
             DateTime sessionStartUtc,
             CancellationToken cancellationToken)
         {
-            var payout = await _unitOfWork.Repository<Payout>().Query()
-                .Include(p => p.Items)
-                .FirstOrDefaultAsync(
-                    p => p.TeacherProfileId == teacherProfileId
-                         && p.PeriodYear == sessionStartUtc.Year
-                         && p.PeriodMonth == sessionStartUtc.Month,
-                    cancellationToken);
+            // Load TRACKED (Query() is AsNoTracking): items added to an untracked payout
+            // are silently dropped at SaveChanges — every accrual after the month's first
+            // session would be lost. New items attach through the tracked parent.
+            var payout = await _unitOfWork.Repository<Payout>().FirstOrDefaultAsync(
+                p => p.TeacherProfileId == teacherProfileId
+                     && p.PeriodYear == sessionStartUtc.Year
+                     && p.PeriodMonth == sessionStartUtc.Month,
+                cancellationToken);
 
             if (payout is not null)
             {
