@@ -611,7 +611,12 @@ namespace iucs.readernest.api.Data
         /// </summary>
         private static async Task EnsureCashPaymentMethodAsync(ReaderNestDbContext context)
         {
-            if (await context.Integrations.AnyAsync(i => i.Key == "cash"))
+            // On a fresh database SeedIntegrationsAsync has already queued this row in the
+            // change tracker but nothing is saved until the single SaveChangesAsync at the
+            // end, so a database-only existence check would insert "cash" twice (23505 on
+            // ix_integrations_key). Check pending local entities first.
+            if (context.Integrations.Local.Any(i => i.Key == "cash") ||
+                await context.Integrations.AnyAsync(i => i.Key == "cash"))
             {
                 return;
             }
@@ -636,7 +641,10 @@ namespace iucs.readernest.api.Data
         /// </summary>
         private static async Task EnsureSmsIntegrationAsync(ReaderNestDbContext context)
         {
-            if (await context.Integrations.AnyAsync(i => i.Key == "sms"))
+            // Local check mirrors EnsureCashPaymentMethodAsync: never trust the database
+            // alone while unsaved seed rows are still sitting in the change tracker.
+            if (context.Integrations.Local.Any(i => i.Key == "sms") ||
+                await context.Integrations.AnyAsync(i => i.Key == "sms"))
             {
                 return;
             }
