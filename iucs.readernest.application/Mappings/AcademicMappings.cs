@@ -55,6 +55,19 @@ namespace iucs.readernest.application.Mappings
             };
         }
 
+        public static BatchStudentDto ToDto(this BatchEnrollment enrollment)
+        {
+            return new BatchStudentDto
+            {
+                EnrollmentId = enrollment.Id,
+                ChildId = enrollment.ChildId,
+                ChildName = $"{enrollment.Child.FirstName} {enrollment.Child.LastName}".Trim(),
+                AcademicLevel = enrollment.Child.AcademicLevel,
+                Status = enrollment.Status,
+                EnrolledAtUtc = enrollment.CreatedAtUtc,
+            };
+        }
+
         public static ClassSessionDto ToDto(this ClassSession session)
         {
             return new ClassSessionDto

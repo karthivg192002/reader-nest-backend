@@ -45,7 +45,7 @@ namespace iucs.readernest.tests
 
         private CourseService CreateCourseService() => new(_db.UnitOfWork, _auditLog);
 
-        private BatchService CreateBatchService() => new(_db.UnitOfWork, _auditLog);
+        private BatchService CreateBatchService() => new(_db.UnitOfWork, _auditLog, _notifications);
 
         private PayoutService CreatePayoutService() => new(_db.UnitOfWork, _auditLog, _notifications);
 
@@ -1130,6 +1130,102 @@ namespace iucs.readernest.tests
             Assert.Equal(EnrollmentFormStatus.Submitted, (await service.GetAsync(formId)).Status);
             Assert.Empty(_db.Context.Children.ToList());
             Assert.Empty(_db.Context.Subscriptions.ToList());
+        }
+
+        [Fact]
+        public async Task AssignStudent_PlacesChildInBatch_AndNotifiesParent()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var child = new Child { ParentProfile = parentProfile, FirstName = "Kid", LastName = "One", IsActive = true };
+            _db.Context.AddRange(parentProfile, child);
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateBatchService();
+            var result = await service.AssignStudentAsync(batch.Id, child.Id);
+
+            Assert.Equal(child.Id, result.ChildId);
+            Assert.Equal(EnrollmentStatus.Active, result.Status);
+            var enrollment = Assert.Single(_db.Context.BatchEnrollments.ToList());
+            Assert.Equal(batch.Id, enrollment.BatchId);
+            Assert.Equal(1, (await service.GetAsync(batch.Id)).EnrolledCount);
+            Assert.Contains(_emailSender.Sent, m => m.To == parentUser.Email && m.Subject.Contains("assigned to a batch"));
+        }
+
+        [Fact]
+        public async Task AssignStudent_RejectsWhenBatchIsAtCapacity()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", Department = Department.Phonics };
+            var course = new Course { CourseCategory = category, Name = "Course", Type = CourseType.Group, DurationMinutes = 45, Price = 100, TotalSessions = 1, Department = Department.Phonics };
+            var batch = new Batch { Course = course, TeacherProfile = teacher, Name = "Full Batch", Capacity = 1 };
+            var parentProfile = new ParentProfile { UserId = (await _db.SeedUserAsync($"p1-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent)).Id };
+            var seatedChild = new Child { ParentProfile = parentProfile, FirstName = "Seated", LastName = "Kid", IsActive = true };
+            _db.Context.AddRange(teacher, category, course, batch, parentProfile, seatedChild);
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateBatchService();
+            await service.AssignStudentAsync(batch.Id, seatedChild.Id);
+
+            var otherParentProfile = new ParentProfile { UserId = (await _db.SeedUserAsync($"p2-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent)).Id };
+            var waitingChild = new Child { ParentProfile = otherParentProfile, FirstName = "Waiting", LastName = "Kid", IsActive = true };
+            _db.Context.AddRange(otherParentProfile, waitingChild);
+            await _db.Context.SaveChangesAsync();
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.AssignStudentAsync(batch.Id, waitingChild.Id));
+        }
+
+        [Fact]
+        public async Task AssignStudent_RejectsDuplicate_ButAllowsReassignAfterRemoval()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var child = new Child { ParentProfile = parentProfile, FirstName = "Kid", LastName = "One", IsActive = true };
+            _db.Context.AddRange(parentProfile, child);
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateBatchService();
+            await service.AssignStudentAsync(batch.Id, child.Id);
+
+            // Already-active: rejected, and the unique (BatchId, ChildId) index means a second
+            // INSERT would be blocked at the DB level too — the service must catch it earlier.
+            await Assert.ThrowsAsync<ConflictException>(() => service.AssignStudentAsync(batch.Id, child.Id));
+
+            await service.RemoveStudentAsync(batch.Id, child.Id);
+            Assert.Equal(0, (await service.GetAsync(batch.Id)).EnrolledCount);
+            var withdrawn = Assert.Single(_db.Context.BatchEnrollments.ToList());
+            Assert.Equal(EnrollmentStatus.Withdrawn, withdrawn.Status);
+
+            // Re-assigning must reactivate the existing (unique-indexed) row, not insert a new one.
+            await service.AssignStudentAsync(batch.Id, child.Id);
+            Assert.Equal(1, (await service.GetAsync(batch.Id)).EnrolledCount);
+            Assert.Single(_db.Context.BatchEnrollments.ToList());
+        }
+
+        [Fact]
+        public async Task ListUnassignedStudents_ExcludesAlreadyEnrolled_AndInactiveChildren()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var enrolledParent = new ParentProfile { UserId = (await _db.SeedUserAsync($"p1-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent)).Id };
+            var enrolledChild = new Child { ParentProfile = enrolledParent, FirstName = "Enrolled", LastName = "Kid", IsActive = true };
+            var inactiveParent = new ParentProfile { UserId = (await _db.SeedUserAsync($"p2-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent)).Id };
+            var inactiveChild = new Child { ParentProfile = inactiveParent, FirstName = "Inactive", LastName = "Kid", IsActive = false };
+            var eligibleParent = new ParentProfile { UserId = (await _db.SeedUserAsync($"p3-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent)).Id };
+            var eligibleChild = new Child { ParentProfile = eligibleParent, FirstName = "Eligible", LastName = "Kid", IsActive = true };
+            _db.Context.AddRange(enrolledParent, enrolledChild, inactiveParent, inactiveChild, eligibleParent, eligibleChild);
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateBatchService();
+            await service.AssignStudentAsync(batch.Id, enrolledChild.Id);
+
+            var unassigned = await service.ListUnassignedStudentsAsync(batch.Id);
+
+            Assert.DoesNotContain(unassigned, c => c.ChildId == enrolledChild.Id);
+            Assert.DoesNotContain(unassigned, c => c.ChildId == inactiveChild.Id);
+            Assert.Contains(unassigned, c => c.ChildId == eligibleChild.Id);
         }
 
         [Fact]

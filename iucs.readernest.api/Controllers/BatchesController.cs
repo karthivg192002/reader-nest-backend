@@ -71,5 +71,41 @@ namespace iucs.readernest.api.Controllers
         {
             return Ok(await _batchService.SetStatusAsync(id, request.Status, cancellationToken));
         }
+
+        /// <summary>The batch's current student roster (WBS p.17 "Assign Students").</summary>
+        [HttpGet("{id:guid}/enrollments")]
+        [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<BatchStudentDto>>> ListEnrollments(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _batchService.ListEnrollmentsAsync(id, cancellationToken));
+        }
+
+        /// <summary>Active, approved children not yet in this batch — candidates for the assign picker.</summary>
+        [HttpGet("{id:guid}/unassigned-students")]
+        [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<UnassignedChildDto>>> ListUnassigned(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _batchService.ListUnassignedStudentsAsync(id, cancellationToken));
+        }
+
+        /// <summary>Places a child in the batch (rejected once the batch is at capacity).</summary>
+        [HttpPost("{id:guid}/enrollments")]
+        [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.Edit)]
+        public async Task<ActionResult<BatchStudentDto>> AssignStudent(
+            Guid id,
+            AssignStudentRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _batchService.AssignStudentAsync(id, request.ChildId, cancellationToken));
+        }
+
+        /// <summary>Withdraws a child from the batch, freeing a seat.</summary>
+        [HttpDelete("{id:guid}/enrollments/{childId:guid}")]
+        [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.Edit)]
+        public async Task<IActionResult> RemoveStudent(Guid id, Guid childId, CancellationToken cancellationToken)
+        {
+            await _batchService.RemoveStudentAsync(id, childId, cancellationToken);
+            return NoContent();
+        }
     }
 }
