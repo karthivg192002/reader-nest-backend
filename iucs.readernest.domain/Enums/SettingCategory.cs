@@ -6,6 +6,7 @@ namespace iucs.readernest.domain.Enums
         General,
         Branding,
         Notifications,
-        Integrations
+        Integrations,
+        Widgets
     }
 }

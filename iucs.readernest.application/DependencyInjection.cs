@@ -30,6 +30,7 @@ namespace iucs.readernest.application
             services.AddScoped<IMenuService, MenuService>();
             services.AddScoped<IRoleService, RoleService>();
             services.AddScoped<IIntegrationService, IntegrationService>();
+            services.AddScoped<IFloatingNoteService, FloatingNoteService>();
             return services;
         }
     }

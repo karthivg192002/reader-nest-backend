@@ -7,6 +7,7 @@ using iucs.readernest.domain.Entities.Common;
 using iucs.readernest.domain.Entities.Communication;
 using iucs.readernest.domain.Entities.Integrations;
 using iucs.readernest.domain.Entities.Navigation;
+using iucs.readernest.domain.Entities.Notes;
 using iucs.readernest.domain.Entities.Payouts;
 using iucs.readernest.domain.Entities.Resources;
 using iucs.readernest.domain.Entities.Settings;
@@ -77,6 +78,9 @@ namespace iucs.readernest.domain.Data
         // Communication & auditing
         public DbSet<Notification> Notifications => Set<Notification>();
         public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
+
+        // Notes
+        public DbSet<FloatingNote> FloatingNotes => Set<FloatingNote>();
 
         // Platform configuration
         public DbSet<AppSetting> AppSettings => Set<AppSetting>();
