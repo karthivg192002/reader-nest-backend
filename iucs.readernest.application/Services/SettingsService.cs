@@ -79,10 +79,17 @@ namespace iucs.readernest.application.Services
                 }
             }
 
+            var entityId = keys.Count == 1 ? keys[0] : $"{keys.Count} keys";
+            if (entityId.Length > 64)
+            {
+                entityId = entityId[..64];
+            }
+
             await _auditLog.StageAsync(
                 AuditAction.Update,
                 nameof(AppSetting),
-                string.Join(",", keys),
+                entityId,
+                changesJson: System.Text.Json.JsonSerializer.Serialize(keys),
                 cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 

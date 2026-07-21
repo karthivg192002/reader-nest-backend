@@ -59,6 +59,9 @@ namespace iucs.readernest.application.Dto.Reports
         /// <summary>Refunded amount / collected amount.</summary>
         public double RefundRatePercent { get; set; }
 
+        /// <summary>Children re-enrolled into another batch after a prior batch completed / children with a completed batch.</summary>
+        public double RenewalRatePercent { get; set; }
+
         /// <summary>Average enrolled/capacity across active batches.</summary>
         public double BatchOccupancyPercent { get; set; }
 

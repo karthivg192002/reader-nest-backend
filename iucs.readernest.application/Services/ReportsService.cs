@@ -175,6 +175,31 @@ namespace iucs.readernest.application.Services
                 ? 0
                 : Math.Round(100.0 * occupancy.Sum(o => o.Enrolled) / occupancy.Sum(o => o.Capacity), 1);
 
+            // Renewal rate: children whose batch completed (Dormant) who later hold an active
+            // enrollment in a different batch, over all children whose batch completed.
+            var completedEnrollmentsByChild = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.Batch.Status == BatchStatus.Dormant)
+                .Select(e => new { e.ChildId, e.BatchId })
+                .ToListAsync(cancellationToken);
+            var completedChildIds = completedEnrollmentsByChild.Select(e => e.ChildId).Distinct().ToList();
+            var renewedChildCount = 0;
+            if (completedChildIds.Count > 0)
+            {
+                var completedBatchesByChild = completedEnrollmentsByChild
+                    .GroupBy(e => e.ChildId)
+                    .ToDictionary(g => g.Key, g => g.Select(e => e.BatchId).ToHashSet());
+                var activeEnrollmentsByChild = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                    .Where(e => e.Status == EnrollmentStatus.Active && completedChildIds.Contains(e.ChildId))
+                    .Select(e => new { e.ChildId, e.BatchId })
+                    .ToListAsync(cancellationToken);
+                renewedChildCount = activeEnrollmentsByChild
+                    .GroupBy(e => e.ChildId)
+                    .Count(g => g.Any(e => !completedBatchesByChild[g.Key].Contains(e.BatchId)));
+            }
+            var renewalRatePercent = completedChildIds.Count == 0
+                ? 0
+                : Math.Round(100.0 * renewedChildCount / completedChildIds.Count, 1);
+
             var demoTotal = await _unitOfWork.Repository<DemoBooking>().Query().CountAsync(cancellationToken);
             var demoEnrolled = await _unitOfWork.Repository<DemoBooking>().Query()
                 .CountAsync(b => b.ConversionStatus == ConversionStatus.Enrolled, cancellationToken);
@@ -301,6 +326,7 @@ namespace iucs.readernest.application.Services
                 DormantBatches = dormantBatches,
                 ConversionRatePercent = demoTotal == 0 ? 0 : Math.Round(100.0 * demoEnrolled / demoTotal, 1),
                 RefundRatePercent = revenueCollected == 0 ? 0 : Math.Round((double)(100m * refunded / revenueCollected), 1),
+                RenewalRatePercent = renewalRatePercent,
                 BatchOccupancyPercent = occupancyPercent,
                 TeacherUtilizationSessionsPerTeacher = activeTeachers == 0
                     ? 0

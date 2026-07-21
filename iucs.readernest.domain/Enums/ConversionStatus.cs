@@ -8,6 +8,8 @@ namespace iucs.readernest.domain.Enums
         DemoScheduled,
         DemoCompleted,
         FollowUpInProgress,
+        PaymentPending,
+        PartiallyPaid,
         Enrolled,
         NotInterested
     }
