@@ -266,12 +266,17 @@ namespace iucs.readernest.application.Services
 
             foreach (var parent in parents)
             {
-                await _notificationService.SendEmailAsync(
+                await _notificationService.SendTemplatedEmailAsync(
                     parent.ParentUserId,
                     parent.ParentEmail,
                     NotificationType.PerformanceSummary,
-                    $"Class summary — {session.ScheduledStartAtUtc:dd MMM}",
-                    $"Today's class notes for {parent.ChildName}:\n\n{session.Summary}",
+                    "class-summary",
+                    new Dictionary<string, string>
+                    {
+                        ["ChildName"] = parent.ChildName,
+                        ["SessionDate"] = session.ScheduledStartAtUtc.ToString("dd MMM"),
+                        ["Summary"] = session.Summary ?? string.Empty,
+                    },
                     cancellationToken);
             }
         }
@@ -515,12 +520,18 @@ namespace iucs.readernest.application.Services
                 return;
             }
 
-            await _notificationService.SendEmailAsync(
+            await _notificationService.SendTemplatedEmailAsync(
                 teacher.User.Id,
                 teacher.User.Email,
                 NotificationType.BookingConfirmation,
-                "Class scheduled",
-                $"A {session.Type} session was scheduled for you: {session.ScheduledStartAtUtc:u} – {session.ScheduledEndAtUtc:u}.",
+                "class-scheduled",
+                new Dictionary<string, string>
+                {
+                    ["TeacherFirstName"] = teacher.User.FirstName,
+                    ["SessionType"] = session.Type.ToString(),
+                    ["StartAtLocal"] = session.ScheduledStartAtUtc.ToString("u"),
+                    ["EndAtLocal"] = session.ScheduledEndAtUtc.ToString("u"),
+                },
                 cancellationToken);
         }
 
@@ -648,13 +659,12 @@ namespace iucs.readernest.application.Services
 
             foreach (var admin in admins)
             {
-                await _notificationService.SendEmailAsync(
+                await _notificationService.SendTemplatedEmailAsync(
                     admin.Id,
                     admin.Email,
                     NotificationType.NoShowAlert,
-                    "Teacher no-show reported",
-                    $"The teacher did not attend the session scheduled at {session.ScheduledStartAtUtc:u}. " +
-                    "A deduction was applied and the session was carried forward.",
+                    "teacher-noshow-alert",
+                    new Dictionary<string, string> { ["StartAtLocal"] = session.ScheduledStartAtUtc.ToString("u") },
                     cancellationToken);
             }
         }

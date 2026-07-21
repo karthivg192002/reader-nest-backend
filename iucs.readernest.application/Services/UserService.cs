@@ -18,6 +18,7 @@ namespace iucs.readernest.application.Services
         private readonly IUnitOfWork _unitOfWork;
         private readonly IPasswordHasher _passwordHasher;
         private readonly INotificationService _notifications;
+        private readonly IEmailTemplateService _emailTemplateService;
         private readonly IAuditLogService _auditLog;
         private readonly IEmailSender _emailSender;
         private readonly IWhatsAppSender _whatsAppSender;
@@ -27,6 +28,7 @@ namespace iucs.readernest.application.Services
             IUnitOfWork unitOfWork,
             IPasswordHasher passwordHasher,
             INotificationService notifications,
+            IEmailTemplateService emailTemplateService,
             IAuditLogService auditLog,
             IEmailSender emailSender,
             IWhatsAppSender whatsAppSender,
@@ -35,6 +37,7 @@ namespace iucs.readernest.application.Services
             _unitOfWork = unitOfWork;
             _passwordHasher = passwordHasher;
             _notifications = notifications;
+            _emailTemplateService = emailTemplateService;
             _auditLog = auditLog;
             _emailSender = emailSender;
             _whatsAppSender = whatsAppSender;
@@ -189,13 +192,17 @@ namespace iucs.readernest.application.Services
 
             // Requirement: the account holder receives login credentials on creation.
             // The plain-text temp password lives only in this email, never in the database.
-            var (subject, body) = BuildWelcomeMessage(user.FirstName, user.Email, temporaryPassword);
-            await _notifications.SendEmailAsync(
+            await _notifications.SendTemplatedEmailAsync(
                 user.Id,
                 user.Email,
                 NotificationType.General,
-                subject,
-                body,
+                "welcome-credentials",
+                new Dictionary<string, string>
+                {
+                    ["FirstName"] = user.FirstName,
+                    ["Email"] = user.Email,
+                    ["TemporaryPassword"] = temporaryPassword,
+                },
                 cancellationToken);
 
             await _auditLog.StageAsync(AuditAction.Create, nameof(User), user.Id.ToString(), cancellationToken: cancellationToken);
@@ -327,7 +334,19 @@ namespace iucs.readernest.application.Services
             }
 
             var temporaryPassword = TemporaryPasswordGenerator.Generate();
-            var (subject, body) = BuildWelcomeMessage(user.FirstName, user.Email, temporaryPassword);
+            var welcomeTokens = new Dictionary<string, string>
+            {
+                ["FirstName"] = user.FirstName,
+                ["Email"] = user.Email,
+                ["TemporaryPassword"] = temporaryPassword,
+            };
+            // WhatsApp/SMS are plain-text transports, not part of the Email Template Master.
+            var plainBody =
+                $"Hello {user.FirstName},\n\nYour Reader Nest account is ready.\n\n" +
+                $"Login: {user.Email}\nTemporary password: {temporaryPassword}\n\n" +
+                "Please sign in and change your password.";
+            var (subject, emailHtmlBody) = await _emailTemplateService.RenderAsync(
+                "welcome-credentials", welcomeTokens, cancellationToken);
 
             // Deliver BEFORE resetting the password: if the send fails we must not
             // leave the account with a new password nobody received. The senders
@@ -344,7 +363,7 @@ namespace iucs.readernest.application.Services
                         }
 
                         notificationChannel = NotificationChannel.WhatsApp;
-                        await _whatsAppSender.SendAsync(user.Phone, body, cancellationToken);
+                        await _whatsAppSender.SendAsync(user.Phone, plainBody, cancellationToken);
                         break;
 
                     case CredentialChannel.Sms:
@@ -354,11 +373,11 @@ namespace iucs.readernest.application.Services
                         }
 
                         notificationChannel = NotificationChannel.Sms;
-                        await _smsSender.SendAsync(user.Phone, body, cancellationToken);
+                        await _smsSender.SendAsync(user.Phone, plainBody, cancellationToken);
                         break;
 
                     default:
-                        await _emailSender.SendAsync(user.Email, subject, body, cancellationToken);
+                        await _emailSender.SendAsync(user.Email, subject, emailHtmlBody, cancellationToken);
                         break;
                 }
             }
@@ -411,16 +430,6 @@ namespace iucs.readernest.application.Services
             var integration = await _unitOfWork.Repository<Integration>().Query()
                 .FirstOrDefaultAsync(i => i.Key == key, cancellationToken);
             return integration is { IsEnabled: true };
-        }
-
-        private static (string Subject, string Body) BuildWelcomeMessage(string firstName, string email, string temporaryPassword)
-        {
-            const string subject = "Your Reader Nest account";
-            var body =
-                $"Hello {firstName},\n\nYour Reader Nest account is ready.\n\n" +
-                $"Login: {email}\nTemporary password: {temporaryPassword}\n\n" +
-                "Please sign in and change your password.";
-            return (subject, body);
         }
     }
 }

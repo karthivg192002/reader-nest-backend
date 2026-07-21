@@ -227,12 +227,18 @@ namespace iucs.readernest.application.Services
             var period = $"{payout.PeriodYear}-{payout.PeriodMonth:D2}";
             var lines = items
                 .Select(i => $"- {i.Type}: {i.Amount:0.00}{(string.IsNullOrEmpty(i.Note) ? "" : $" ({i.Note})")}");
-            await _notificationService.SendEmailAsync(
+            await _notificationService.SendTemplatedEmailAsync(
                 teacherUser.Id,
                 teacherUser.Email,
                 NotificationType.PayoutStatement,
-                $"Your payout statement for {period}",
-                $"Payout for {period}\n{string.Join("\n", lines)}\nTotal: {payout.TotalAmount:0.00}",
+                "payout-statement",
+                new Dictionary<string, string>
+                {
+                    ["TeacherFirstName"] = teacherUser.FirstName,
+                    ["Period"] = period,
+                    ["LinesText"] = string.Join("\n", lines),
+                    ["Total"] = payout.TotalAmount.ToString("0.00"),
+                },
                 cancellationToken);
 
             payout.EmailSentAtUtc = DateTime.UtcNow;
@@ -266,19 +272,20 @@ namespace iucs.readernest.application.Services
             var slipLines = items
                 .Select(i => $"  {i.Type,-26} {i.Amount,12:0.00}{(string.IsNullOrEmpty(i.Note) ? "" : $"   {i.Note}")}");
             var slip =
-                $"SALARY SLIP — The Reader Nest\n" +
-                $"Teacher: {teacherUser.FirstName} {teacherUser.LastName}\n" +
-                $"Period:  {period}\n" +
                 $"Paid on: {DateTime.UtcNow:yyyy-MM-dd}\n\n" +
-                $"Earnings & adjustments\n{string.Join("\n", slipLines)}\n" +
-                $"  {"NET PAID",-26} {payout.TotalAmount,12:0.00}\n\n" +
-                "This is a system-generated salary slip. Please contact the admin team for any discrepancy.";
-            await _notificationService.SendEmailAsync(
+                $"Earnings & adjustments\n{string.Join("\n", slipLines)}";
+            await _notificationService.SendTemplatedEmailAsync(
                 teacherUser.Id,
                 teacherUser.Email,
                 NotificationType.PayoutStatement,
-                $"Salary slip — {period} (paid)",
-                slip,
+                "salary-slip",
+                new Dictionary<string, string>
+                {
+                    ["TeacherFirstName"] = teacherUser.FirstName,
+                    ["Period"] = period,
+                    ["SlipBody"] = slip,
+                    ["Total"] = payout.TotalAmount.ToString("0.00"),
+                },
                 cancellationToken);
 
             return (await BaseQuery().FirstAsync(p => p.Id == payoutId, cancellationToken)).ToDto();

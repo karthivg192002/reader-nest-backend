@@ -51,7 +51,7 @@ namespace iucs.readernest.api.Services
             // Default to TLS on; only an explicit "false" disables it.
             var useTls = !string.Equals(Value(config, "use_tls"), "false", StringComparison.OrdinalIgnoreCase);
 
-            using var message = new MailMessage(fromAddress, toEmail, subject, body);
+            using var message = new MailMessage(fromAddress, toEmail, subject, body) { IsBodyHtml = true };
             using var client = new SmtpClient(host, port)
             {
                 EnableSsl = useTls,

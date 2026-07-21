@@ -245,20 +245,19 @@ namespace iucs.readernest.application.Services
                 .FirstOrDefaultAsync(cancellationToken);
             if (parentUser is not null)
             {
-                var body =
-                    $"INVOICE — The Reader Nest\n" +
-                    $"Invoice no: {invoice.InvoiceNumber}\n" +
-                    $"Billed to:  {parentUser.FirstName} {parentUser.LastName}\n" +
-                    $"Department: {invoice.Department}\n" +
-                    $"Amount due: {invoice.Amount:0.00} {invoice.Currency}\n" +
-                    $"Due date:   {invoice.DueDate:yyyy-MM-dd}\n\n" +
-                    "You can pay securely from the parent portal (Payments & Billing → Pay Now) " +
-                    "or download this invoice there. Please ignore this email if you have already paid.";
                 await NotifyUserAsync(
                     parentUser,
                     NotificationType.PaymentReminder,
-                    $"Invoice {invoice.InvoiceNumber} — {invoice.Amount:0.00} {invoice.Currency} due {invoice.DueDate:dd MMM yyyy}",
-                    body,
+                    "invoice-issued",
+                    new Dictionary<string, string>
+                    {
+                        ["ParentFirstName"] = parentUser.FirstName,
+                        ["InvoiceNumber"] = invoice.InvoiceNumber,
+                        ["Department"] = invoice.Department.ToString(),
+                        ["Amount"] = invoice.Amount.ToString("0.00"),
+                        ["Currency"] = invoice.Currency,
+                        ["DueDate"] = invoice.DueDate.ToString("yyyy-MM-dd"),
+                    },
                     cancellationToken);
                 await _unitOfWork.SaveChangesAsync(cancellationToken); // persist the notification log row
             }
@@ -330,8 +329,14 @@ namespace iucs.readernest.application.Services
 
             await NotifyAdminsAsync(
                 NotificationType.PaymentReceived,
-                "Payment received",
-                $"Payment of {request.Amount:0.00} {invoice.Currency} recorded against invoice {invoice.InvoiceNumber} ({invoice.Status}).",
+                "payment-received-admin",
+                new Dictionary<string, string>
+                {
+                    ["Amount"] = request.Amount.ToString("0.00"),
+                    ["Currency"] = invoice.Currency,
+                    ["InvoiceNumber"] = invoice.InvoiceNumber,
+                    ["Status"] = invoice.Status.ToString(),
+                },
                 cancellationToken);
 
             return invoice.ToDto();
@@ -459,8 +464,13 @@ namespace iucs.readernest.application.Services
                 // Admission Team owns payment follow-up day-to-day; Admin stays in the loop too.
                 await NotifyBillingStaffAsync(
                     NotificationType.PaymentReceived,
-                    "Cash payment intent",
-                    $"A parent chose to pay {remaining:0.00} {invoice.Currency} in cash for invoice {invoice.InvoiceNumber}. Record the payment once collected.",
+                    "cash-intent-billing-staff",
+                    new Dictionary<string, string>
+                    {
+                        ["Amount"] = remaining.ToString("0.00"),
+                        ["Currency"] = invoice.Currency,
+                        ["InvoiceNumber"] = invoice.InvoiceNumber,
+                    },
                     cancellationToken);
 
                 return new ParentPaymentResultDto
@@ -677,8 +687,14 @@ namespace iucs.readernest.application.Services
 
             await NotifyAdminsAsync(
                 NotificationType.PaymentReceived,
-                "Payment received",
-                $"Gateway payment of {transaction.Amount:0.00} {invoice.Currency} confirmed for invoice {invoice.InvoiceNumber} ({invoice.Status}).",
+                "payment-received-admin",
+                new Dictionary<string, string>
+                {
+                    ["Amount"] = transaction.Amount.ToString("0.00"),
+                    ["Currency"] = invoice.Currency,
+                    ["InvoiceNumber"] = invoice.InvoiceNumber,
+                    ["Status"] = invoice.Status.ToString(),
+                },
                 cancellationToken);
         }
 
@@ -752,9 +768,14 @@ namespace iucs.readernest.application.Services
                 await NotifyUserAsync(
                     parentUser,
                     NotificationType.PaymentReceived,
-                    $"Cash payment received — invoice {invoice.InvoiceNumber}",
-                    $"We have received your cash payment of {amount:0.00} {invoice.Currency} for invoice {invoice.InvoiceNumber}. " +
-                    $"Receipt no: {transaction.ReceiptNumber}. Thank you.",
+                    "cash-payment-confirmed-parent",
+                    new Dictionary<string, string>
+                    {
+                        ["Amount"] = amount.ToString("0.00"),
+                        ["Currency"] = invoice.Currency,
+                        ["InvoiceNumber"] = invoice.InvoiceNumber,
+                        ["ReceiptNumber"] = transaction.ReceiptNumber ?? "",
+                    },
                     cancellationToken);
                 await _unitOfWork.SaveChangesAsync(cancellationToken);
             }
@@ -993,17 +1014,17 @@ namespace iucs.readernest.application.Services
         private async Task NotifyUserAsync(
             User user,
             NotificationType type,
-            string subject,
-            string body,
+            string templateKey,
+            IReadOnlyDictionary<string, string> tokens,
             CancellationToken cancellationToken)
         {
-            await _notificationService.SendEmailAsync(user.Id, user.Email, type, subject, body, cancellationToken);
+            await _notificationService.SendTemplatedEmailAsync(user.Id, user.Email, type, templateKey, tokens, cancellationToken);
         }
 
         private async Task NotifyAdminsAsync(
             NotificationType type,
-            string subject,
-            string body,
+            string templateKey,
+            IReadOnlyDictionary<string, string> tokens,
             CancellationToken cancellationToken)
         {
             var admins = await _unitOfWork.Repository<User>().Query()
@@ -1011,15 +1032,15 @@ namespace iucs.readernest.application.Services
                 .ToListAsync(cancellationToken);
             foreach (var admin in admins)
             {
-                await _notificationService.SendEmailAsync(admin.Id, admin.Email, type, subject, body, cancellationToken);
+                await _notificationService.SendTemplatedEmailAsync(admin.Id, admin.Email, type, templateKey, tokens, cancellationToken);
             }
         }
 
         /// <summary>Admin + Admission Team — the two roles that actually own cash confirmation.</summary>
         private async Task NotifyBillingStaffAsync(
             NotificationType type,
-            string subject,
-            string body,
+            string templateKey,
+            IReadOnlyDictionary<string, string> tokens,
             CancellationToken cancellationToken)
         {
             var staff = await _unitOfWork.Repository<User>().Query()
@@ -1027,7 +1048,7 @@ namespace iucs.readernest.application.Services
                 .ToListAsync(cancellationToken);
             foreach (var user in staff)
             {
-                await _notificationService.SendEmailAsync(user.Id, user.Email, type, subject, body, cancellationToken);
+                await _notificationService.SendTemplatedEmailAsync(user.Id, user.Email, type, templateKey, tokens, cancellationToken);
             }
         }
 

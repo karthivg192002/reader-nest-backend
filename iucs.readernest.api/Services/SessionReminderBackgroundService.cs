@@ -68,10 +68,15 @@ namespace iucs.readernest.api.Services
             foreach (var session in upcoming)
             {
                 var teacherUser = session.TeacherProfile.User;
-                await notifications.SendEmailAsync(
+                await notifications.SendTemplatedEmailAsync(
                     teacherUser.Id, teacherUser.Email, NotificationType.SessionReminder,
-                    "Class starts in 1 hour",
-                    $"Your {session.Type} session starts at {FormatLocal(session.ScheduledStartAtUtc, teacherUser.TimeZoneId)}.",
+                    "session-reminder-teacher",
+                    new Dictionary<string, string>
+                    {
+                        ["TeacherFirstName"] = teacherUser.FirstName,
+                        ["SessionType"] = session.Type.ToString(),
+                        ["StartLocal"] = FormatLocal(session.ScheduledStartAtUtc, teacherUser.TimeZoneId),
+                    },
                     cancellationToken);
 
                 if (session.BatchId is null)
@@ -86,10 +91,13 @@ namespace iucs.readernest.api.Services
                     .ToListAsync(cancellationToken);
                 foreach (var parent in parentUsers)
                 {
-                    await notifications.SendEmailAsync(
+                    await notifications.SendTemplatedEmailAsync(
                         parent.Id, parent.Email, NotificationType.SessionReminder,
-                        "Class starts in 1 hour",
-                        $"Your child's class starts at {FormatLocal(session.ScheduledStartAtUtc, parent.TimeZoneId)}. Join from the parent dashboard.",
+                        "session-reminder-parent",
+                        new Dictionary<string, string>
+                        {
+                            ["StartLocal"] = FormatLocal(session.ScheduledStartAtUtc, parent.TimeZoneId),
+                        },
                         cancellationToken);
                 }
             }
@@ -112,10 +120,14 @@ namespace iucs.readernest.api.Services
                 {
                     foreach (var admin in admins)
                     {
-                        await notifications.SendEmailAsync(
+                        await notifications.SendTemplatedEmailAsync(
                             admin.Id, admin.Email, NotificationType.DelayedSessionAlert,
-                            "Session has not started",
-                            $"The session scheduled at {FormatLocal(session.ScheduledStartAtUtc, admin.TimeZoneId)} (teacher {session.TeacherProfile.User.FirstName} {session.TeacherProfile.User.LastName}) has not started.",
+                            "delayed-session-alert",
+                            new Dictionary<string, string>
+                            {
+                                ["StartLocal"] = FormatLocal(session.ScheduledStartAtUtc, admin.TimeZoneId),
+                                ["TeacherName"] = $"{session.TeacherProfile.User.FirstName} {session.TeacherProfile.User.LastName}",
+                            },
                             cancellationToken);
                     }
                 }

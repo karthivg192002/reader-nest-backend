@@ -27,12 +27,14 @@ namespace iucs.readernest.tests
         private readonly BcryptPasswordHasher _hasher = new();
         private readonly FakeEmailSender _emailSender = new();
         private readonly AuditLogService _auditLog;
+        private readonly EmailTemplateService _emailTemplates;
         private readonly NotificationService _notifications;
 
         public SmokeTests()
         {
             _auditLog = new AuditLogService(_db.UnitOfWork, _db.CurrentUser);
-            _notifications = new NotificationService(_db.UnitOfWork, _emailSender, NullLogger<NotificationService>.Instance);
+            _emailTemplates = new EmailTemplateService(_db.UnitOfWork, _auditLog);
+            _notifications = new NotificationService(_db.UnitOfWork, _emailSender, _emailTemplates, NullLogger<NotificationService>.Instance);
         }
 
         private AuthService CreateAuthService() => new(_db.UnitOfWork, _hasher, new FakeTokenService(), _auditLog);
@@ -41,7 +43,7 @@ namespace iucs.readernest.tests
 
         private readonly FakeSmsSender _smsSender = new();
 
-        private UserService CreateUserService() => new(_db.UnitOfWork, _hasher, _notifications, _auditLog, _emailSender, _whatsAppSender, _smsSender);
+        private UserService CreateUserService() => new(_db.UnitOfWork, _hasher, _notifications, _emailTemplates, _auditLog, _emailSender, _whatsAppSender, _smsSender);
 
         private CourseService CreateCourseService() => new(_db.UnitOfWork, _auditLog);
 

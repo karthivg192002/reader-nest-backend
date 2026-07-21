@@ -228,16 +228,21 @@ namespace iucs.readernest.api.Services
             {
                 var user = invoice.ParentProfile.User;
                 var outstanding = invoice.Amount - invoice.AmountPaid;
-                var subject = invoice.Status == InvoiceStatus.Overdue
-                    ? $"Overdue: invoice {invoice.InvoiceNumber}"
-                    : $"Payment reminder: invoice {invoice.InvoiceNumber} due {invoice.DueDate:dd MMM}";
-                await notifications.SendEmailAsync(
+                var templateKey = invoice.Status == InvoiceStatus.Overdue
+                    ? "payment-reminder-overdue"
+                    : "payment-reminder-due";
+                await notifications.SendTemplatedEmailAsync(
                     user.Id,
                     user.Email,
                     NotificationType.PaymentReminder,
-                    subject,
-                    $"{outstanding:0.00} {invoice.Currency} is outstanding on invoice {invoice.InvoiceNumber} (due {invoice.DueDate:yyyy-MM-dd}). " +
-                    "Use Pay Now on your dashboard to settle it and keep classes uninterrupted.",
+                    templateKey,
+                    new Dictionary<string, string>
+                    {
+                        ["InvoiceNumber"] = invoice.InvoiceNumber,
+                        ["DueDate"] = invoice.DueDate.ToString("yyyy-MM-dd"),
+                        ["Outstanding"] = outstanding.ToString("0.00"),
+                        ["Currency"] = invoice.Currency,
+                    },
                     cancellationToken);
             }
         }

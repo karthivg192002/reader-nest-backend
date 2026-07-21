@@ -12,15 +12,18 @@ namespace iucs.readernest.application.Services
     {
         private readonly IUnitOfWork _unitOfWork;
         private readonly IEmailSender _emailSender;
+        private readonly IEmailTemplateService _emailTemplateService;
         private readonly ILogger<NotificationService> _logger;
 
         public NotificationService(
             IUnitOfWork unitOfWork,
             IEmailSender emailSender,
+            IEmailTemplateService emailTemplateService,
             ILogger<NotificationService> logger)
         {
             _unitOfWork = unitOfWork;
             _emailSender = emailSender;
+            _emailTemplateService = emailTemplateService;
             _logger = logger;
         }
 
@@ -31,6 +34,29 @@ namespace iucs.readernest.application.Services
             string subject,
             string body,
             CancellationToken cancellationToken = default)
+        {
+            await SendRenderedEmailAsync(recipientUserId, recipientEmail, type, subject, body, cancellationToken);
+        }
+
+        public async Task SendTemplatedEmailAsync(
+            Guid recipientUserId,
+            string recipientEmail,
+            NotificationType type,
+            string templateKey,
+            IReadOnlyDictionary<string, string> tokens,
+            CancellationToken cancellationToken = default)
+        {
+            var (subject, body) = await _emailTemplateService.RenderAsync(templateKey, tokens, cancellationToken);
+            await SendRenderedEmailAsync(recipientUserId, recipientEmail, type, subject, body, cancellationToken);
+        }
+
+        private async Task SendRenderedEmailAsync(
+            Guid recipientUserId,
+            string recipientEmail,
+            NotificationType type,
+            string subject,
+            string body,
+            CancellationToken cancellationToken)
         {
             var notification = new Notification
             {

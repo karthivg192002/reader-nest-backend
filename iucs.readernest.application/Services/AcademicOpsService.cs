@@ -160,9 +160,14 @@ namespace iucs.readernest.application.Services
             if (await NotificationToggles.IsEnabledAsync(_unitOfWork, NotificationToggles.LeaveRequests, cancellationToken))
             {
                 await NotifyAdminsAsync(
-                    "Teacher leave application",
-                    $"{teacher.User.FirstName} {teacher.User.LastName} applied for leave {request.StartAtUtc:u} – {request.EndAtUtc:u} " +
-                    $"({affectedSessions} scheduled session(s) affected). Reason: {request.Reason}",
+                    new Dictionary<string, string>
+                    {
+                        ["TeacherName"] = $"{teacher.User.FirstName} {teacher.User.LastName}",
+                        ["StartAtLocal"] = request.StartAtUtc.ToString("u"),
+                        ["EndAtLocal"] = request.EndAtUtc.ToString("u"),
+                        ["AffectedSessions"] = affectedSessions.ToString(),
+                        ["Reason"] = request.Reason,
+                    },
                     cancellationToken);
             }
 
@@ -244,13 +249,19 @@ namespace iucs.readernest.application.Services
                 .Include(t => t.User)
                 .FirstAsync(t => t.Id == leave.TeacherProfileId, cancellationToken);
             var teacherUser = teacherProfile.User;
-            await _notificationService.SendEmailAsync(
+            await _notificationService.SendTemplatedEmailAsync(
                 teacherUser.Id,
                 teacherUser.Email,
                 NotificationType.LeaveStatusUpdate,
-                $"Leave application {leave.Status}",
-                $"Your leave for {leave.StartAtUtc:u} – {leave.EndAtUtc:u} was {leave.Status}." +
-                (string.IsNullOrEmpty(request.ReviewNote) ? "" : $" Note: {request.ReviewNote}"),
+                "leave-status-teacher",
+                new Dictionary<string, string>
+                {
+                    ["TeacherFirstName"] = teacherUser.FirstName,
+                    ["StartAtLocal"] = leave.StartAtUtc.ToString("u"),
+                    ["EndAtLocal"] = leave.EndAtUtc.ToString("u"),
+                    ["Status"] = leave.Status.ToString(),
+                    ["ReviewNote"] = string.IsNullOrEmpty(request.ReviewNote) ? "" : $"Note: {request.ReviewNote}",
+                },
                 cancellationToken);
 
             // Approved leave fans out: the whole core team plus every parent whose child
@@ -265,10 +276,10 @@ namespace iucs.readernest.application.Services
                     .ToListAsync(cancellationToken);
                 foreach (var member in coreTeam)
                 {
-                    await _notificationService.SendEmailAsync(
+                    await _notificationService.SendTemplatedEmailAsync(
                         member.Id, member.Email, NotificationType.LeaveStatusUpdate,
-                        $"Teacher on leave: {teacherName}",
-                        $"{teacherName} is on approved leave {window}. Their batch classes in this window may need rescheduling or a substitute.",
+                        "leave-notify-core-team",
+                        new Dictionary<string, string> { ["TeacherName"] = teacherName, ["Window"] = window },
                         cancellationToken);
                 }
 
@@ -280,11 +291,10 @@ namespace iucs.readernest.application.Services
                     .ToListAsync(cancellationToken);
                 foreach (var parent in affectedParents)
                 {
-                    await _notificationService.SendEmailAsync(
+                    await _notificationService.SendTemplatedEmailAsync(
                         parent.Id, parent.Email, NotificationType.LeaveStatusUpdate,
-                        $"Class update: {teacherName} is on leave",
-                        $"Your child's teacher {teacherName} is on approved leave {window}. " +
-                        "Any affected classes will be rescheduled — the new slots will appear on your schedule.",
+                        "leave-notify-parent",
+                        new Dictionary<string, string> { ["TeacherName"] = teacherName, ["Window"] = window },
                         cancellationToken);
                 }
             }
@@ -362,12 +372,12 @@ namespace iucs.readernest.application.Services
                 foreach (var child in absentChildren)
                 {
                     var parentUser = child.ParentProfile.User;
-                    await _notificationService.SendEmailAsync(
+                    await _notificationService.SendTemplatedEmailAsync(
                         parentUser.Id,
                         parentUser.Email,
                         NotificationType.AttendanceUpdate,
-                        $"{child.FirstName} was marked absent today",
-                        $"{child.FirstName} missed today's class. If this was unplanned, please reach out so the session can be carried forward.",
+                        "attendance-absent",
+                        new Dictionary<string, string> { ["ChildFirstName"] = child.FirstName },
                         cancellationToken);
                 }
             }
@@ -413,15 +423,15 @@ namespace iucs.readernest.application.Services
                     cancellationToken);
         }
 
-        private async Task NotifyAdminsAsync(string subject, string body, CancellationToken cancellationToken)
+        private async Task NotifyAdminsAsync(IReadOnlyDictionary<string, string> tokens, CancellationToken cancellationToken)
         {
             var admins = await _unitOfWork.Repository<User>().Query()
                 .Where(u => u.Role == UserRole.Admin && u.Status == UserStatus.Active)
                 .ToListAsync(cancellationToken);
             foreach (var admin in admins)
             {
-                await _notificationService.SendEmailAsync(
-                    admin.Id, admin.Email, NotificationType.General, subject, body, cancellationToken);
+                await _notificationService.SendTemplatedEmailAsync(
+                    admin.Id, admin.Email, NotificationType.General, "leave-submitted-admin-alert", tokens, cancellationToken);
             }
         }
 

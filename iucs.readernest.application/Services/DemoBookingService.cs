@@ -17,16 +17,19 @@ namespace iucs.readernest.application.Services
         private readonly IAuditLogService _auditLog;
         private readonly ICrmNotifier _crmNotifier;
         private readonly IEmailSender _emailSender;
+        private readonly IEmailTemplateService _emailTemplateService;
 
         public DemoBookingService(
             IUnitOfWork unitOfWork,
             IAuditLogService auditLog,
             IEmailSender emailSender,
+            IEmailTemplateService emailTemplateService,
             ICrmNotifier crmNotifier)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
             _emailSender = emailSender;
+            _emailTemplateService = emailTemplateService;
             _crmNotifier = crmNotifier;
         }
 
@@ -124,12 +127,18 @@ namespace iucs.readernest.application.Services
 
             // Booking confirmation to the parent and every extra invitee (they may not
             // have accounts yet, so this bypasses the user-bound notification log)
-            var when = $"{request.ScheduledStartAtUtc:u}";
-            var confirmation = $"Your demo class for {booking.ChildName} is confirmed for {when}. A join link follows before the session.";
-            await _emailSender.SendAsync(booking.ParentEmail, "Demo class confirmed", confirmation, cancellationToken);
+            var (confirmationSubject, confirmationHtml) = await _emailTemplateService.RenderAsync(
+                "demo-confirmed",
+                new Dictionary<string, string>
+                {
+                    ["ChildName"] = booking.ChildName,
+                    ["WhenLocal"] = $"{request.ScheduledStartAtUtc:u}",
+                },
+                cancellationToken);
+            await _emailSender.SendAsync(booking.ParentEmail, confirmationSubject, confirmationHtml, cancellationToken);
             foreach (var participant in booking.Participants.Where(p => !string.IsNullOrWhiteSpace(p.Email)))
             {
-                await _emailSender.SendAsync(participant.Email!, "Demo class confirmed", confirmation, cancellationToken);
+                await _emailSender.SendAsync(participant.Email!, confirmationSubject, confirmationHtml, cancellationToken);
             }
 
             // New lead lands in the client's CRM (no-op when no webhook is configured)

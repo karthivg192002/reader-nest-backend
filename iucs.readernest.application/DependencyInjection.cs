@@ -12,6 +12,7 @@ namespace iucs.readernest.application
             services.AddSingleton<IPasswordHasher, BcryptPasswordHasher>();
             services.AddScoped<IAuditLogService, AuditLogService>();
             services.AddScoped<INotificationService, NotificationService>();
+            services.AddScoped<IEmailTemplateService, EmailTemplateService>();
             services.AddScoped<IAuthService, AuthService>();
             services.AddScoped<IUserService, UserService>();
             services.AddScoped<ICourseService, CourseService>();

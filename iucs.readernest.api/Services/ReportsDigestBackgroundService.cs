@@ -60,24 +60,29 @@ namespace iucs.readernest.api.Services
             }
 
             var summary = await reports.GetDashboardSummaryAsync(cancellationToken);
-            var body =
-                $"Weekly Reader Nest KPI digest\n\n" +
-                $"Students: {summary.TotalStudents} total / {summary.ActiveStudents} active\n" +
-                $"Revenue: {summary.RevenueCollected:0.00} collected, {summary.RevenuePending:0.00} pending\n" +
-                $"Enrollments: {summary.TotalEnrollments}\n" +
-                $"Batches: {summary.ActiveBatches} active / {summary.DormantBatches} dormant " +
-                $"({summary.BatchOccupancyPercent}% occupancy)\n" +
-                $"Conversion rate: {summary.ConversionRatePercent}% · Refund rate: {summary.RefundRatePercent}%\n" +
-                $"Teacher utilization: {summary.TeacherUtilizationSessionsPerTeacher} sessions/teacher (30d)";
+            var tokens = new Dictionary<string, string>
+            {
+                ["TotalStudents"] = summary.TotalStudents.ToString(),
+                ["ActiveStudents"] = summary.ActiveStudents.ToString(),
+                ["RevenueCollected"] = summary.RevenueCollected.ToString("0.00"),
+                ["RevenuePending"] = summary.RevenuePending.ToString("0.00"),
+                ["TotalEnrollments"] = summary.TotalEnrollments.ToString(),
+                ["ActiveBatches"] = summary.ActiveBatches.ToString(),
+                ["DormantBatches"] = summary.DormantBatches.ToString(),
+                ["OccupancyPercent"] = summary.BatchOccupancyPercent.ToString(),
+                ["ConversionRate"] = summary.ConversionRatePercent.ToString(),
+                ["RefundRate"] = summary.RefundRatePercent.ToString(),
+                ["Utilization"] = summary.TeacherUtilizationSessionsPerTeacher.ToString(),
+            };
 
             var admins = await unitOfWork.Repository<User>().Query()
                 .Where(u => u.Role == UserRole.Admin && u.Status == UserStatus.Active)
                 .ToListAsync(cancellationToken);
             foreach (var admin in admins)
             {
-                await notifications.SendEmailAsync(
+                await notifications.SendTemplatedEmailAsync(
                     admin.Id, admin.Email, NotificationType.General,
-                    "Weekly KPI digest", body, cancellationToken);
+                    "weekly-kpi-digest", tokens, cancellationToken);
             }
 
             _logger.LogInformation("Weekly KPI digest sent to {Count} admin(s).", admins.Count);

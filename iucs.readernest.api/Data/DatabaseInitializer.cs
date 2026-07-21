@@ -1,8 +1,10 @@
 using System.Text.Json;
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Users;
 using iucs.readernest.domain.Data;
 using iucs.readernest.domain.Entities.Billing;
+using iucs.readernest.domain.Entities.Communication;
 using iucs.readernest.domain.Entities.Integrations;
 using iucs.readernest.domain.Entities.Navigation;
 using iucs.readernest.domain.Entities.Settings;
@@ -42,6 +44,8 @@ namespace iucs.readernest.api.Data
             await SeedIntegrationsAsync(context);
             await EnsureCashPaymentMethodAsync(context);
             await EnsureSmsIntegrationAsync(context);
+            await SeedEmailTemplatesAsync(context);
+            await EnsureEmailTemplatesMenuAsync(context);
 
             await context.SaveChangesAsync();
         }
@@ -339,6 +343,7 @@ namespace iucs.readernest.api.Data
             ("admin", "Finance", "Fee Suspension", "/admin/fee-suspension", "Ban", PermissionModule.BillingFinance),
             ("admin", "Insights", "Reports & Analytics", "/admin/reports", "BarChart3", PermissionModule.ReportsAnalytics),
             ("admin", "Insights", "Bulk Email", "/admin/bulk-email", "Mail", PermissionModule.Communication),
+            ("admin", "Insights", "Email Templates", "/admin/email-templates", "FileText", PermissionModule.Communication),
             ("admin", "System", "Settings & Branding", "/admin/settings", "Settings", PermissionModule.Settings),
             ("teacher", null, "Dashboard", "/teacher", "LayoutDashboard", null),
             ("teacher", "Teaching", "My Classes", "/teacher/classes", "CalendarClock", PermissionModule.SessionCalendarManagement),
@@ -675,6 +680,63 @@ namespace iucs.readernest.api.Data
                     ["fromNumber"] = "",
                 }),
             });
+        }
+
+        /// <summary>
+        /// Retrofits the "Email Templates" admin menu item into a database that was seeded
+        /// before it existed (mirrors EnsureSubAdminIntegrationsMenuAsync). Fresh databases
+        /// already get it from MenuSeedItems(); this only fires for pre-existing ones.
+        /// </summary>
+        private static async Task EnsureEmailTemplatesMenuAsync(ReaderNestDbContext context)
+        {
+            if (context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == "/admin/email-templates") ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == "/admin/email-templates"))
+            {
+                return;
+            }
+
+            var bulkEmail = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "admin" && m.Path == "/admin/bulk-email");
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "admin",
+                Section = "Insights",
+                SectionOrder = bulkEmail?.SectionOrder ?? 4,
+                Label = "Email Templates",
+                Path = "/admin/email-templates",
+                Icon = "FileText",
+                SortOrder = (bulkEmail?.SortOrder ?? 0) + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.Communication,
+            });
+        }
+
+        /// <summary>
+        /// Email Template Master: every automated system email's Subject/HtmlBody, built from
+        /// the shared <see cref="EmailTemplateSeedData"/> catalog (also used by tests, so both
+        /// exercise identical rendered content). Insert-only (skips entirely once any row
+        /// exists) so an admin's edits are never overwritten by a later deploy.
+        /// </summary>
+        private static async Task SeedEmailTemplatesAsync(ReaderNestDbContext context)
+        {
+            if (await context.EmailTemplates.AnyAsync())
+            {
+                return;
+            }
+
+            context.EmailTemplates.AddRange(EmailTemplateSeedData.All.Select(seed => new EmailTemplate
+            {
+                Key = seed.Key,
+                Name = seed.Name,
+                Description = seed.Description,
+                Category = seed.Category,
+                Subject = seed.Subject,
+                HtmlBody = seed.HtmlBody,
+                PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders),
+                IsActive = true,
+                IsSystem = true,
+            }));
         }
     }
 }

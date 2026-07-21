@@ -17,6 +17,20 @@ namespace iucs.readernest.application.Services
             string body,
             CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// Renders the named Email Template Master entry against <paramref name="tokens"/> and
+        /// sends/audits it exactly like <see cref="SendEmailAsync"/>. This is the path every
+        /// automated system email should use; SendEmailAsync remains for admin-authored
+        /// freeform content (e.g. Bulk Email) that has no template to render.
+        /// </summary>
+        Task SendTemplatedEmailAsync(
+            Guid recipientUserId,
+            string recipientEmail,
+            NotificationType type,
+            string templateKey,
+            IReadOnlyDictionary<string, string> tokens,
+            CancellationToken cancellationToken = default);
+
         /// <summary>The signed-in user's most recent notifications and unread count, for the notification bell.</summary>
         Task<NotificationFeedDto> GetFeedForUserAsync(Guid userId, int take = 30, CancellationToken cancellationToken = default);
 

@@ -1,8 +1,11 @@
+using System.Text.Json;
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.domain.Common;
 using iucs.readernest.domain.Data;
 using iucs.readernest.domain.Data.Interceptors;
 using iucs.readernest.domain.Entities.Billing;
+using iucs.readernest.domain.Entities.Communication;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using iucs.readernest.domain.Repository;
@@ -145,6 +148,22 @@ namespace iucs.readernest.tests
             Context = new ReaderNestDbContext(options);
             Context.Database.EnsureCreated();
             UnitOfWork = new UnitOfWork(Context);
+
+            // Same catalog production seeds, so smoke tests exercise real templated
+            // content (Subject/HtmlBody) instead of EmailTemplateService's fallback text.
+            Context.EmailTemplates.AddRange(EmailTemplateSeedData.All.Select(seed => new EmailTemplate
+            {
+                Key = seed.Key,
+                Name = seed.Name,
+                Description = seed.Description,
+                Category = seed.Category,
+                Subject = seed.Subject,
+                HtmlBody = seed.HtmlBody,
+                PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders),
+                IsActive = true,
+                IsSystem = true,
+            }));
+            Context.SaveChanges();
         }
 
         public FakeCurrentUser CurrentUser { get; } = new();

@@ -191,11 +191,15 @@ namespace iucs.readernest.application.Services
             var parentUser = child.ParentProfile?.User;
             if (parentUser is not null)
             {
-                await _notificationService.SendEmailAsync(
+                await _notificationService.SendTemplatedEmailAsync(
                     parentUser.Id, parentUser.Email, NotificationType.General,
-                    $"{child.FirstName} has been assigned to a batch",
-                    $"{child.FirstName} {child.LastName} has been placed in \"{batch.Name}\". " +
-                    "Their upcoming classes will now appear on your Schedule.",
+                    "batch-assignment",
+                    new Dictionary<string, string>
+                    {
+                        ["ChildFirstName"] = child.FirstName,
+                        ["ChildFullName"] = $"{child.FirstName} {child.LastName}",
+                        ["BatchName"] = batch.Name,
+                    },
                     cancellationToken);
             }
 
