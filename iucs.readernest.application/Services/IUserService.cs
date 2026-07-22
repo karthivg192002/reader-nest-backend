@@ -24,6 +24,15 @@ namespace iucs.readernest.application.Services
 
         Task<UserDto> SetStatusAsync(Guid id, UserStatus status, CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// Converts the account to a different base type (Parent/Teacher/AdmissionTeam/SubAdmin),
+        /// swapping the type-specific profile record. Refuses when the current type has real
+        /// operational history behind it (a parent with children, a teacher with assigned
+        /// sessions) so existing data is never silently orphaned. Admin is never a valid
+        /// source or target — those accounts are untouchable through this action.
+        /// </summary>
+        Task<UserDto> ChangeRoleAsync(Guid id, UserRole newRole, CancellationToken cancellationToken = default);
+
         Task<IReadOnlyList<PermissionDto>> GetPermissionsAsync(Guid userId, CancellationToken cancellationToken = default);
 
         Task SetPermissionsAsync(

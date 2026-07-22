@@ -1,5 +1,6 @@
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Academics;
+using iucs.readernest.application.Dto.Admission;
 using iucs.readernest.application.Dto.Auth;
 using iucs.readernest.application.Dto.Batches;
 using iucs.readernest.application.Dto.Billing;
@@ -65,6 +66,9 @@ namespace iucs.readernest.tests
         private AcademicOpsService CreateAcademicOpsService() => new(_db.UnitOfWork, _auditLog, _notifications);
 
         private GamificationService CreateGamificationService() => new(_db.UnitOfWork);
+
+        private DemoBookingService CreateDemoBookingService() =>
+            new(_db.UnitOfWork, _auditLog, _emailSender, _emailTemplates, new FakeCrmNotifier());
 
         // ---- WBS business-rule coverage (Reader_Nest_LMS.pdf pp.28–32) ----
 
@@ -704,6 +708,54 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task ChangeUserRole_SwapsProfile_WhenNoOperationalHistory()
+        {
+            var service = CreateUserService();
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            _db.Context.ParentProfiles.Add(new ParentProfile { UserId = parentUser.Id });
+            await _db.Context.SaveChangesAsync();
+
+            var dto = await service.ChangeRoleAsync(parentUser.Id, UserRole.Teacher);
+
+            Assert.Equal(UserRole.Teacher, dto.Role);
+            Assert.False(await _db.Context.ParentProfiles.AnyAsync(p => p.UserId == parentUser.Id));
+            Assert.True(await _db.Context.TeacherProfiles.AnyAsync(t => t.UserId == parentUser.Id));
+        }
+
+        [Fact]
+        public async Task ChangeUserRole_RefusesParentWithChildren_AndTeacherWithSessions()
+        {
+            var service = CreateUserService();
+
+            var (batch, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var teacherUserId = session.TeacherProfileId;
+            var teacherUser = await _db.Context.TeacherProfiles.Where(t => t.Id == teacherUserId).Select(t => t.UserId).FirstAsync();
+            await Assert.ThrowsAsync<ConflictException>(() => service.ChangeRoleAsync(teacherUser, UserRole.AdmissionTeam));
+
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            _db.Context.ParentProfiles.Add(parentProfile);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.Children.Add(new Child { ParentProfileId = parentProfile.Id, FirstName = "Kid", LastName = "Test" });
+            await _db.Context.SaveChangesAsync();
+
+            await Assert.ThrowsAsync<ConflictException>(() => service.ChangeRoleAsync(parentUser.Id, UserRole.Teacher));
+        }
+
+        [Fact]
+        public async Task ChangeUserRole_RefusesAdminAsSourceOrTarget()
+        {
+            var service = CreateUserService();
+            var admin = await _db.SeedUserAsync($"admin-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            _db.Context.ParentProfiles.Add(new ParentProfile { UserId = parentUser.Id });
+            await _db.Context.SaveChangesAsync();
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.ChangeRoleAsync(admin.Id, UserRole.Teacher));
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.ChangeRoleAsync(parentUser.Id, UserRole.Admin));
+        }
+
+        [Fact]
         public async Task ParentSchedule_IncludesDemoSession_ForLeadWithNoEnrolledChildYet()
         {
             var parentEmail = $"lead-{Guid.NewGuid():N}@test.com";
@@ -742,6 +794,48 @@ namespace iucs.readernest.tests
             var found = Assert.Single(schedule);
             Assert.Equal(demoSession.Id, found.Id);
             Assert.Equal(SessionType.Demo, found.Type);
+        }
+
+        [Fact]
+        public async Task CreateDemoBooking_ConfirmationEmail_IncludesJitsiJoinLink()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var dto = await CreateDemoBookingService().CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Lead Parent",
+                ParentEmail = "lead@test.com",
+                ChildName = "Kid",
+                TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(1),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(1).AddMinutes(30),
+            });
+
+            var email = Assert.Single(_emailSender.Sent, e => e.To == "lead@test.com");
+            Assert.Contains($"https://meet.techmisai.com/{dto.MeetingRoomId}", email.Body);
+        }
+
+        [Fact]
+        public void JitsiLinkBuilder_UsesConfiguredDomain_WhenIntegrationConfigured()
+        {
+            var url = JitsiLinkBuilder.BuildJoinUrl("trn-abc123", """{"domain":"meet.example.org"}""");
+            Assert.Equal("https://meet.example.org/trn-abc123", url);
+        }
+
+        [Fact]
+        public void JitsiLinkBuilder_FallsBackToDefaultDomain_WhenConfigMissingOrMalformed()
+        {
+            Assert.Equal("https://meet.techmisai.com/trn-abc123", JitsiLinkBuilder.BuildJoinUrl("trn-abc123", null));
+            Assert.Equal("https://meet.techmisai.com/trn-abc123", JitsiLinkBuilder.BuildJoinUrl("trn-abc123", "not-json"));
+        }
+
+        [Fact]
+        public void JitsiLinkBuilder_ReturnsNull_WhenNoMeetingRoom()
+        {
+            Assert.Null(JitsiLinkBuilder.BuildJoinUrl(null, """{"domain":"meet.example.org"}"""));
         }
 
         [Fact]

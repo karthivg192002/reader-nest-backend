@@ -30,6 +30,17 @@ namespace iucs.readernest.tests
         }
     }
 
+    public class FakeCrmNotifier : ICrmNotifier
+    {
+        public List<(string EventType, object Payload)> Pushed { get; } = [];
+
+        public Task PushLeadEventAsync(string eventType, object payload, CancellationToken cancellationToken = default)
+        {
+            Pushed.Add((eventType, payload));
+            return Task.CompletedTask;
+        }
+    }
+
     public class FakeWhatsAppSender : IWhatsAppSender
     {
         public List<(string To, string Message)> Sent { get; } = [];

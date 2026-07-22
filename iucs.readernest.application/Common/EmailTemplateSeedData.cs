@@ -73,9 +73,10 @@ namespace iucs.readernest.application.Common
                     """
                     <p>Your demo class for <strong>{{ChildName}}</strong> is confirmed for:</p>
                     <p style="font-weight:600;">{{WhenLocal}}</p>
-                    <p>A join link follows before the session.</p>
+                    <p><a href="{{JoinUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">Join Demo Class</a></p>
+                    <p style="font-size:12px;color:#6b7280;">This button becomes active 10 minutes before the session starts. You'll also get a reminder email closer to the time.</p>
                     """,
-                    "ChildName", "WhenLocal"),
+                    "ChildName", "WhenLocal", "JoinUrl"),
 
                 New("session-reminder-teacher", "Class Reminder (Teacher)",
                     "Sent to the teacher one hour before their class starts.",
@@ -91,9 +92,9 @@ namespace iucs.readernest.application.Common
                     NotificationType.SessionReminder, "Class starts in 1 hour",
                     """
                     <p>Your child's class starts at <strong>{{StartLocal}}</strong>.</p>
-                    <p>Join from the parent dashboard.</p>
+                    <p><a href="{{JoinUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">Join Now</a></p>
                     """,
-                    "StartLocal"),
+                    "StartLocal", "JoinUrl"),
 
                 New("delayed-session-alert", "Delayed Session Alert (Admin)",
                     "Sent to Admins when a scheduled session's start time passes without it starting.",

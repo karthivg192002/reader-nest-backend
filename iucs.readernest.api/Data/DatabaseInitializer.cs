@@ -45,6 +45,7 @@ namespace iucs.readernest.api.Data
             await EnsureCashPaymentMethodAsync(context);
             await EnsureSmsIntegrationAsync(context);
             await SeedEmailTemplatesAsync(context);
+            await ReconcileJoinLinkEmailTemplatesAsync(context);
             await EnsureEmailTemplatesMenuAsync(context);
 
             await context.SaveChangesAsync();
@@ -737,6 +738,28 @@ namespace iucs.readernest.api.Data
                 IsActive = true,
                 IsSystem = true,
             }));
+        }
+
+        /// <summary>
+        /// SeedEmailTemplatesAsync is insert-only, so a live DB never picks up template text
+        /// changes on its own — this backfills the direct {{JoinUrl}} join-link button into
+        /// the two templates that gained it, skipping any row that already has the token
+        /// (idempotent, and leaves an admin's own subsequent edits alone).
+        /// </summary>
+        private static async Task ReconcileJoinLinkEmailTemplatesAsync(ReaderNestDbContext context)
+        {
+            foreach (var seed in EmailTemplateSeedData.All.Where(s => s.Key is "demo-confirmed" or "session-reminder-parent"))
+            {
+                var existing = await context.EmailTemplates.FirstOrDefaultAsync(t => t.Key == seed.Key);
+                if (existing is null || existing.HtmlBody.Contains("{{JoinUrl}}"))
+                {
+                    continue;
+                }
+
+                existing.Subject = seed.Subject;
+                existing.HtmlBody = seed.HtmlBody;
+                existing.PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders);
+            }
         }
     }
 }

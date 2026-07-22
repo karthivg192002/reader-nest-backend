@@ -1,8 +1,10 @@
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Admission;
+using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Entities.Admission;
+using iucs.readernest.domain.Entities.Integrations;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
@@ -127,12 +129,19 @@ namespace iucs.readernest.application.Services
 
             // Booking confirmation to the parent and every extra invitee (they may not
             // have accounts yet, so this bypasses the user-bound notification log)
+            var jitsiConfigJson = await _unitOfWork.Repository<Integration>().Query()
+                .Where(i => i.Key == "jitsi")
+                .Select(i => i.ConfigJson)
+                .FirstOrDefaultAsync(cancellationToken);
+            var joinUrl = JitsiLinkBuilder.BuildJoinUrl(session.MeetingRoomId, jitsiConfigJson) ?? "#";
+
             var (confirmationSubject, confirmationHtml) = await _emailTemplateService.RenderAsync(
                 "demo-confirmed",
                 new Dictionary<string, string>
                 {
                     ["ChildName"] = booking.ChildName,
                     ["WhenLocal"] = $"{request.ScheduledStartAtUtc:u}",
+                    ["JoinUrl"] = joinUrl,
                 },
                 cancellationToken);
             await _emailSender.SendAsync(booking.ParentEmail, confirmationSubject, confirmationHtml, cancellationToken);

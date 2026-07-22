@@ -1,5 +1,9 @@
+using iucs.readernest.application.Common.Interfaces;
+using iucs.readernest.application.Helper;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Entities.Academics;
+using iucs.readernest.domain.Entities.Admission;
+using iucs.readernest.domain.Entities.Integrations;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
@@ -52,6 +56,8 @@ namespace iucs.readernest.api.Services
             using var scope = _scopeFactory.CreateScope();
             var unitOfWork = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
             var notifications = scope.ServiceProvider.GetRequiredService<INotificationService>();
+            var emailTemplates = scope.ServiceProvider.GetRequiredService<IEmailTemplateService>();
+            var emailSender = scope.ServiceProvider.GetRequiredService<IEmailSender>();
 
             var now = DateTime.UtcNow;
 
@@ -64,6 +70,15 @@ namespace iucs.readernest.api.Services
                             && s.ScheduledStartAtUtc >= windowStart
                             && s.ScheduledStartAtUtc < windowEnd)
                 .ToListAsync(cancellationToken);
+
+            string? jitsiConfigJson = null;
+            if (upcoming.Count > 0)
+            {
+                jitsiConfigJson = await unitOfWork.Repository<Integration>().Query()
+                    .Where(i => i.Key == "jitsi")
+                    .Select(i => i.ConfigJson)
+                    .FirstOrDefaultAsync(cancellationToken);
+            }
 
             foreach (var session in upcoming)
             {
@@ -79,8 +94,28 @@ namespace iucs.readernest.api.Services
                     },
                     cancellationToken);
 
+                var joinUrl = JitsiLinkBuilder.BuildJoinUrl(session.MeetingRoomId, jitsiConfigJson) ?? "#";
+
                 if (session.BatchId is null)
                 {
+                    // Demo sessions have no batch — the lead is tracked via DemoBooking.ParentEmail,
+                    // which may not correspond to a real account yet, so this bypasses the
+                    // user-bound notification log the same way the initial confirmation email does.
+                    var demoBooking = await unitOfWork.Repository<DemoBooking>().Query()
+                        .FirstOrDefaultAsync(b => b.ClassSessionId == session.Id, cancellationToken);
+                    if (demoBooking is not null)
+                    {
+                        var (subject, body) = await emailTemplates.RenderAsync(
+                            "session-reminder-parent",
+                            new Dictionary<string, string>
+                            {
+                                ["StartLocal"] = FormatLocal(session.ScheduledStartAtUtc, "Asia/Kolkata"),
+                                ["JoinUrl"] = joinUrl,
+                            },
+                            cancellationToken);
+                        await emailSender.SendAsync(demoBooking.ParentEmail, subject, body, cancellationToken);
+                    }
+
                     continue;
                 }
 
@@ -97,6 +132,7 @@ namespace iucs.readernest.api.Services
                         new Dictionary<string, string>
                         {
                             ["StartLocal"] = FormatLocal(session.ScheduledStartAtUtc, parent.TimeZoneId),
+                            ["JoinUrl"] = joinUrl,
                         },
                         cancellationToken);
                 }

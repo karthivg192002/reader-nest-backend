@@ -131,6 +131,18 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _userService.UpdateAsync(id, request, cancellationToken));
         }
 
+        /// <summary>
+        /// Converts the account to a different base type (Parent/Teacher/Admission Team/Sub Admin),
+        /// swapping the type-specific profile. Refuses when the account already has real
+        /// operational history (a parent with children, a teacher with class sessions).
+        /// </summary>
+        [HttpPut("{id:guid}/role")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.Edit)]
+        public async Task<ActionResult<UserDto>> ChangeRole(Guid id, ChangeUserRoleRequest request, CancellationToken cancellationToken)
+        {
+            return Ok(await _userService.ChangeRoleAsync(id, request.Role, cancellationToken));
+        }
+
         /// <summary>Soft-deletes the account (excluded from all future queries; email becomes reusable).</summary>
         [HttpDelete("{id:guid}")]
         [HasPermission(PermissionModule.UserManagement, PermissionAction.Delete)]

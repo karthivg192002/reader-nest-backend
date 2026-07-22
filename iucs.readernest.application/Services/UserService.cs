@@ -6,6 +6,7 @@ using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Entities.Communication;
 using iucs.readernest.domain.Entities.Integrations;
+using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using iucs.readernest.domain.Repository;
@@ -244,6 +245,92 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return user.ToDto();
+        }
+
+        public async Task<UserDto> ChangeRoleAsync(Guid id, UserRole newRole, CancellationToken cancellationToken = default)
+        {
+            var user = await _unitOfWork.Repository<User>().GetByIdAsync(id, cancellationToken)
+                ?? throw new NotFoundException(nameof(User), id);
+
+            if (user.Role == UserRole.Admin || newRole == UserRole.Admin)
+            {
+                throw new DomainValidationException("Admin accounts can't be reassigned through this action.");
+            }
+
+            if (user.Role == newRole)
+            {
+                return user.ToDto();
+            }
+
+            // Refuse to strand real operational history behind a profile we're about to remove.
+            switch (user.Role)
+            {
+                case UserRole.Parent:
+                    if (await _unitOfWork.Repository<Child>().ExistsAsync(c => c.ParentProfile.UserId == id, cancellationToken))
+                    {
+                        throw new ConflictException(
+                            "This parent has children on file — reassign or remove them before changing the account type.");
+                    }
+                    break;
+                case UserRole.Teacher:
+                    if (await _unitOfWork.Repository<ClassSession>().ExistsAsync(s => s.TeacherProfile.UserId == id, cancellationToken))
+                    {
+                        throw new ConflictException(
+                            "This teacher has class sessions on file — reassign them before changing the account type.");
+                    }
+                    break;
+            }
+
+            // Remove the old type's side record/grants.
+            switch (user.Role)
+            {
+                case UserRole.Parent:
+                    var parentProfile = await _unitOfWork.Repository<ParentProfile>()
+                        .FirstOrDefaultAsync(p => p.UserId == id, cancellationToken);
+                    if (parentProfile is not null)
+                    {
+                        _unitOfWork.Repository<ParentProfile>().Remove(parentProfile);
+                    }
+                    break;
+                case UserRole.Teacher:
+                    var teacherProfile = await _unitOfWork.Repository<TeacherProfile>()
+                        .FirstOrDefaultAsync(t => t.UserId == id, cancellationToken);
+                    if (teacherProfile is not null)
+                    {
+                        _unitOfWork.Repository<TeacherProfile>().Remove(teacherProfile);
+                    }
+                    break;
+                case UserRole.SubAdmin:
+                    var grants = await _unitOfWork.Repository<SubAdminPermission>().Query()
+                        .Where(p => p.UserId == id)
+                        .ToListAsync(cancellationToken);
+                    foreach (var grant in grants)
+                    {
+                        _unitOfWork.Repository<SubAdminPermission>().Remove(grant);
+                    }
+                    user.RoleDefinitionId = null;
+                    break;
+            }
+
+            user.Role = newRole;
+
+            // Create the new type's side record (mirrors CreateAsync).
+            switch (newRole)
+            {
+                case UserRole.Parent:
+                    await _unitOfWork.Repository<ParentProfile>().AddAsync(new ParentProfile { User = user }, cancellationToken);
+                    break;
+                case UserRole.Teacher:
+                    await _unitOfWork.Repository<TeacherProfile>().AddAsync(new TeacherProfile { User = user }, cancellationToken);
+                    break;
+            }
+
+            _unitOfWork.Repository<User>().Update(user);
+            await _auditLog.StageAsync(
+                AuditAction.Update, nameof(User), user.Id.ToString(), $"Role changed to {newRole}", cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return await GetAsync(id, cancellationToken);
         }
 
         public async Task<IReadOnlyList<PermissionDto>> GetPermissionsAsync(Guid userId, CancellationToken cancellationToken = default)
