@@ -425,6 +425,33 @@ namespace iucs.readernest.application.Services
             };
         }
 
+        public async Task DeleteAsync(Guid id, Guid currentUserId, CancellationToken cancellationToken = default)
+        {
+            if (id == currentUserId)
+            {
+                throw new DomainValidationException("You cannot delete your own account.");
+            }
+
+            var repository = _unitOfWork.Repository<User>();
+            var user = await repository.GetByIdAsync(id, cancellationToken)
+                ?? throw new NotFoundException(nameof(User), id);
+
+            if (user.Role == UserRole.Admin)
+            {
+                var otherAdminExists = await repository.ExistsAsync(
+                    u => u.Role == UserRole.Admin && u.Id != id, cancellationToken);
+                if (!otherAdminExists)
+                {
+                    throw new ConflictException("Cannot delete the last remaining Admin account.");
+                }
+            }
+
+            repository.Remove(user);
+
+            await _auditLog.StageAsync(AuditAction.Delete, nameof(User), user.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
         private async Task<bool> IsIntegrationEnabledAsync(string key, CancellationToken cancellationToken)
         {
             var integration = await _unitOfWork.Repository<Integration>().Query()

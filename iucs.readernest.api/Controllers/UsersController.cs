@@ -131,6 +131,16 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _userService.UpdateAsync(id, request, cancellationToken));
         }
 
+        /// <summary>Soft-deletes the account (excluded from all future queries; email becomes reusable).</summary>
+        [HttpDelete("{id:guid}")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.Delete)]
+        public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
+        {
+            var currentUserId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value);
+            await _userService.DeleteAsync(id, currentUserId, cancellationToken);
+            return NoContent();
+        }
+
         [HttpPut("{id:guid}/status")]
         [HasPermission(PermissionModule.UserManagement, PermissionAction.Edit)]
         public async Task<ActionResult<UserDto>> SetStatus(

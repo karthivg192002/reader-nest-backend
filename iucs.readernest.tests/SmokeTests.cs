@@ -11,6 +11,7 @@ using iucs.readernest.application.Dto.Users;
 using iucs.readernest.application.Helper;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Entities.Academics;
+using iucs.readernest.domain.Entities.Admission;
 using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
@@ -660,6 +661,87 @@ namespace iucs.readernest.tests
             await service.CreateAsync(request);
 
             await Assert.ThrowsAsync<ConflictException>(() => service.CreateAsync(request));
+        }
+
+        [Fact]
+        public async Task DeleteUser_SoftDeletes_AndFreesUpEmailForReuse()
+        {
+            var service = CreateUserService();
+            var teacherUser = await _db.SeedUserAsync($"del-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var email = teacherUser.Email;
+            var adminUser = await _db.SeedUserAsync($"admin-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+
+            await service.DeleteAsync(teacherUser.Id, adminUser.Id);
+
+            await Assert.ThrowsAsync<NotFoundException>(() => service.GetAsync(teacherUser.Id));
+
+            // The email should be free again since the query filter excludes soft-deleted rows.
+            var dto = await service.CreateAsync(new CreateUserRequest
+            {
+                Email = email,
+                FirstName = "New",
+                LastName = "Teacher",
+                Role = UserRole.Teacher,
+            });
+            Assert.Equal(email.ToLowerInvariant(), dto.Email);
+        }
+
+        [Fact]
+        public async Task DeleteUser_RefusesSelfDelete_AndLastAdmin()
+        {
+            var service = CreateUserService();
+            var admin = await _db.SeedUserAsync($"solo-admin-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            var otherAdmin = await _db.SeedUserAsync($"other-admin-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            var subAdmin = await _db.SeedUserAsync($"sa-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.DeleteAsync(admin.Id, admin.Id));
+
+            // Two admins exist — deleting one is fine.
+            await service.DeleteAsync(otherAdmin.Id, admin.Id);
+
+            // Now only one admin remains — deleting it is blocked.
+            await Assert.ThrowsAsync<ConflictException>(() => service.DeleteAsync(admin.Id, subAdmin.Id));
+        }
+
+        [Fact]
+        public async Task ParentSchedule_IncludesDemoSession_ForLeadWithNoEnrolledChildYet()
+        {
+            var parentEmail = $"lead-{Guid.NewGuid():N}@test.com";
+            var parentUser = await _db.SeedUserAsync(parentEmail, "x", UserRole.Parent);
+            _db.Context.ParentProfiles.Add(new ParentProfile { UserId = parentUser.Id });
+
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var demoStart = DateTime.UtcNow.AddDays(1);
+            var demoSession = new ClassSession
+            {
+                BatchId = null,
+                TeacherProfile = teacher,
+                Type = SessionType.Demo,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = demoStart,
+                ScheduledEndAtUtc = demoStart.AddMinutes(30),
+            };
+            _db.Context.ClassSessions.Add(demoSession);
+            _db.Context.DemoBookings.Add(new DemoBooking
+            {
+                ClassSession = demoSession,
+                ParentName = "Lead Parent",
+                ParentEmail = parentEmail,
+                ChildName = "Prospective Kid",
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var service = new ParentPortalService(_db.UnitOfWork);
+            var schedule = await service.GetScheduleAsync(
+                parentUser.Id, demoStart.AddDays(-1), demoStart.AddDays(2));
+
+            var found = Assert.Single(schedule);
+            Assert.Equal(demoSession.Id, found.Id);
+            Assert.Equal(SessionType.Demo, found.Type);
         }
 
         [Fact]

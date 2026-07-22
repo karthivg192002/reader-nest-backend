@@ -42,5 +42,12 @@ namespace iucs.readernest.application.Services
 
         /// <summary>Which credential-delivery channels are enabled in Settings → Integrations, so the UI shows only usable buttons.</summary>
         Task<CredentialChannelsDto> GetCredentialChannelsAsync(CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Soft-deletes the account (the audit interceptor sets IsDeleted/DeletedAtUtc;
+        /// the row and its email are excluded from all future queries/uniqueness checks).
+        /// Refuses to delete the caller's own account or the last remaining Admin.
+        /// </summary>
+        Task DeleteAsync(Guid id, Guid currentUserId, CancellationToken cancellationToken = default);
     }
 }

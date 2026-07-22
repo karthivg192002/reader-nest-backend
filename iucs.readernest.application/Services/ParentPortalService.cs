@@ -5,6 +5,7 @@ using iucs.readernest.application.Dto.Resources;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Entities.Academics;
+using iucs.readernest.domain.Entities.Admission;
 using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Resources;
 using iucs.readernest.domain.Entities.Sessions;
@@ -104,10 +105,25 @@ namespace iucs.readernest.application.Services
                 .Distinct()
                 .ToListAsync(cancellationToken);
 
+            var parentEmail = await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.Id == parentUserId)
+                .Select(u => u.Email)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            // Demo bookings track the lead by email (the parent may not have had an
+            // enrolled child/batch yet when the demo was scheduled), so their session
+            // is not reachable via BatchEnrollment and must be unioned in separately.
+            var demoSessionIds = parentEmail is null
+                ? new List<Guid>()
+                : await _unitOfWork.Repository<DemoBooking>().Query()
+                    .Where(d => d.ClassSessionId != null && d.ParentEmail == parentEmail)
+                    .Select(d => d.ClassSessionId!.Value)
+                    .ToListAsync(cancellationToken);
+
             var sessions = await _unitOfWork.Repository<ClassSession>().Query()
                 .Include(s => s.Batch)
                 .Include(s => s.TeacherProfile).ThenInclude(t => t.User)
-                .Where(s => s.BatchId != null && batchIds.Contains(s.BatchId.Value)
+                .Where(s => (s.BatchId != null && batchIds.Contains(s.BatchId.Value) || demoSessionIds.Contains(s.Id))
                             && s.ScheduledStartAtUtc < toUtc && s.ScheduledEndAtUtc > fromUtc)
                 .OrderBy(s => s.ScheduledStartAtUtc)
                 .ToListAsync(cancellationToken);
