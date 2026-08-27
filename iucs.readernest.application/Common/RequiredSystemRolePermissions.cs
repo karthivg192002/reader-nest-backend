@@ -17,11 +17,31 @@ namespace iucs.readernest.application.Common
         public static readonly IReadOnlyList<RequiredGrant> All =
         [
             new("teacher", PermissionModule.Payouts, View: true),
+            // Lets a teacher see and resolve doubts the "Ask a Doubt" chatbot escalated —
+            // Communication already gates Progress Reports/Email Templates for the same module.
+            new("teacher", PermissionModule.Communication, View: true, Edit: true),
+            new("coordinator", PermissionModule.Communication, View: true, Edit: true),
+            // SessionService.IsSessionParticipantAsync's SubAdmin branch requires CanEdit
+            // specifically (not just View) before letting a coordinator join a live class as a
+            // monitor — the seeded default grants Edit, but nothing protected it from being
+            // silently wiped by a preset re-save missing that checkbox, unlike every other
+            // required grant here. Confirmed live: a coordinator account could see every class
+            // on the calendar fine (View survives) but got 403 "You do not have access to this
+            // session" on every single Join Class click, with no per-session pattern to it.
+            new("coordinator", PermissionModule.SessionCalendarManagement, View: true, Create: true, Edit: true),
             new("parent", PermissionModule.SessionCalendarManagement, View: true),
             new("parent", PermissionModule.ContentAccessManagement, View: true),
             new("parent", PermissionModule.BillingFinance, View: true),
             new("parent", PermissionModule.Communication, View: true),
             new("admission", PermissionModule.BillingFinance, View: true, Edit: true, Approve: true),
+            // The Admission Dashboard's KPI tiles, conversion funnel and "Today & Upcoming
+            // Demos" list all read GET /api/sessions, which is gated on this module (see
+            // SessionsController.List's [HasPermission] — the [Authorize(Roles=...)] on that
+            // endpoint already allows AdmissionTeam, but the permission check still 403's
+            // without this). Without it those widgets show "Couldn't load this data" forever,
+            // even on a real account with real demos. Confirmed live via network trace:
+            // GET /api/sessions?fromUtc=...&toUtc=... → 403 for the admission role.
+            new("admission", PermissionModule.SessionCalendarManagement, View: true),
             // /management/revenue's course-wise breakdown reads GET /api/courses, which is
             // gated on this module, not ReportsAnalytics — without it the page's own API call
             // 403's and silently renders "No records found, ₹0 total" instead of the real

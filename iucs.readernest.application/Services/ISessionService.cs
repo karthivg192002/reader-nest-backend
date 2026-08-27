@@ -46,6 +46,14 @@ namespace iucs.readernest.application.Services
         /// </summary>
         Task<ClassSessionDto> MarkNoShowAsync(Guid id, MarkNoShowRequest request, CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// System-initiated equivalent of <see cref="MarkNoShowAsync"/> for
+        /// <c>NoShowDetectionBackgroundService</c>: identical carry-forward/payout behaviour,
+        /// but skips the caller-ownership check since there is no signed-in caller. Not exposed
+        /// on any controller.
+        /// </summary>
+        Task<ClassSessionDto> MarkNoShowSystemAsync(Guid id, NoShowParty party, string note, CancellationToken cancellationToken = default);
+
         Task<SessionRecordingDto> AddRecordingAsync(
             Guid sessionId,
             RegisterRecordingRequest request,
@@ -53,6 +61,23 @@ namespace iucs.readernest.application.Services
 
         Task<IReadOnlyList<SessionRecordingDto>> ListRecordingsAsync(
             Guid sessionId,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Machine-to-machine equivalent of <see cref="AddRecordingAsync"/> for the Jibri
+        /// finalize-recording hook: no signed-in caller, so <paramref name="bearerToken"/> (a
+        /// short-lived JWT signed with the same appId/appSecret as room-join tokens) is the
+        /// authorization instead of <c>EnsureSessionParticipantAsync</c> — see
+        /// <see cref="Common.Interfaces.IJitsiTokenService.ValidateFinalizeToken"/>. Returns null
+        /// (not an error) when <paramref name="roomName"/> doesn't match any ClassSession (e.g.
+        /// a personal or demo room) — Jibri records those too, but there's nothing in our data
+        /// model to attach the recording to.
+        /// </summary>
+        Task<SessionRecordingDto?> FinalizeJibriRecordingAsync(
+            string roomName,
+            string? bearerToken,
+            string storageUrl,
+            int? durationSeconds,
             CancellationToken cancellationToken = default);
 
         /// <summary>Engagement tracking: batches of quiz/activity/whiteboard/attention signals from the live classroom.</summary>

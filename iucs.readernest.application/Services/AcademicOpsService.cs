@@ -4,6 +4,7 @@ using iucs.readernest.application.Dto.Academics;
 using iucs.readernest.application.Helper;
 using iucs.readernest.domain.Common;
 using iucs.readernest.domain.Entities.Academics;
+using iucs.readernest.domain.Entities.Admission;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
@@ -53,6 +54,206 @@ namespace iucs.readernest.application.Services
             }
         }
 
+        /// <summary>
+        /// Join-based attendance capture — the PDF's "System Marks Attendance" step, fired by
+        /// ClassroomHub.JoinSession whenever a genuine session participant connects to the live
+        /// classroom. A Teacher captures against their own TeacherProfile; a Parent captures
+        /// against whichever of their children are actively enrolled in the session's batch
+        /// (normally one, occasionally more for siblings sharing a batch). Admin/SubAdmin joins
+        /// are monitoring, not attendance, and are silently skipped, as is any session whose
+        /// status doesn't currently accept attendance (mirrors CaptureAttendanceAsync's own
+        /// guard). Never throws — a capture hiccup must never stop someone from joining their
+        /// own class; the hub calls this best-effort after the join itself has already succeeded.
+        /// </summary>
+        public async Task CaptureJoinAttendanceAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                var user = await _unitOfWork.Repository<User>().GetByIdAsync(userId, cancellationToken);
+                if (user is null)
+                {
+                    return;
+                }
+
+                var entries = new List<AttendanceEntryDto>();
+                var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken);
+                if (session is null)
+                {
+                    return;
+                }
+
+                if (user.Role == UserRole.Teacher)
+                {
+                    // Not just "is a teacher" — must be THIS session's own assigned teacher. In
+                    // production the hub's JoinSession already guarantees this before ever
+                    // calling in here, but this method has to be correct standing on its own too.
+                    var isAssignedTeacher = await _unitOfWork.Repository<TeacherProfile>()
+                        .ExistsAsync(t => t.Id == session.TeacherProfileId && t.UserId == userId, cancellationToken);
+                    if (isAssignedTeacher)
+                    {
+                        // A network drop followed by SignalR's automatic reconnect calls this
+                        // again for the SAME class — CaptureAttendanceCoreAsync's merge always
+                        // overwrites JoinedAtUtc with "now" (a real value beats the ?? fallback)
+                        // but leaves the stale LeftAtUtc the earlier disconnect wrote untouched,
+                        // so the row ends up with a leave time BEFORE its join time. That fed a
+                        // negative "attended minutes" into the payout review check, which then
+                        // flagged a teacher who taught almost the entire class as if they'd left
+                        // after a moment, purely because of a brief reconnect. On a genuine
+                        // rejoin (a row already exists), keep the original JoinedAtUtc and clear
+                        // the now-stale LeftAtUtc directly instead of going through the entries
+                        // path at all — the teacher is back, they haven't "left" this session yet.
+                        var existingTeacherRow = await _unitOfWork.Repository<SessionAttendance>().TrackedQuery()
+                            .FirstOrDefaultAsync(a => a.ClassSessionId == sessionId && a.TeacherProfileId == session.TeacherProfileId, cancellationToken);
+                        if (existingTeacherRow is not null)
+                        {
+                            existingTeacherRow.Status = AttendanceStatus.Present;
+                            existingTeacherRow.LeftAtUtc = null;
+                            await _unitOfWork.SaveChangesAsync(cancellationToken);
+                        }
+                        else
+                        {
+                            entries.Add(new AttendanceEntryDto
+                            {
+                                TeacherProfileId = session.TeacherProfileId,
+                                Status = AttendanceStatus.Present,
+                                JoinedAtUtc = DateTime.UtcNow,
+                            });
+                        }
+                    }
+                }
+                else if (user.Role == UserRole.Parent)
+                {
+                    if (session.BatchId is Guid batchId)
+                    {
+                        var childIds = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                            .Where(e => e.BatchId == batchId && e.Status == EnrollmentStatus.Active)
+                            .Join(_unitOfWork.Repository<Child>().Query(), e => e.ChildId, c => c.Id, (e, c) => c)
+                            .Join(_unitOfWork.Repository<ParentProfile>().Query(), c => c.ParentProfileId, p => p.Id, (c, p) => new { c.Id, p.UserId })
+                            .Where(x => x.UserId == userId)
+                            .Select(x => x.Id)
+                            .ToListAsync(cancellationToken);
+
+                        entries.AddRange(childIds.Select(childId => new AttendanceEntryDto
+                        {
+                            ChildId = childId,
+                            Status = AttendanceStatus.Present,
+                            JoinedAtUtc = DateTime.UtcNow,
+                        }));
+                    }
+                    else if (!string.IsNullOrWhiteSpace(user.Email))
+                    {
+                        // Demo session (no batch): there is no Child/BatchEnrollment row to hang
+                        // a SessionAttendance entry off of (that table requires a real Child or
+                        // TeacherProfile FK — see SessionAttendance's own doc comment), so this
+                        // is recorded directly on the booking instead. Returns here rather than
+                        // falling into the entries-based path below, which has nothing to do for
+                        // a demo join.
+                        await CaptureDemoJoinAsync(session.Id, user.Email, cancellationToken);
+                        return;
+                    }
+                }
+
+                if (entries.Count == 0)
+                {
+                    return;
+                }
+
+                await CaptureAttendanceCoreAsync(sessionId, new CaptureAttendanceRequest { Entries = entries }, cancellationToken);
+            }
+            catch
+            {
+                // Best-effort: joining the class must never fail because attendance capture did.
+            }
+        }
+
+        /// <summary>
+        /// Teacher-departure capture — fired by ClassroomHub on LeaveSession/OnDisconnectedAsync.
+        /// The hub's own leave/disconnect handling only ever touched in-memory presence state
+        /// (Rooms/Scores/_presenceTracker); SessionAttendance.LeftAtUtc was never actually written
+        /// anywhere, so a teacher who joined then left after a few minutes of a much longer class
+        /// looked identical to one who taught the whole thing. Only handles the teacher side (the
+        /// side that drives payout accuracy) — parent/child leave capture is a separate concern.
+        /// Same never-throw contract as the join capture: a disconnect must never fail because
+        /// this write did.
+        /// </summary>
+        public async Task CaptureLeaveAttendanceAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken);
+                if (session is null)
+                {
+                    return;
+                }
+
+                var isAssignedTeacher = await _unitOfWork.Repository<TeacherProfile>()
+                    .ExistsAsync(t => t.Id == session.TeacherProfileId && t.UserId == userId, cancellationToken);
+                if (!isAssignedTeacher)
+                {
+                    return;
+                }
+
+                await CaptureAttendanceCoreAsync(
+                    sessionId,
+                    new CaptureAttendanceRequest
+                    {
+                        Entries =
+                        [
+                            new AttendanceEntryDto
+                            {
+                                TeacherProfileId = session.TeacherProfileId,
+                                Status = AttendanceStatus.Present,
+                                LeftAtUtc = DateTime.UtcNow,
+                            },
+                        ],
+                    },
+                    cancellationToken);
+            }
+            catch
+            {
+                // Best-effort: a disconnect must never fail because attendance capture did.
+            }
+        }
+
+        /// <summary>
+        /// Demo-session counterpart of the SessionAttendance path above: matches the joining
+        /// account's email (case-insensitive) against the booking's primary contact
+        /// (<see cref="DemoBooking.ParentEmail"/>) or an additional invitee
+        /// (<see cref="DemoParticipant.Email"/>), and timestamps/flags whichever matched. A
+        /// demo lead has no account requirement, so a parent who registered and joined under a
+        /// different email than the one the demo was booked with is a silent no-op — same
+        /// "never block the join" contract as the rest of this method.
+        /// </summary>
+        private async Task CaptureDemoJoinAsync(Guid sessionId, string email, CancellationToken cancellationToken)
+        {
+            var booking = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
+                .Include(b => b.Participants)
+                .FirstOrDefaultAsync(b => b.ClassSessionId == sessionId, cancellationToken);
+            if (booking is null)
+            {
+                return;
+            }
+
+            var matched = false;
+            if (string.Equals(booking.ParentEmail, email, StringComparison.OrdinalIgnoreCase))
+            {
+                booking.ParentJoinedAtUtc ??= DateTime.UtcNow;
+                matched = true;
+            }
+
+            foreach (var participant in booking.Participants.Where(
+                p => p.Email != null && string.Equals(p.Email, email, StringComparison.OrdinalIgnoreCase)))
+            {
+                participant.HasJoined = true;
+                matched = true;
+            }
+
+            if (matched)
+            {
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+        }
+
         public async Task<IReadOnlyList<HolidayDto>> ListHolidaysAsync(CancellationToken cancellationToken = default)
         {
             var holidays = await _unitOfWork.Repository<Holiday>().Query()
@@ -77,8 +278,18 @@ namespace iucs.readernest.application.Services
             // Business rule: a class never runs on a holiday. Any session already scheduled
             // on this date is automatically carried forward to the next available same-weekday
             // slot (skipping further holidays), keeping the traceability link.
-            var dayStart = request.Date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
-            var dayEnd = dayStart.AddDays(1);
+            //
+            // request.Date is a local (DefaultTimeZoneId, Asia/Kolkata) calendar date, but
+            // treating its midnight as UTC midnight offset the whole matching window by +5:30 —
+            // a session genuinely on the holiday (e.g. 02:00 IST) fell just before the window
+            // and was never detected, running as normal, while a session the FOLLOWING day in
+            // that same 00:00-05:29 IST slot fell just inside it and was wrongly auto-cancelled
+            // and carried forward a week as if it were on the holiday. Mirrors
+            // StoreService.ListAvailableDemoSlotsAsync's own correct local-to-UTC conversion.
+            var zone = TimeZoneInfo.FindSystemTimeZoneById(DateTimeDisplay.DefaultTimeZoneId);
+            var dayStartLocal = request.Date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+            var dayStart = TimeZoneInfo.ConvertTimeToUtc(dayStartLocal, zone);
+            var dayEnd = TimeZoneInfo.ConvertTimeToUtc(dayStartLocal.AddDays(1), zone);
             var clashingSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
                 .Where(s => (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
                             && s.ScheduledStartAtUtc >= dayStart
@@ -375,11 +586,28 @@ namespace iucs.readernest.application.Services
             CaptureAttendanceRequest request,
             CancellationToken cancellationToken = default)
         {
+            await EnsureSessionParticipantAsync(sessionId, cancellationToken);
+            return await CaptureAttendanceCoreAsync(sessionId, request, cancellationToken);
+        }
+
+        /// <summary>
+        /// Unguarded core, used by the public (HTTP-request-scoped, <see cref="_currentUser"/>-
+        /// checked) <see cref="CaptureAttendanceAsync"/> above and by
+        /// <see cref="CaptureJoinAttendanceAsync"/> below. The join-capture path deliberately
+        /// does NOT go through <see cref="EnsureSessionParticipantAsync"/>: <see cref="_currentUser"/>
+        /// resolves from <c>IHttpContextAccessor</c>, which is not reliably populated for a
+        /// SignalR hub method invoked over an already-established connection (unlike a plain HTTP
+        /// request) — the hub instead resolves and validates the caller itself, from
+        /// <c>Hub.Context.User</c>, before ever calling in here.
+        /// </summary>
+        private async Task<IReadOnlyList<SessionAttendanceDto>> CaptureAttendanceCoreAsync(
+            Guid sessionId,
+            CaptureAttendanceRequest request,
+            CancellationToken cancellationToken)
+        {
             var session = await _unitOfWork.Repository<ClassSession>()
                 .FirstOrDefaultAsync(s => s.Id == sessionId, cancellationToken)
                 ?? throw new NotFoundException(nameof(ClassSession), sessionId);
-
-            await EnsureSessionParticipantAsync(sessionId, cancellationToken);
 
             if (session.Status is SessionStatus.Cancelled or SessionStatus.Rescheduled
                 or SessionStatus.TeacherNoShow or SessionStatus.StudentNoShow)
@@ -460,7 +688,7 @@ namespace iucs.readernest.application.Services
                 }
             }
 
-            return await ListAttendanceAsync(sessionId, cancellationToken);
+            return await ListAttendanceCoreAsync(sessionId, cancellationToken);
         }
 
         public async Task<IReadOnlyList<SessionAttendanceDto>> ListAttendanceAsync(
@@ -468,7 +696,13 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default)
         {
             await EnsureSessionParticipantAsync(sessionId, cancellationToken);
+            return await ListAttendanceCoreAsync(sessionId, cancellationToken);
+        }
 
+        private async Task<IReadOnlyList<SessionAttendanceDto>> ListAttendanceCoreAsync(
+            Guid sessionId,
+            CancellationToken cancellationToken)
+        {
             var rows = await _unitOfWork.Repository<SessionAttendance>().Query()
                 .Include(a => a.Child)
                 .Where(a => a.ClassSessionId == sessionId)

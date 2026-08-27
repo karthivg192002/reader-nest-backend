@@ -186,11 +186,9 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at_utc");
 
-                    b.Property<string>("Department")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("department");
+                    b.Property<Guid>("DepartmentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("department_id");
 
                     b.Property<string>("Description")
                         .HasMaxLength(1000)
@@ -244,6 +242,9 @@ namespace iucs.readernest.domain.Migrations
                     b.HasIndex("CourseCategoryId")
                         .HasDatabaseName("ix_courses_course_category_id");
 
+                    b.HasIndex("DepartmentId")
+                        .HasDatabaseName("ix_courses_department_id");
+
                     b.ToTable("courses");
                 });
 
@@ -266,11 +267,9 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at_utc");
 
-                    b.Property<string>("Department")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("department");
+                    b.Property<Guid>("DepartmentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("department_id");
 
                     b.Property<string>("Description")
                         .HasMaxLength(500)
@@ -298,12 +297,69 @@ namespace iucs.readernest.domain.Migrations
                     b.HasKey("Id")
                         .HasName("pk_course_categories");
 
-                    b.HasIndex("Name")
+                    b.HasIndex("DepartmentId", "Name")
                         .IsUnique()
-                        .HasDatabaseName("ix_course_categories_name")
+                        .HasDatabaseName("ix_course_categories_department_id_name")
                         .HasFilter("\"is_deleted\" = FALSE");
 
                     b.ToTable("course_categories");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Academics.Department", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at_utc");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("description");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_active");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("name");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_departments");
+
+                    b.HasIndex("Name")
+                        .IsUnique()
+                        .HasDatabaseName("ix_departments_name")
+                        .HasFilter("\"is_deleted\" = FALSE");
+
+                    b.ToTable("departments");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Academics.EnrollmentForm", b =>
@@ -385,6 +441,9 @@ namespace iucs.readernest.domain.Migrations
 
                     b.HasIndex("ParentProfileId")
                         .HasDatabaseName("ix_enrollment_forms_parent_profile_id");
+
+                    b.HasIndex("Status")
+                        .HasDatabaseName("ix_enrollment_forms_status");
 
                     b.ToTable("enrollment_forms");
                 });
@@ -562,10 +621,9 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at_utc");
 
-                    b.Property<string>("Department")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("department");
+                    b.Property<Guid?>("DepartmentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("department_id");
 
                     b.Property<string>("FollowUpNotes")
                         .HasMaxLength(2000)
@@ -585,6 +643,10 @@ namespace iucs.readernest.domain.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)")
                         .HasColumnName("parent_email");
+
+                    b.Property<DateTime?>("ParentJoinedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("parent_joined_at_utc");
 
                     b.Property<string>("ParentName")
                         .IsRequired()
@@ -618,6 +680,9 @@ namespace iucs.readernest.domain.Migrations
 
                     b.HasIndex("ConversionStatus")
                         .HasDatabaseName("ix_demo_bookings_conversion_status");
+
+                    b.HasIndex("DepartmentId")
+                        .HasDatabaseName("ix_demo_bookings_department_id");
 
                     b.HasIndex("InvoiceId")
                         .HasDatabaseName("ix_demo_bookings_invoice_id");
@@ -1043,11 +1108,9 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at_utc");
 
-                    b.Property<string>("Department")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("department");
+                    b.Property<Guid>("DepartmentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("department_id");
 
                     b.Property<DateOnly>("DueDate")
                         .HasColumnType("date")
@@ -1109,6 +1172,9 @@ namespace iucs.readernest.domain.Migrations
 
                     b.HasIndex("CourseId")
                         .HasDatabaseName("ix_invoices_course_id");
+
+                    b.HasIndex("DepartmentId")
+                        .HasDatabaseName("ix_invoices_department_id");
 
                     b.HasIndex("InvoiceNumber")
                         .IsUnique()
@@ -1199,6 +1265,10 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("updated_by");
 
+                    b.Property<int?>("ValidityDays")
+                        .HasColumnType("integer")
+                        .HasColumnName("validity_days");
+
                     b.HasKey("Id")
                         .HasName("pk_package_plans");
 
@@ -1227,11 +1297,9 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at_utc");
 
-                    b.Property<string>("Department")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("department");
+                    b.Property<Guid>("DepartmentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("department_id");
 
                     b.Property<string>("GatewayAccountRef")
                         .IsRequired()
@@ -1270,9 +1338,9 @@ namespace iucs.readernest.domain.Migrations
                     b.HasKey("Id")
                         .HasName("pk_payment_accounts");
 
-                    b.HasIndex("Department")
+                    b.HasIndex("DepartmentId")
                         .IsUnique()
-                        .HasDatabaseName("ix_payment_accounts_department")
+                        .HasDatabaseName("ix_payment_accounts_department_id")
                         .HasFilter("\"is_deleted\" = FALSE");
 
                     b.ToTable("payment_accounts");
@@ -1467,6 +1535,10 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at_utc");
 
+                    b.Property<DateOnly?>("EndDate")
+                        .HasColumnType("date")
+                        .HasColumnName("end_date");
+
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("boolean")
                         .HasColumnName("is_deleted");
@@ -1515,10 +1587,211 @@ namespace iucs.readernest.domain.Migrations
                         .HasDatabaseName("ix_subscriptions_child_id_package_plan_id")
                         .HasFilter("\"status\" = 'Active' AND \"is_deleted\" = FALSE");
 
+                    b.HasIndex("Status", "EndDate")
+                        .HasDatabaseName("ix_subscriptions_status_end_date");
+
                     b.HasIndex("Status", "NextBillingAtUtc")
                         .HasDatabaseName("ix_subscriptions_status_next_billing_at_utc");
 
                     b.ToTable("subscriptions");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Communication.ChatEscalation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at_utc");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<string>("Question")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("question");
+
+                    b.Property<string>("ResolutionNote")
+                        .HasColumnType("text")
+                        .HasColumnName("resolution_note");
+
+                    b.Property<DateTime?>("ResolvedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("resolved_at_utc");
+
+                    b.Property<Guid?>("ResolvedByUserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("resolved_by_user_id");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("status");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_chat_escalations");
+
+                    b.HasIndex("ResolvedByUserId")
+                        .HasDatabaseName("ix_chat_escalations_resolved_by_user_id");
+
+                    b.HasIndex("Status")
+                        .HasDatabaseName("ix_chat_escalations_status");
+
+                    b.HasIndex("UserId")
+                        .HasDatabaseName("ix_chat_escalations_user_id");
+
+                    b.ToTable("chat_escalations");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Communication.ChatFaq", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("Answer")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("answer");
+
+                    b.Property<string>("Category")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("category");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at_utc");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_active");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<string>("Keywords")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("keywords");
+
+                    b.Property<string>("Question")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("question");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("integer")
+                        .HasColumnName("sort_order");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_chat_faqs");
+
+                    b.ToTable("chat_faqs");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Communication.ChatMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at_utc");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<Guid?>("MatchedFaqId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("matched_faq_id");
+
+                    b.Property<string>("Sender")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("sender");
+
+                    b.Property<string>("Text")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("text");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<bool?>("WasHelpful")
+                        .HasColumnType("boolean")
+                        .HasColumnName("was_helpful");
+
+                    b.HasKey("Id")
+                        .HasName("pk_chat_messages");
+
+                    b.HasIndex("MatchedFaqId")
+                        .HasDatabaseName("ix_chat_messages_matched_faq_id");
+
+                    b.HasIndex("UserId", "CreatedAtUtc")
+                        .HasDatabaseName("ix_chat_messages_user_id_created_at_utc");
+
+                    b.ToTable("chat_messages");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Communication.EmailTemplate", b =>
@@ -2089,6 +2362,10 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("payout_id");
 
+                    b.Property<bool>("RequiresReview")
+                        .HasColumnType("boolean")
+                        .HasColumnName("requires_review");
+
                     b.Property<string>("Type")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -2130,10 +2407,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at_utc");
 
-                    b.Property<int>("DurationMinutes")
-                        .HasColumnType("integer")
-                        .HasColumnName("duration_minutes");
-
                     b.Property<DateOnly>("EffectiveFrom")
                         .HasColumnType("date")
                         .HasColumnName("effective_from");
@@ -2146,10 +2419,10 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("boolean")
                         .HasColumnName("is_deleted");
 
-                    b.Property<decimal>("RatePerSession")
+                    b.Property<decimal>("RatePerMinute")
                         .HasPrecision(12, 2)
                         .HasColumnType("numeric(12,2)")
-                        .HasColumnName("rate_per_session");
+                        .HasColumnName("rate_per_minute");
 
                     b.Property<decimal>("TeacherNoShowPenaltyPercent")
                         .HasPrecision(12, 2)
@@ -2171,12 +2444,123 @@ namespace iucs.readernest.domain.Migrations
                     b.HasKey("Id")
                         .HasName("pk_payout_rates");
 
-                    b.HasIndex("TeacherProfileId", "DurationMinutes", "EffectiveFrom")
+                    b.HasIndex("TeacherProfileId", "EffectiveFrom")
                         .IsUnique()
-                        .HasDatabaseName("ix_payout_rates_teacher_profile_id_duration_minutes_effective_")
+                        .HasDatabaseName("ix_payout_rates_teacher_profile_id_effective_from")
                         .HasFilter("\"is_deleted\" = FALSE");
 
                     b.ToTable("payout_rates");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Quizzes.QuizQuestion", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<Guid?>("CourseId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("course_id");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at_utc");
+
+                    b.Property<Guid>("DepartmentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("department_id");
+
+                    b.Property<int>("DisplayOrder")
+                        .HasColumnType("integer")
+                        .HasColumnName("display_order");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<string>("Prompt")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("prompt");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_quiz_questions");
+
+                    b.HasIndex("CourseId")
+                        .HasDatabaseName("ix_quiz_questions_course_id");
+
+                    b.HasIndex("DepartmentId")
+                        .HasDatabaseName("ix_quiz_questions_department_id");
+
+                    b.ToTable("quiz_questions");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Quizzes.QuizQuestionOption", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at_utc");
+
+                    b.Property<int>("DisplayOrder")
+                        .HasColumnType("integer")
+                        .HasColumnName("display_order");
+
+                    b.Property<bool>("IsCorrect")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_correct");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<Guid>("QuizQuestionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("quiz_question_id");
+
+                    b.Property<string>("Text")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("text");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.HasKey("Id")
+                        .HasName("pk_quiz_question_options");
+
+                    b.HasIndex("QuizQuestionId")
+                        .HasDatabaseName("ix_quiz_question_options_quiz_question_id");
+
+                    b.ToTable("quiz_question_options");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Resources.Resource", b =>
@@ -2800,6 +3184,75 @@ namespace iucs.readernest.domain.Migrations
                     b.ToTable("app_settings");
                 });
 
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Users.AccessRequest", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at_utc");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<Guid>("RequestedByUserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("requested_by_user_id");
+
+                    b.Property<string>("RequestedModules")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("requested_modules");
+
+                    b.Property<string>("ReviewNote")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("review_note");
+
+                    b.Property<DateTime?>("ReviewedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("reviewed_at_utc");
+
+                    b.Property<Guid?>("ReviewedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("reviewed_by");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("status");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_access_requests");
+
+                    b.HasIndex("RequestedByUserId", "Status")
+                        .HasDatabaseName("ix_access_requests_requested_by_user_id_status");
+
+                    b.ToTable("access_requests");
+                });
+
             modelBuilder.Entity("iucs.readernest.domain.Entities.Users.Child", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3220,10 +3673,9 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at_utc");
 
-                    b.Property<string>("Department")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("department");
+                    b.Property<Guid?>("DepartmentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("department_id");
 
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("boolean")
@@ -3244,6 +3696,9 @@ namespace iucs.readernest.domain.Migrations
 
                     b.HasKey("Id")
                         .HasName("pk_teacher_profiles");
+
+                    b.HasIndex("DepartmentId")
+                        .HasDatabaseName("ix_teacher_profiles_department_id");
 
                     b.HasIndex("UserId")
                         .IsUnique()
@@ -3282,6 +3737,10 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("character varying(256)")
                         .HasColumnName("email");
 
+                    b.Property<int>("FailedLoginAttempts")
+                        .HasColumnType("integer")
+                        .HasColumnName("failed_login_attempts");
+
                     b.Property<string>("FirstName")
                         .IsRequired()
                         .HasMaxLength(100)
@@ -3301,6 +3760,10 @@ namespace iucs.readernest.domain.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)")
                         .HasColumnName("last_name");
+
+                    b.Property<DateTime?>("LockoutEndUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("lockout_end_utc");
 
                     b.Property<string>("PersonalMeetingRoomId")
                         .HasMaxLength(64)
@@ -3359,6 +3822,9 @@ namespace iucs.readernest.domain.Migrations
                     b.HasIndex("RoleDefinitionId")
                         .HasDatabaseName("ix_users_role_definition_id");
 
+                    b.HasIndex("Role", "Status")
+                        .HasDatabaseName("ix_users_role_status");
+
                     b.ToTable("users");
                 });
 
@@ -3413,7 +3879,28 @@ namespace iucs.readernest.domain.Migrations
                         .IsRequired()
                         .HasConstraintName("fk_courses_course_categories_course_category_id");
 
+                    b.HasOne("iucs.readernest.domain.Entities.Academics.Department", "Department")
+                        .WithMany()
+                        .HasForeignKey("DepartmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_courses_departments_department_id");
+
                     b.Navigation("CourseCategory");
+
+                    b.Navigation("Department");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Academics.CourseCategory", b =>
+                {
+                    b.HasOne("iucs.readernest.domain.Entities.Academics.Department", "Department")
+                        .WithMany()
+                        .HasForeignKey("DepartmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_course_categories_departments_department_id");
+
+                    b.Navigation("Department");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Academics.EnrollmentForm", b =>
@@ -3464,6 +3951,12 @@ namespace iucs.readernest.domain.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .HasConstraintName("fk_demo_bookings_class_sessions_class_session_id");
 
+                    b.HasOne("iucs.readernest.domain.Entities.Academics.Department", "Department")
+                        .WithMany()
+                        .HasForeignKey("DepartmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_demo_bookings_departments_department_id");
+
                     b.HasOne("iucs.readernest.domain.Entities.Billing.Invoice", "Invoice")
                         .WithMany()
                         .HasForeignKey("InvoiceId")
@@ -3471,6 +3964,8 @@ namespace iucs.readernest.domain.Migrations
                         .HasConstraintName("fk_demo_bookings_invoices_invoice_id");
 
                     b.Navigation("ClassSession");
+
+                    b.Navigation("Department");
 
                     b.Navigation("Invoice");
                 });
@@ -3562,6 +4057,13 @@ namespace iucs.readernest.domain.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .HasConstraintName("fk_invoices_courses_course_id");
 
+                    b.HasOne("iucs.readernest.domain.Entities.Academics.Department", "Department")
+                        .WithMany()
+                        .HasForeignKey("DepartmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_invoices_departments_department_id");
+
                     b.HasOne("iucs.readernest.domain.Entities.Users.ParentProfile", "ParentProfile")
                         .WithMany()
                         .HasForeignKey("ParentProfileId")
@@ -3586,6 +4088,8 @@ namespace iucs.readernest.domain.Migrations
 
                     b.Navigation("Course");
 
+                    b.Navigation("Department");
+
                     b.Navigation("ParentProfile");
 
                     b.Navigation("PaymentAccount");
@@ -3602,6 +4106,18 @@ namespace iucs.readernest.domain.Migrations
                         .HasConstraintName("fk_package_plans_courses_course_id");
 
                     b.Navigation("Course");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Billing.PaymentAccount", b =>
+                {
+                    b.HasOne("iucs.readernest.domain.Entities.Academics.Department", "Department")
+                        .WithMany()
+                        .HasForeignKey("DepartmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_payment_accounts_departments_department_id");
+
+                    b.Navigation("Department");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Billing.PaymentTransaction", b =>
@@ -3665,6 +4181,46 @@ namespace iucs.readernest.domain.Migrations
                     b.Navigation("PackagePlan");
 
                     b.Navigation("ParentProfile");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Communication.ChatEscalation", b =>
+                {
+                    b.HasOne("iucs.readernest.domain.Entities.Users.User", "ResolvedByUser")
+                        .WithMany()
+                        .HasForeignKey("ResolvedByUserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_chat_escalations_users_resolved_by_user_id");
+
+                    b.HasOne("iucs.readernest.domain.Entities.Users.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_chat_escalations_users_user_id");
+
+                    b.Navigation("ResolvedByUser");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Communication.ChatMessage", b =>
+                {
+                    b.HasOne("iucs.readernest.domain.Entities.Communication.ChatFaq", "MatchedFaq")
+                        .WithMany()
+                        .HasForeignKey("MatchedFaqId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_chat_messages_chat_faqs_matched_faq_id");
+
+                    b.HasOne("iucs.readernest.domain.Entities.Users.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_chat_messages_users_user_id");
+
+                    b.Navigation("MatchedFaq");
+
+                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Communication.Notification", b =>
@@ -3744,6 +4300,38 @@ namespace iucs.readernest.domain.Migrations
                         .HasConstraintName("fk_payout_rates_teacher_profiles_teacher_profile_id");
 
                     b.Navigation("TeacherProfile");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Quizzes.QuizQuestion", b =>
+                {
+                    b.HasOne("iucs.readernest.domain.Entities.Academics.Course", "Course")
+                        .WithMany()
+                        .HasForeignKey("CourseId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_quiz_questions_courses_course_id");
+
+                    b.HasOne("iucs.readernest.domain.Entities.Academics.Department", "Department")
+                        .WithMany()
+                        .HasForeignKey("DepartmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_quiz_questions_departments_department_id");
+
+                    b.Navigation("Course");
+
+                    b.Navigation("Department");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Quizzes.QuizQuestionOption", b =>
+                {
+                    b.HasOne("iucs.readernest.domain.Entities.Quizzes.QuizQuestion", "QuizQuestion")
+                        .WithMany("Options")
+                        .HasForeignKey("QuizQuestionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_quiz_question_options_quiz_questions_quiz_question_id");
+
+                    b.Navigation("QuizQuestion");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Resources.Resource", b =>
@@ -3922,6 +4510,18 @@ namespace iucs.readernest.domain.Migrations
                     b.Navigation("ClassSession");
                 });
 
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Users.AccessRequest", b =>
+                {
+                    b.HasOne("iucs.readernest.domain.Entities.Users.User", "RequestedByUser")
+                        .WithMany()
+                        .HasForeignKey("RequestedByUserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_access_requests_users_requested_by_user_id");
+
+                    b.Navigation("RequestedByUser");
+                });
+
             modelBuilder.Entity("iucs.readernest.domain.Entities.Users.Child", b =>
                 {
                     b.HasOne("iucs.readernest.domain.Entities.Users.ParentProfile", "ParentProfile")
@@ -3992,12 +4592,20 @@ namespace iucs.readernest.domain.Migrations
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Users.TeacherProfile", b =>
                 {
+                    b.HasOne("iucs.readernest.domain.Entities.Academics.Department", "Department")
+                        .WithMany()
+                        .HasForeignKey("DepartmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_teacher_profiles_departments_department_id");
+
                     b.HasOne("iucs.readernest.domain.Entities.Users.User", "User")
                         .WithOne("TeacherProfile")
                         .HasForeignKey("iucs.readernest.domain.Entities.Users.TeacherProfile", "UserId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("fk_teacher_profiles_users_user_id");
+
+                    b.Navigation("Department");
 
                     b.Navigation("User");
                 });
@@ -4031,6 +4639,11 @@ namespace iucs.readernest.domain.Migrations
             modelBuilder.Entity("iucs.readernest.domain.Entities.Payouts.Payout", b =>
                 {
                     b.Navigation("Items");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Quizzes.QuizQuestion", b =>
+                {
+                    b.Navigation("Options");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Users.ParentProfile", b =>

@@ -1,8 +1,10 @@
 using System.Text;
 using System.Text.Json;
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.domain.Entities.Billing;
+using iucs.readernest.domain.Repository;
 
 namespace iucs.readernest.api.Services.Payments
 {
@@ -17,11 +19,13 @@ namespace iucs.readernest.api.Services.Payments
 
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly ILogger<CashfreeGateway> _logger;
+        private readonly IUnitOfWork _unitOfWork;
 
-        public CashfreeGateway(IHttpClientFactory httpClientFactory, ILogger<CashfreeGateway> logger)
+        public CashfreeGateway(IHttpClientFactory httpClientFactory, ILogger<CashfreeGateway> logger, IUnitOfWork unitOfWork)
         {
             _httpClientFactory = httpClientFactory;
             _logger = logger;
+            _unitOfWork = unitOfWork;
         }
 
         public string IntegrationKey => "cashfree";
@@ -42,6 +46,7 @@ namespace iucs.readernest.api.Services.Payments
                 : "https://sandbox.cashfree.com";
             var remaining = invoice.Amount - invoice.AmountPaid;
             var linkId = $"RN-{Guid.NewGuid():N}"[..24];
+            var brandName = await BrandSettings.GetNameAsync(_unitOfWork, cancellationToken);
 
             // Cashfree requires customer details on a link; phone falls back to a
             // placeholder when the parent record has none (the link still works).
@@ -50,7 +55,7 @@ namespace iucs.readernest.api.Services.Payments
                 link_id = linkId,
                 link_amount = remaining,
                 link_currency = invoice.Currency,
-                link_purpose = $"The Reader Nest — invoice {invoice.InvoiceNumber} ({account.Department})",
+                link_purpose = $"{brandName} — invoice {invoice.InvoiceNumber} ({account.Department?.Name ?? account.Name})",
                 customer_details = new
                 {
                     customer_phone = Value(config, "fallbackCustomerPhone") ?? "9999999999",
@@ -58,7 +63,7 @@ namespace iucs.readernest.api.Services.Payments
                 link_notes = new Dictionary<string, string>
                 {
                     ["invoiceId"] = invoice.Id.ToString(),
-                    ["department"] = account.Department.ToString(),
+                    ["department"] = account.Department?.Name ?? account.Name,
                 },
             });
 
@@ -107,12 +112,13 @@ namespace iucs.readernest.api.Services.Payments
                 ? "https://api.cashfree.com"
                 : "https://sandbox.cashfree.com";
             var refundId = $"RFND-{Guid.NewGuid():N}"[..24];
+            var brandName = await BrandSettings.GetNameAsync(_unitOfWork, cancellationToken);
 
             var payload = JsonSerializer.Serialize(new
             {
                 refund_amount = amount,
                 refund_id = refundId,
-                refund_note = "The Reader Nest — refund",
+                refund_note = $"{brandName} — refund",
             });
 
             var client = _httpClientFactory.CreateClient(nameof(CashfreeGateway));

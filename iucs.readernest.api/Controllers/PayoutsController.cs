@@ -40,6 +40,18 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _payoutService.ListForTeacherUserAsync(userId, cancellationToken));
         }
 
+        /// <summary>Admin correction to one accrued line item -- the only way to act on a RequiresReview flag. Only while the payout is still Pending.</summary>
+        [HttpPut("{id:guid}/items/{itemId:guid}")]
+        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
+        public async Task<ActionResult<PayoutDto>> AdjustItem(
+            Guid id,
+            Guid itemId,
+            AdjustPayoutItemRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _payoutService.AdjustItemAsync(id, itemId, request, cancellationToken));
+        }
+
         /// <summary>Locks the month's total and emails the statement to the teacher.</summary>
         [HttpPost("{id:guid}/finalize")]
         [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only

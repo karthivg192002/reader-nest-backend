@@ -1,9 +1,11 @@
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Common;
 using iucs.readernest.application.Dto.Users;
 using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Communication;
 using iucs.readernest.domain.Entities.Integrations;
@@ -26,6 +28,7 @@ namespace iucs.readernest.application.Services
         private readonly IEmailSender _emailSender;
         private readonly IWhatsAppSender _whatsAppSender;
         private readonly ISmsSender _smsSender;
+        private readonly IBulkFileReader _bulkFileReader;
         private readonly ILogger<UserService> _logger;
 
         public UserService(
@@ -37,6 +40,7 @@ namespace iucs.readernest.application.Services
             IEmailSender emailSender,
             IWhatsAppSender whatsAppSender,
             ISmsSender smsSender,
+            IBulkFileReader bulkFileReader,
             ILogger<UserService> logger)
         {
             _unitOfWork = unitOfWork;
@@ -47,6 +51,7 @@ namespace iucs.readernest.application.Services
             _emailSender = emailSender;
             _whatsAppSender = whatsAppSender;
             _smsSender = smsSender;
+            _bulkFileReader = bulkFileReader;
             _logger = logger;
         }
 
@@ -60,7 +65,7 @@ namespace iucs.readernest.application.Services
             page = Math.Max(page, 1);
             pageSize = Math.Clamp(pageSize, 1, 100);
 
-            var query = _unitOfWork.Repository<User>().Query().Include(u => u.TeacherProfile).AsQueryable();
+            var query = _unitOfWork.Repository<User>().Query().Include(u => u.TeacherProfile).ThenInclude(t => t!.Department).AsQueryable();
 
             if (role.HasValue)
             {
@@ -91,22 +96,45 @@ namespace iucs.readernest.application.Services
                 .Select(u => u.Id)
                 .ToListAsync(cancellationToken);
 
+            // Fast path: one query for the whole page instead of one round trip per row. This
+            // only fails if a row in THIS page is corrupt (see the comment above), which is
+            // rare — so it's worth trying as a batch first and only paying for per-row
+            // isolation on the pages that actually contain a bad value.
             var items = new List<UserDto>(pageIds.Count);
-            foreach (var id in pageIds)
+            try
             {
-                try
+                var batch = await _unitOfWork.Repository<User>().Query()
+                    .Include(u => u.TeacherProfile).ThenInclude(t => t!.Department)
+                    .Where(u => pageIds.Contains(u.Id))
+                    .ToListAsync(cancellationToken);
+                var byId = batch.ToDictionary(u => u.Id);
+                foreach (var id in pageIds)
                 {
-                    var user = await _unitOfWork.Repository<User>().Query()
-                        .Include(u => u.TeacherProfile)
-                        .FirstAsync(u => u.Id == id, cancellationToken);
-                    items.Add(user.ToDto());
+                    if (byId.TryGetValue(id, out var user)) items.Add(user.ToDto());
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // The batch failed partway through materializing — which row(s) is unknown
+                // (EF surfaces the failure once, not per-row), so fall back to loading this
+                // page one row at a time and skip only the ones that actually don't load.
+                items.Clear();
+                foreach (var id in pageIds)
                 {
-                    // Skipped, not defaulted — this is a corrupt/stale value that needs a real
-                    // data fix, and silently guessing a role or status for it would be worse
-                    // than leaving it off an admin list page.
-                    _logger.LogError(ex, "Failed to load user {UserId} for the Users list; skipping this row.", id);
+                    try
+                    {
+                        var user = await _unitOfWork.Repository<User>().Query()
+                            .Include(u => u.TeacherProfile).ThenInclude(t => t!.Department)
+                            .FirstAsync(u => u.Id == id, cancellationToken);
+                        items.Add(user.ToDto());
+                    }
+                    catch (Exception rowEx) when (rowEx is not OperationCanceledException)
+                    {
+                        // Skipped, not defaulted — this is a corrupt/stale value that needs a real
+                        // data fix, and silently guessing a role or status for it would be worse
+                        // than leaving it off an admin list page.
+                        _logger.LogError(rowEx, "Failed to load user {UserId} for the Users list; skipping this row.", id);
+                    }
                 }
             }
 
@@ -122,7 +150,7 @@ namespace iucs.readernest.application.Services
         public async Task<UserDto> GetAsync(Guid id, CancellationToken cancellationToken = default)
         {
             var user = await _unitOfWork.Repository<User>().Query()
-                .Include(u => u.TeacherProfile)
+                .Include(u => u.TeacherProfile).ThenInclude(t => t!.Department)
                 .FirstOrDefaultAsync(u => u.Id == id, cancellationToken)
                 ?? throw new NotFoundException(nameof(User), id);
 
@@ -133,6 +161,7 @@ namespace iucs.readernest.application.Services
         {
             var teachers = await _unitOfWork.Repository<TeacherProfile>().Query()
                 .Include(t => t.User)
+                .Include(t => t.Department)
                 .Where(t => t.User.Status == UserStatus.Active)
                 .OrderBy(t => t.User.FirstName)
                 .ToListAsync(cancellationToken);
@@ -143,7 +172,8 @@ namespace iucs.readernest.application.Services
                     TeacherProfileId = t.Id,
                     UserId = t.UserId,
                     FullName = $"{t.User.FirstName} {t.User.LastName}".Trim(),
-                    Department = t.Department,
+                    DepartmentId = t.DepartmentId,
+                    DepartmentName = t.Department?.Name,
                 })
                 .ToList();
         }
@@ -175,6 +205,16 @@ namespace iucs.readernest.application.Services
                     .Include(r => r.Permissions)
                     .FirstOrDefaultAsync(r => r.Id == request.RoleDefinitionId.Value, cancellationToken)
                     ?? throw new NotFoundException(nameof(RoleDefinition), request.RoleDefinitionId.Value);
+
+                // Mirrors UsersController.ApplyPermissionPreset's guard — that endpoint only
+                // covers re-assigning an existing Sub Admin's preset, not creating a brand new
+                // one with a RoleDefinitionId already set in the request body, which this was
+                // missing entirely (how a real account once ended up on the "student" preset).
+                if (NonSubAdminPresetNames.Names.Contains(assignedRole.Name))
+                {
+                    throw new DomainValidationException(
+                        $"'{assignedRole.DisplayName}' is a fixed-portal system role, not a Sub Admin preset, and can't be assigned to a new account.");
+                }
             }
 
             var temporaryPin = TemporaryPinGenerator.Generate();
@@ -199,7 +239,7 @@ namespace iucs.readernest.application.Services
                     break;
                 case UserRole.Teacher:
                     await _unitOfWork.Repository<TeacherProfile>()
-                        .AddAsync(new TeacherProfile { User = user, Department = request.Department }, cancellationToken);
+                        .AddAsync(new TeacherProfile { User = user, DepartmentId = request.DepartmentId }, cancellationToken);
                     break;
             }
 
@@ -247,7 +287,7 @@ namespace iucs.readernest.application.Services
         public async Task<UserDto> UpdateAsync(Guid id, UpdateUserRequest request, CancellationToken cancellationToken = default)
         {
             var user = await _unitOfWork.Repository<User>().TrackedQuery()
-                .Include(u => u.TeacherProfile)
+                .Include(u => u.TeacherProfile).ThenInclude(t => t!.Department)
                 .FirstOrDefaultAsync(u => u.Id == id, cancellationToken)
                 ?? throw new NotFoundException(nameof(User), id);
 
@@ -259,9 +299,9 @@ namespace iucs.readernest.application.Services
                 user.TimeZoneId = request.TimeZoneId;
             }
 
-            if (request.Department.HasValue && user.TeacherProfile is not null)
+            if (request.DepartmentId.HasValue && user.TeacherProfile is not null)
             {
-                user.TeacherProfile.Department = request.Department.Value;
+                user.TeacherProfile.DepartmentId = request.DepartmentId.Value;
             }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(User), user.Id.ToString(), cancellationToken: cancellationToken);
@@ -274,6 +314,16 @@ namespace iucs.readernest.application.Services
         {
             var user = await _unitOfWork.Repository<User>().GetByIdAsync(id, cancellationToken)
                 ?? throw new NotFoundException(nameof(User), id);
+
+            // Same blanket rule as ChangeRoleAsync/CreateAsync: Admin accounts are untouchable
+            // through this generic action. Without it, anyone holding UserManagement:Edit — a
+            // routine grant for e.g. a Relationship Manager Sub Admin — could suspend the real
+            // Admin account outright (self-preservation after a privilege-escalation attempt,
+            // or standalone sabotage/denial of service).
+            if (user.Role == UserRole.Admin)
+            {
+                throw new DomainValidationException("Admin accounts can't be changed through this action.");
+            }
 
             var wasActive = user.Status == UserStatus.Active;
             user.Status = status;
@@ -431,6 +481,36 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("Module permissions can only be assigned to Sub Admin users.");
             }
 
+            // Ceiling check: a Sub Admin holding only UserManagement:Edit could otherwise grant
+            // a colleague — or, combined with ResetPinAsync, a colleague's account they then
+            // take over — any module/action neither of them was ever given, including
+            // BillingFinance:Approve or Settings:Edit. PermissionAuthorizationHandler already
+            // lets a real Admin caller through every [HasPermission] check regardless of the
+            // SubAdminPermission table, so only non-Admin callers need this comparison.
+            var currentUser = await _unitOfWork.Repository<User>().GetByIdAsync(currentUserId, cancellationToken)
+                ?? throw new NotFoundException(nameof(User), currentUserId);
+            if (currentUser.Role != UserRole.Admin)
+            {
+                var callerGrants = await _unitOfWork.Repository<SubAdminPermission>().Query()
+                    .Where(p => p.UserId == currentUserId)
+                    .ToDictionaryAsync(p => p.Module, cancellationToken);
+
+                static bool Exceeds(bool requested, bool held) => requested && !held;
+
+                foreach (var dto in permissions)
+                {
+                    callerGrants.TryGetValue(dto.Module, out var callerGrant);
+                    if (Exceeds(dto.CanView, callerGrant?.CanView ?? false)
+                        || Exceeds(dto.CanCreate, callerGrant?.CanCreate ?? false)
+                        || Exceeds(dto.CanEdit, callerGrant?.CanEdit ?? false)
+                        || Exceeds(dto.CanDelete, callerGrant?.CanDelete ?? false)
+                        || Exceeds(dto.CanApprove, callerGrant?.CanApprove ?? false))
+                    {
+                        throw new ForbiddenException($"You can't grant '{dto.Module}' permissions you don't hold yourself.");
+                    }
+                }
+            }
+
             // SubAdminPermission is uniquely indexed on (UserId, Module), so the same module
             // twice in one matrix inserts two colliding rows and fails at SaveChanges as an
             // opaque 500. RoleService.MapPermissions already rejects exactly this for the
@@ -445,6 +525,19 @@ namespace iucs.readernest.application.Services
             // named role; hand-editing individual checkboxes leaves it as-is.
             if (roleDefinitionId.HasValue)
             {
+                // UsersController.ApplyPermissionPreset already checks the preset name before
+                // it ever gets here, but that's this method's only caller today, not a
+                // guarantee for its next one — CreateAsync had the identical class of gap
+                // until this same reserved-name set was pushed down there too. Enforcing it
+                // here as well means the invariant holds regardless of which caller forgets.
+                var assignedRole = await _unitOfWork.Repository<RoleDefinition>().GetByIdAsync(roleDefinitionId.Value, cancellationToken)
+                    ?? throw new NotFoundException(nameof(RoleDefinition), roleDefinitionId.Value);
+                if (NonSubAdminPresetNames.Names.Contains(assignedRole.Name))
+                {
+                    throw new DomainValidationException(
+                        $"'{assignedRole.DisplayName}' is a fixed-portal system role, not a Sub Admin preset, and can't be assigned to an account.");
+                }
+
                 user.RoleDefinitionId = roleDefinitionId;
             }
 
@@ -592,6 +685,18 @@ namespace iucs.readernest.application.Services
             var user = await _unitOfWork.Repository<User>().GetByIdAsync(userId, cancellationToken)
                 ?? throw new NotFoundException(nameof(User), userId);
 
+            // Every account — Admin included — authenticates with email+PIN alone (see
+            // AuthService.LoginAsync), so the PIN this method hands back in the HTTP response
+            // IS the full credential. Without this guard, anyone holding UserManagement:Edit
+            // could reset the Admin account's PIN, read the new one straight off the screen,
+            // and log in as Admin: a full account takeover from a routine, mid-tier grant.
+            // Same blanket "Admin accounts can't be touched through this action" rule as
+            // ChangeRoleAsync/SetStatusAsync.
+            if (user.Role == UserRole.Admin)
+            {
+                throw new DomainValidationException("Admin accounts can't be reset through this action.");
+            }
+
             var temporaryPin = TemporaryPinGenerator.Generate();
             user.PinHash = _passwordHasher.Hash(temporaryPin);
             _unitOfWork.Repository<User>().Update(user);
@@ -633,6 +738,19 @@ namespace iucs.readernest.application.Services
 
             if (user.Role == UserRole.Admin)
             {
+                // Unlike ChangeRoleAsync/SetStatusAsync/ResetPinAsync's blanket "never touch an
+                // Admin" rule, removing one Admin account is a legitimate Admin-to-Admin
+                // offboarding action — but only when the CALLER is also an Admin. The
+                // [HasPermission(UserManagement, Delete)] attribute on this endpoint doesn't
+                // restrict to Admin callers, so without this a Sub Admin holding only
+                // UserManagement:Delete could remove any non-last Admin account outright.
+                var currentUser = await repository.GetByIdAsync(currentUserId, cancellationToken)
+                    ?? throw new NotFoundException(nameof(User), currentUserId);
+                if (currentUser.Role != UserRole.Admin)
+                {
+                    throw new ForbiddenException("Only an Admin can delete another Admin account.");
+                }
+
                 var otherAdminExists = await repository.ExistsAsync(
                     u => u.Role == UserRole.Admin && u.Id != id, cancellationToken);
                 if (!otherAdminExists)
@@ -672,6 +790,77 @@ namespace iucs.readernest.application.Services
 
             await _auditLog.StageAsync(AuditAction.Delete, nameof(User), user.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
+        public async Task<BulkImportResult> BulkImportAsync(
+            Stream file, string fileName, UserRole role, CancellationToken cancellationToken = default)
+        {
+            if (role != UserRole.Parent && role != UserRole.Teacher)
+            {
+                throw new DomainValidationException("Only Parent and Teacher accounts can be bulk-imported.");
+            }
+
+            var rows = _bulkFileReader.ReadRows(file, fileName);
+            var result = new BulkImportResult { TotalRows = rows.Count };
+
+            for (var i = 0; i < rows.Count; i++)
+            {
+                var rowNumber = i + 2;
+                try
+                {
+                    var row = rows[i];
+                    var email = row.GetOrNull("Email") ?? throw new DomainValidationException("Email is required.");
+                    var firstName = row.GetOrNull("FirstName") ?? throw new DomainValidationException("FirstName is required.");
+
+                    Guid? departmentId = null;
+                    if (role == UserRole.Teacher)
+                    {
+                        var departmentName = row.GetOrNull("DepartmentName");
+                        if (departmentName is not null)
+                        {
+                            var department = await _unitOfWork.Repository<Department>()
+                                .FirstOrDefaultAsync(d => d.Name == departmentName, cancellationToken)
+                                ?? throw new NotFoundException($"No department named '{departmentName}'.");
+                            departmentId = department.Id;
+                        }
+                    }
+
+                    await CreateAsync(
+                        new CreateUserRequest
+                        {
+                            Email = email,
+                            FirstName = firstName,
+                            LastName = row.GetOrNull("LastName"),
+                            Phone = row.GetOrNull("Phone"),
+                            Role = role,
+                            DepartmentId = departmentId,
+                        },
+                        cancellationToken);
+                    result.SucceededCount++;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    result.FailedCount++;
+                    result.Errors.Add(new BulkImportRowError { RowNumber = rowNumber, Message = ex.Message });
+                }
+            }
+
+            return result;
+        }
+
+        public async Task<string> ExportCsvAsync(UserRole? role, CancellationToken cancellationToken = default)
+        {
+            // Reuses the same page the Users screen itself pages through, at a size generous
+            // enough to cover a school's whole roster in one export without turning this into
+            // an unbounded table scan if the caller is ever handed a huge role by mistake.
+            var page = await ListAsync(role, null, 1, 5000, cancellationToken);
+            string[] headers = ["Email", "FirstName", "LastName", "Phone", "Role", "Status", "DepartmentName", "CreatedAtUtc"];
+            var rows = page.Items.Select(u => new List<string?>
+            {
+                u.Email, u.FirstName, u.LastName, u.Phone, u.Role.ToString(), u.Status.ToString(),
+                u.DepartmentName, u.CreatedAtUtc.ToString("yyyy-MM-dd"),
+            });
+            return CsvWriter.BuildCsv(headers, rows);
         }
 
         private async Task<bool> IsIntegrationEnabledAsync(string key, CancellationToken cancellationToken)

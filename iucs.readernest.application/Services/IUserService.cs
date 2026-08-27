@@ -71,5 +71,13 @@ namespace iucs.readernest.application.Services
         /// Refuses to delete the caller's own account or the last remaining Admin.
         /// </summary>
         Task DeleteAsync(Guid id, Guid currentUserId, CancellationToken cancellationToken = default);
+
+        /// <summary>Row-by-row: one bad row is recorded as a failure and never aborts the rest —
+        /// same as any other bulk-import entity. Every row is created as <paramref name="role"/>
+        /// (Parent or Teacher — Admin/SubAdmin/AdmissionTeam accounts can't be bulk-created).
+        /// Columns: Email, FirstName, LastName, Phone, DepartmentName (Teacher rows only).</summary>
+        Task<BulkImportResult> BulkImportAsync(Stream file, string fileName, UserRole role, CancellationToken cancellationToken = default);
+
+        Task<string> ExportCsvAsync(UserRole? role, CancellationToken cancellationToken = default);
     }
 }

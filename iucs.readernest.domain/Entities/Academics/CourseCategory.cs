@@ -1,11 +1,10 @@
 using System.ComponentModel.DataAnnotations;
 using iucs.readernest.domain.Entities.Common;
-using iucs.readernest.domain.Enums;
 using Microsoft.EntityFrameworkCore;
 
 namespace iucs.readernest.domain.Entities.Academics
 {
-    [Index(nameof(Name), IsUnique = true)]
+    [Index(nameof(DepartmentId), nameof(Name), IsUnique = true)]
     public class CourseCategory : AuditEntity
     {
         [MaxLength(150)]
@@ -14,6 +13,8 @@ namespace iucs.readernest.domain.Entities.Academics
         [MaxLength(500)]
         public string? Description { get; set; }
 
-        public Department Department { get; set; }
+        public Guid DepartmentId { get; set; }
+
+        public Department Department { get; set; } = null!;
     }
 }

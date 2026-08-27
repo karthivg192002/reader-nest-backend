@@ -27,6 +27,14 @@ namespace iucs.readernest.application.Services
         /// </summary>
         Task AccrueForSessionAsync(ClassSession session, PayoutItemType type, string? note, CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// Admin correction to one accrued line item -- the only way to act on a
+        /// RequiresReview flag (e.g. a teacher's attendance fell well short of the scheduled
+        /// class). Only while the item's payout is still Pending; recalculates the payout's
+        /// TotalAmount from the corrected item and clears the review flag.
+        /// </summary>
+        Task<PayoutDto> AdjustItemAsync(Guid payoutId, Guid itemId, AdjustPayoutItemRequest request, CancellationToken cancellationToken = default);
+
         /// <summary>Locks the month's total and emails the statement to the teacher.</summary>
         Task<PayoutDto> FinalizeAsync(Guid payoutId, CancellationToken cancellationToken = default);
 

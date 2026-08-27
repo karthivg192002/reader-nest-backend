@@ -19,7 +19,7 @@ namespace iucs.readernest.application.Dto.Courses
         [Required]
         public CourseType Type { get; set; }
 
-        /// <summary>Allowed values: 30, 45 or 60 (validated in the service).</summary>
+        /// <summary>Any positive number of minutes (validated in the service).</summary>
         [Required]
         public int DurationMinutes { get; set; }
 
@@ -32,7 +32,7 @@ namespace iucs.readernest.application.Dto.Courses
         public int TotalSessions { get; set; }
 
         [Required]
-        public Department Department { get; set; }
+        public Guid DepartmentId { get; set; }
 
         public bool IsActive { get; set; } = true;
     }

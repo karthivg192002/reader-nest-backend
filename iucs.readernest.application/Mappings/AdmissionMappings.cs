@@ -22,16 +22,19 @@ namespace iucs.readernest.application.Mappings
                 ParentPhone = booking.ParentPhone,
                 ChildName = booking.ChildName,
                 ChildAge = booking.ChildAge,
-                Department = booking.Department,
+                DepartmentId = booking.DepartmentId,
+                DepartmentName = booking.Department?.Name,
                 ConversionStatus = booking.ConversionStatus,
                 FollowUpNotes = booking.FollowUpNotes,
                 ScheduledStartAtUtc = booking.ClassSession?.ScheduledStartAtUtc,
+                ScheduledEndAtUtc = booking.ClassSession?.ScheduledEndAtUtc,
                 MeetingRoomId = booking.ClassSession?.MeetingRoomId,
                 TeacherProfileId = booking.ClassSession?.TeacherProfileId,
                 TeacherName = teacher?.User is { } u ? $"{u.FirstName} {u.LastName}" : null,
                 PayableAmount = booking.ConversionStatus == ConversionStatus.Enrolled ? ConvertedDemoFee : NormalDemoFee,
+                ParentJoinedAtUtc = booking.ParentJoinedAtUtc,
                 Participants = booking.Participants
-                    .Select(p => new DemoParticipantDto { Name = p.Name, Email = p.Email, Phone = p.Phone, IsChild = p.IsChild })
+                    .Select(p => new DemoParticipantDto { Name = p.Name, Email = p.Email, Phone = p.Phone, IsChild = p.IsChild, HasJoined = p.HasJoined })
                     .ToList(),
             };
         }

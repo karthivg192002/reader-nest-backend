@@ -32,5 +32,16 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default);
 
         Task<IReadOnlyList<SessionAttendanceDto>> ListAttendanceAsync(Guid sessionId, CancellationToken cancellationToken = default);
+
+        /// <summary>Join-based capture called by ClassroomHub.JoinSession — see the implementation's doc comment.</summary>
+        Task CaptureJoinAttendanceAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Records a teacher's real departure time, called by ClassroomHub on LeaveSession/
+        /// disconnect — see the implementation's doc comment. Without this, SessionAttendance.
+        /// LeftAtUtc was never populated for a live class, so nothing could ever tell a teacher
+        /// who taught the full class apart from one who joined and left after a few minutes.
+        /// </summary>
+        Task CaptureLeaveAttendanceAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default);
     }
 }

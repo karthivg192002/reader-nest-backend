@@ -31,7 +31,7 @@ namespace iucs.readernest.api.Services
             var reference = $"SIM-{Guid.NewGuid():N}";
             _logger.LogInformation(
                 "Simulated payment link for invoice {InvoiceNumber} via {Method}/{Provider}/{AccountRef} ({Department}): ref {Reference}",
-                invoice.InvoiceNumber, preferredMethodKey, account.GatewayProvider, account.GatewayAccountRef, account.Department, reference);
+                invoice.InvoiceNumber, preferredMethodKey, account.GatewayProvider, account.GatewayAccountRef, account.Department?.Name ?? account.Name, reference);
 
             return Task.FromResult(new PaymentLinkResult
             {
@@ -60,5 +60,11 @@ namespace iucs.readernest.api.Services
             string gatewayReference,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(new GatewayPaymentStatus { State = GatewayPaymentState.Unknown });
+
+        // This class is only ever reached as PaymentGatewayDispatcher's internal fallback, never
+        // registered as IPaymentGateway itself -- IsMethodConfiguredAsync (which decides what a
+        // payer sees in the Pay Now popup) is answered by the dispatcher, not this class.
+        public Task<bool> IsMethodConfiguredAsync(string integrationKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(true);
     }
 }

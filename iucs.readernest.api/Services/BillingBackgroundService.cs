@@ -2,7 +2,9 @@ using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Billing;
 using iucs.readernest.application.Services;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Billing;
+using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using iucs.readernest.domain.Repository;
 using Microsoft.EntityFrameworkCore;
@@ -12,7 +14,8 @@ namespace iucs.readernest.api.Services
     /// <summary>
     /// Auto billing: on an hourly cycle, generates the next invoice for every active
     /// subscription whose billing date has arrived, advances its next-billing pointer
-    /// by the plan's cycle, and flags unpaid invoices past their due date as Overdue.
+    /// by the plan's cycle, flags unpaid invoices past their due date as Overdue, and expires
+    /// any active subscription whose plan's ValidityDays window has passed.
     /// </summary>
     public class BillingBackgroundService : BackgroundService
     {
@@ -117,7 +120,7 @@ namespace iucs.readernest.api.Services
                                 CourseId = subscription.PackagePlan.CourseId,
                                 // Route to the department's payment account (dual-gateway requirement);
                                 // plans without a course default to Phonics
-                                Department = subscription.PackagePlan.Course?.Department ?? Department.Phonics,
+                                DepartmentId = subscription.PackagePlan.Course?.DepartmentId ?? WellKnownDepartments.Phonics,
                                 Amount = subscription.PackagePlan.Price,
                                 DueDate = DateOnly.FromDateTime(now.AddDays(7)),
                             },
@@ -162,6 +165,21 @@ namespace iucs.readernest.api.Services
                     .SetProperty(i => i.UpdatedAtUtc, now),
                 cancellationToken);
 
+            // Validity-days expiry: a plan's ValidityDays computes EndDate once at
+            // subscription creation (see BillingService.CreateSubscriptionAsync); this is the
+            // only place that date is actually enforced. Bulk update, same pattern as the
+            // overdue sweep above -- no need to load full Subscription entities just to flip a
+            // status and clear a pointer.
+            var expiredCount = await unitOfWork.Repository<Subscription>().ExecuteUpdateAsync(
+                s => s.Status == SubscriptionStatus.Active
+                     && s.EndDate != null
+                     && s.EndDate < today,
+                setters => setters
+                    .SetProperty(s => s.Status, SubscriptionStatus.Expired)
+                    .SetProperty(s => s.NextBillingAtUtc, (DateTime?)null)
+                    .SetProperty(s => s.UpdatedAtUtc, now),
+                cancellationToken);
+
             // Commit the subscription pointers before the suspension sweep below queries
             // Invoice via a no-tracking Query() (a direct DB read). The overdue flip above
             // is already committed by its own UPDATE statement, so invoices that turned
@@ -177,7 +195,7 @@ namespace iucs.readernest.api.Services
             var suspendedCount = 0;
             var overdueParents = await unitOfWork.Repository<Invoice>().Query()
                 .Where(i => i.Status == InvoiceStatus.Overdue)
-                .Select(i => new { i.ParentProfileId, i.Id })
+                .Select(i => new { i.ParentProfileId, i.Id, i.InvoiceNumber })
                 .ToListAsync(cancellationToken);
 
             // One query for every already-suspended parent, instead of an ExistsAsync per
@@ -191,6 +209,10 @@ namespace iucs.readernest.api.Services
                     .ToListAsync(cancellationToken))
                 .ToHashSet();
 
+            // Caught live: NotificationType.FeeSuspension existed in the enum with zero templates
+            // using it -- a parent's access got cut off here with no warning or explanation at
+            // all; they'd only find out by trying to access something and being blocked.
+            var newlySuspended = new List<(Guid ParentProfileId, string InvoiceNumber)>();
             foreach (var group in overdueParents.GroupBy(o => o.ParentProfileId))
             {
                 if (alreadySuspendedParentIds.Contains(group.Key))
@@ -198,28 +220,56 @@ namespace iucs.readernest.api.Services
                     continue;
                 }
 
+                var first = group.First();
                 await unitOfWork.Repository<FeeSuspension>().AddAsync(
                     new FeeSuspension
                     {
                         ParentProfileId = group.Key,
-                        InvoiceId = group.First().Id,
+                        InvoiceId = first.Id,
                         Reason = "Automatic suspension: invoice overdue.",
                         SuspendedAtUtc = now,
                     },
                     cancellationToken);
+                newlySuspended.Add((group.Key, first.InvoiceNumber));
                 suspendedCount++;
             }
 
             if (suspendedCount > 0)
             {
                 await unitOfWork.SaveChangesAsync(cancellationToken);
+
+                var notifications = scope.ServiceProvider.GetRequiredService<INotificationService>();
+                var suspendedParentIds = newlySuspended.Select(s => s.ParentProfileId).ToList();
+                var suspendedParentUsers = await unitOfWork.Repository<ParentProfile>().Query()
+                    .Where(p => suspendedParentIds.Contains(p.Id))
+                    .Select(p => new { p.Id, p.User })
+                    .ToDictionaryAsync(p => p.Id, p => p.User, cancellationToken);
+                foreach (var (parentProfileId, invoiceNumber) in newlySuspended)
+                {
+                    if (!suspendedParentUsers.TryGetValue(parentProfileId, out var user))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        await notifications.SendTemplatedEmailAsync(
+                            user.Id, user.Email, NotificationType.FeeSuspension, "fee-suspended-parent",
+                            new Dictionary<string, string> { ["InvoiceNumber"] = invoiceNumber },
+                            cancellationToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "Fee suspension notice failed for parent {ParentProfileId}; continuing with the rest of the batch.", parentProfileId);
+                    }
+                }
             }
 
-            if (dueSubscriptions.Count > 0 || overdueCount > 0 || suspendedCount > 0)
+            if (dueSubscriptions.Count > 0 || overdueCount > 0 || suspendedCount > 0 || expiredCount > 0)
             {
                 _logger.LogInformation(
-                    "Auto billing: generated {InvoiceCount} invoice(s) ({DueCount} subscription(s) due, {FailedCount} failed), marked {OverdueCount} overdue, suspended {SuspendedCount} account(s).",
-                    invoicedCount, dueSubscriptions.Count, failedSubscriptionCount, overdueCount, suspendedCount);
+                    "Auto billing: generated {InvoiceCount} invoice(s) ({DueCount} subscription(s) due, {FailedCount} failed), marked {OverdueCount} overdue, suspended {SuspendedCount} account(s), expired {ExpiredCount} subscription(s).",
+                    invoicedCount, dueSubscriptions.Count, failedSubscriptionCount, overdueCount, suspendedCount, expiredCount);
             }
 
             // Pull-based payment settlement: catch any gateway payment whose webhook never

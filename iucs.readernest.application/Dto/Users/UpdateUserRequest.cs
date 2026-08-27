@@ -20,6 +20,6 @@ namespace iucs.readernest.application.Dto.Users
         public string? TimeZoneId { get; set; }
 
         /// <summary>Primary department for teachers; ignored for other roles. Null means "leave unchanged".</summary>
-        public Department? Department { get; set; }
+        public Guid? DepartmentId { get; set; }
     }
 }

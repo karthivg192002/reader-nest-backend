@@ -7,6 +7,7 @@ using iucs.readernest.api.Middleware;
 using iucs.readernest.api.Services;
 using iucs.readernest.application;
 using iucs.readernest.application.Common.Interfaces;
+using iucs.readernest.application.Common.Options;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Common;
 using iucs.readernest.domain.Data;
@@ -27,7 +28,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
-        // Enums travel as their names ("Teacher", "Phonics"), matching how they are stored
+        // Enums travel as their names ("Teacher", "Overdue"), matching how they are stored
         options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddOpenApi();
 
@@ -37,10 +38,6 @@ builder.Services.AddScoped<ICurrentUserService, CurrentUserService>();
 builder.Services.AddScoped<AuditableEntityInterceptor>();
 
 // Persistence
-//builder.Services.AddDbContext<ReaderNestDbContext>((serviceProvider, options) =>
-//    options.UseNpgsql(builder.Configuration.GetConnectionString("ReaderNestDb"))
-//        .AddInterceptors(serviceProvider.GetRequiredService<AuditableEntityInterceptor>()));
-//builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 var connectionString =
     builder.Configuration.GetConnectionString("ReaderNestDb") ??
     Environment.GetEnvironmentVariable("ConnectionStrings__ReaderNestDb");
@@ -71,9 +68,19 @@ builder.Services.AddScoped<ISmsSender, SmsSender>();
 // of silently depending on which environment you're in. Configured via Storage:S3:* (real
 // credentials come from user-secrets locally, environment variables in prod — never committed).
 builder.Services.AddSingleton<IFileStorage, S3FileStorage>();
+// Parses uploaded bulk-import spreadsheets (.csv/.xlsx) for Users/Students/Departments/
+// Courses/Package Plans/Quiz Questions — stateless, so singleton is fine.
+builder.Services.AddSingleton<IBulkFileReader, BulkFileReader>();
 // Signs room-scoped Jitsi join tokens from the DB "jitsi" integration's appId/appSecret;
 // no-ops (null token, unsigned join) until an admin sets them — see JITSI_ARCHITECTURE.md.
 builder.Services.AddSingleton<IJitsiTokenService, JitsiTokenService>();
+// Renders the "Bill of Supply" invoice PDF (QuestPDF) — stateless beyond a static embedded
+// logo loaded once, so singleton is fine.
+builder.Services.AddSingleton<IInvoicePdfGenerator, InvoicePdfGenerator>();
+// Server Monitoring dashboard: polls each server's rn-status agent (Monitoring:Servers config).
+// Short timeout so one down/slow server can't stall the whole summary request.
+builder.Services.AddHttpClient("Prometheus", client => client.Timeout = TimeSpan.FromSeconds(5));
+builder.Services.AddScoped<IPrometheusClient, PrometheusClient>();
 // Dual-gateway abstraction: the dispatcher routes to Razorpay/Cashfree using live
 // credentials from Settings → Integrations, and falls back to the simulated gateway
 // while an integration is disabled or its keys are blank.
@@ -85,6 +92,9 @@ builder.Services.AddScoped<IPaymentGateway, iucs.readernest.api.Services.Payment
 builder.Services.AddHostedService<BillingBackgroundService>();
 // Session reminders, delayed-session alerts
 builder.Services.AddHostedService<SessionReminderBackgroundService>();
+// Automatic no-show detection: flags a session once its grace period elapses with one
+// side never having joined, instead of relying solely on a human clicking "Mark No-Show"
+builder.Services.AddHostedService<NoShowDetectionBackgroundService>();
 // CRM integration: lead webhooks, no-op until Integrations:CrmWebhookUrl is set
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<ICrmNotifier, WebhookCrmNotifier>();
@@ -95,6 +105,7 @@ builder.Services.AddHostedService<ProgressReportsBackgroundService>();
 
 // Authentication: JWT bearer
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
+builder.Services.Configure<MonitoringOptions>(builder.Configuration.GetSection(MonitoringOptions.SectionName));
 var jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>()
     ?? throw new InvalidOperationException("Missing 'Jwt' configuration section.");
 if (string.IsNullOrWhiteSpace(jwt.SigningKey) || Encoding.UTF8.GetByteCount(jwt.SigningKey) < 32)
@@ -189,6 +200,10 @@ builder.Services.AddMemoryCache();
 
 // Real-time classroom layer (roster, whiteboard sync, quizzes, celebrations)
 builder.Services.AddSignalR();
+
+// Live Server Monitoring push (replaces the dashboard's client-side poll)
+builder.Services.AddSingleton<iucs.readernest.api.Hubs.MonitoringConnectionTracker>();
+builder.Services.AddHostedService<iucs.readernest.api.Services.MonitoringBroadcastService>();
 
 // Brute-force protection on login: framework-provided rate limiting (built into
 // ASP.NET Core since .NET 7, no extra package). Rejects immediately over the limit
@@ -313,6 +328,7 @@ app.UseRateLimiter();
 
 app.MapControllers();
 app.MapHub<iucs.readernest.api.Hubs.ClassroomHub>("/hubs/classroom");
+app.MapHub<iucs.readernest.api.Hubs.MonitoringHub>("/hubs/monitoring");
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok", timestampUtc = DateTime.UtcNow }));
 

@@ -1,3 +1,4 @@
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Payouts;
 using iucs.readernest.application.Mappings;
@@ -12,8 +13,6 @@ namespace iucs.readernest.application.Services
 {
     public class PayoutService : IPayoutService
     {
-        private static readonly int[] AllowedDurations = [30, 45, 60];
-
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
         private readonly INotificationService _notificationService;
@@ -30,7 +29,7 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default)
         {
             var query = _unitOfWork.Repository<PayoutRate>().Query()
-                .Include(r => r.TeacherProfile).ThenInclude(t => t.User);
+                .Include(r => r.TeacherProfile).ThenInclude(t => t!.User);
 
             IQueryable<PayoutRate> filtered = query;
             if (teacherProfileId.HasValue)
@@ -39,26 +38,21 @@ namespace iucs.readernest.application.Services
             }
 
             var rates = await filtered
-                .OrderBy(r => r.TeacherProfileId).ThenBy(r => r.DurationMinutes).ThenByDescending(r => r.EffectiveFrom)
+                .OrderBy(r => r.TeacherProfileId).ThenByDescending(r => r.EffectiveFrom)
                 .ToListAsync(cancellationToken);
             return rates.Select(r => r.ToDto()).ToList();
         }
 
         public async Task<PayoutRateDto> SetRateAsync(SavePayoutRateRequest request, CancellationToken cancellationToken = default)
         {
-            if (!AllowedDurations.Contains(request.DurationMinutes))
-            {
-                throw new DomainValidationException("Duration must be 30, 45 or 60 minutes.");
-            }
-
             // A rate card drives real money with no downstream sanity check, so the bounds are
             // enforced here rather than trusted from the DTO. A negative rate makes every
             // completed class deduct from the teacher instead of paying them; a negative penalty
             // percent inverts the sign of the no-show deduction (-(rate * -100 / 100) = +rate),
             // silently turning a missed class into a bonus.
-            if (request.RatePerSession < 0)
+            if (request.RatePerMinute < 0)
             {
-                throw new DomainValidationException("Rate per session cannot be negative.");
+                throw new DomainValidationException("Rate per minute cannot be negative.");
             }
 
             // Deliberately NOT capped at 100: deducting more than the missed session was worth
@@ -82,11 +76,10 @@ namespace iucs.readernest.application.Services
                 }
             }
 
-            // Same teacher/duration/effective-date updates in place; a new effective
-            // date appends a row so past payouts stay reproducible.
+            // Same teacher/effective-date updates in place; a new effective date appends a
+            // row so past payouts stay reproducible.
             var rate = await _unitOfWork.Repository<PayoutRate>().FirstOrDefaultAsync(
                 r => r.TeacherProfileId == request.TeacherProfileId
-                     && r.DurationMinutes == request.DurationMinutes
                      && r.EffectiveFrom == request.EffectiveFrom,
                 cancellationToken);
 
@@ -95,13 +88,12 @@ namespace iucs.readernest.application.Services
                 rate = new PayoutRate
                 {
                     TeacherProfileId = request.TeacherProfileId,
-                    DurationMinutes = request.DurationMinutes,
                     EffectiveFrom = request.EffectiveFrom,
                 };
                 await _unitOfWork.Repository<PayoutRate>().AddAsync(rate, cancellationToken);
             }
 
-            rate.RatePerSession = request.RatePerSession;
+            rate.RatePerMinute = request.RatePerMinute;
             rate.TeacherNoShowPenaltyPercent = request.TeacherNoShowPenaltyPercent;
             rate.IsActive = true;
 
@@ -109,7 +101,7 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             var saved = await _unitOfWork.Repository<PayoutRate>().Query()
-                .Include(r => r.TeacherProfile).ThenInclude(t => t.User)
+                .Include(r => r.TeacherProfile).ThenInclude(t => t!.User)
                 .FirstAsync(r => r.Id == rate.Id, cancellationToken);
             return saved.ToDto();
         }
@@ -169,7 +161,6 @@ namespace iucs.readernest.application.Services
             // statement, never silent.
             var rate = await _unitOfWork.Repository<PayoutRate>().Query()
                 .Where(r => r.TeacherProfileId == session.TeacherProfileId
-                            && r.DurationMinutes == durationMinutes
                             && r.IsActive
                             && r.EffectiveFrom <= sessionDate)
                 .OrderByDescending(r => r.EffectiveFrom)
@@ -177,33 +168,84 @@ namespace iucs.readernest.application.Services
 
             rate ??= await _unitOfWork.Repository<PayoutRate>().Query()
                 .Where(r => r.TeacherProfileId == null
-                            && r.DurationMinutes == durationMinutes
                             && r.IsActive
                             && r.EffectiveFrom <= sessionDate)
                 .OrderByDescending(r => r.EffectiveFrom)
                 .FirstOrDefaultAsync(cancellationToken);
 
+            // Priced off the scheduled duration, not the teacher's actual attendance --
+            // a session's full rate is fixed the moment it's scheduled, so a dropped
+            // connection or early finish doesn't shrink pay on its own (that's what
+            // RequiresReview below is for; it flags the case for a human, never changes
+            // the amount itself).
+            var sessionRate = Math.Round((rate?.RatePerMinute ?? 0m) * durationMinutes, 2);
             var amount = type switch
             {
-                PayoutItemType.SessionEarning => rate?.RatePerSession ?? 0m,
-                PayoutItemType.StudentNoShowWaiting => rate?.RatePerSession ?? 0m,
+                PayoutItemType.SessionEarning => sessionRate,
+                PayoutItemType.StudentNoShowWaiting => sessionRate,
                 // The configured no-show penalty (WBS "Penalty configuration"): a percentage
                 // of the session rate, so centres can deduct less, exactly, or more than
                 // the missed session was worth.
                 PayoutItemType.TeacherNoShowDeduction =>
-                    -Math.Round((rate?.RatePerSession ?? 0m) * (rate?.TeacherNoShowPenaltyPercent ?? 100m) / 100m, 2),
+                    -Math.Round(sessionRate * (rate?.TeacherNoShowPenaltyPercent ?? 100m) / 100m, 2),
                 _ => 0m,
             };
 
             if (rate is null)
             {
                 note = string.IsNullOrEmpty(note)
-                    ? $"No payout rate configured for {durationMinutes}-minute sessions."
-                    : $"{note} (no payout rate configured for {durationMinutes}-minute sessions)";
+                    ? "No payout rate configured for this teacher."
+                    : $"{note} (no payout rate configured for this teacher)";
             }
             else if (type == PayoutItemType.TeacherNoShowDeduction && rate.TeacherNoShowPenaltyPercent != 100m)
             {
                 note = $"{note} ({rate.TeacherNoShowPenaltyPercent:0.#}% of session rate)";
+            }
+
+            // Full scheduled-duration pay still accrues even when the teacher's captured
+            // attendance was much shorter than the class -- a dropped connection, a child
+            // needing to stop early, and a teacher genuinely cutting the class short all look
+            // identical from timestamps alone, and only a human reviewing the specific case can
+            // tell them apart (see PayoutItem.RequiresReview's own doc comment). This only flags
+            // for review; it never changes the amount itself.
+            var requiresReview = false;
+            if (type == PayoutItemType.SessionEarning && durationMinutes > 0)
+            {
+                var attendance = await _unitOfWork.Repository<SessionAttendance>().Query()
+                    .Where(a => a.ClassSessionId == session.Id && a.TeacherProfileId == session.TeacherProfileId)
+                    .FirstOrDefaultAsync(cancellationToken);
+
+                if (attendance?.JoinedAtUtc is { } joinedAtUtc)
+                {
+                    // LeftAtUtc is only set once the teacher's hub connection actually
+                    // disconnects, which for a self-completed class happens AFTER this call
+                    // (Complete → then the page unmounts and drops the connection) -- so at this
+                    // exact moment it is only populated when someone completes the class well
+                    // after the teacher already left (e.g. an admin cleaning up later). Falling
+                    // back to "now" correctly treats a still-connected teacher's own Complete
+                    // click as the real end of their attendance.
+                    var attendedEndUtc = attendance.LeftAtUtc ?? DateTime.UtcNow;
+                    var attendedMinutes = (attendedEndUtc - joinedAtUtc).TotalMinutes;
+                    var minFraction = await PayrollSettings.GetMinAttendanceFractionForReviewAsync(_unitOfWork, cancellationToken);
+                    if (attendedMinutes < durationMinutes * minFraction)
+                    {
+                        requiresReview = true;
+                        var attendedNote = $"Teacher attended only {Math.Max(0, attendedMinutes):0} of {durationMinutes} scheduled minutes -- review before finalizing.";
+                        note = string.IsNullOrEmpty(note) ? attendedNote : $"{note} ({attendedNote})";
+                    }
+                }
+                else
+                {
+                    // No SessionAttendance row at all (or one with no JoinedAtUtc) -- the
+                    // platform has zero evidence the teacher ever actually joined. Completing a
+                    // session doesn't require having joined the live classroom hub first (an
+                    // admin, or the teacher via a direct API call, can mark it done regardless),
+                    // so this is at least as worth a human's attention as attendance that fell
+                    // short -- arguably more, since here there is no attendance at all to weigh.
+                    requiresReview = true;
+                    const string noAttendanceNote = "No attendance was ever recorded for the teacher on this session -- review before finalizing.";
+                    note = string.IsNullOrEmpty(note) ? noAttendanceNote : $"{note} ({noAttendanceNote})";
+                }
             }
 
             var payout = await GetOrCreateCurrentPayoutAsync(
@@ -222,8 +264,52 @@ namespace iucs.readernest.application.Services
                 Type = type,
                 Amount = amount,
                 Note = note,
+                RequiresReview = requiresReview,
             });
             payout.TotalAmount += amount;
+        }
+
+        public async Task<PayoutDto> AdjustItemAsync(
+            Guid payoutId,
+            Guid itemId,
+            AdjustPayoutItemRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            // Load tracked (Query()/BaseQuery is AsNoTracking; mutating that never persists).
+            var payout = await _unitOfWork.Repository<Payout>().FirstOrDefaultAsync(p => p.Id == payoutId, cancellationToken)
+                ?? throw new NotFoundException(nameof(Payout), payoutId);
+
+            if (payout.Status != PayoutStatus.Pending)
+            {
+                throw new DomainValidationException(
+                    $"A payout in status '{payout.Status}' can no longer have its items adjusted.");
+            }
+
+            var item = await _unitOfWork.Repository<PayoutItem>().TrackedQuery()
+                .FirstOrDefaultAsync(i => i.Id == itemId && i.PayoutId == payoutId, cancellationToken)
+                ?? throw new NotFoundException(nameof(PayoutItem), itemId);
+
+            var reason = request.Reason.Trim();
+            if (reason.Length == 0)
+            {
+                throw new DomainValidationException("A reason is required to adjust a payout item.");
+            }
+
+            var delta = request.NewAmount - item.Amount;
+            var adjustmentNote = $"Adjusted from {item.Amount:0.00} to {request.NewAmount:0.00}: {reason}";
+            item.Note = string.IsNullOrEmpty(item.Note) ? adjustmentNote : $"{item.Note} ({adjustmentNote})";
+            item.Amount = request.NewAmount;
+            item.RequiresReview = false;
+            _unitOfWork.Repository<PayoutItem>().Update(item);
+
+            payout.TotalAmount += delta;
+            _unitOfWork.Repository<Payout>().Update(payout);
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(PayoutItem), item.Id.ToString(),
+                changesJson: $"{{\"reason\":\"{reason}\",\"delta\":{delta}}}", cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return (await BaseQuery().FirstAsync(p => p.Id == payoutId, cancellationToken)).ToDto();
         }
 
         public async Task<PayoutDto> FinalizeAsync(Guid payoutId, CancellationToken cancellationToken = default)
@@ -241,8 +327,27 @@ namespace iucs.readernest.application.Services
                 .Where(i => i.PayoutId == payoutId)
                 .ToListAsync(cancellationToken);
 
+            // A flag nobody is forced to look at is decoration, not a safeguard. AdjustItemAsync
+            // clears RequiresReview whether or not the amount actually changes, so "reviewed, full
+            // amount stands" is a real, one-line-noted admin decision, not this check being worked
+            // around.
+            if (items.Any(i => i.RequiresReview))
+            {
+                throw new DomainValidationException(
+                    "This payout has item(s) still flagged for review (teacher attendance fell well short of the scheduled class). Adjust or confirm each one before finalizing.");
+            }
+
             payout.Status = PayoutStatus.Finalized;
-            payout.TotalAmount = items.Sum(i => i.Amount);
+            // Floored at zero: TeacherNoShowPenaltyPercent is deliberately allowed up to 1000%
+            // (SetRateAsync's own comment — "centres can deduct... more than the missed session
+            // was worth"), so a teacher whose only accrued item this period is one heavily
+            // penalized no-show can otherwise finalize to a genuinely negative total. Nothing
+            // downstream expects that: this exact value is the "Total" token in the
+            // payout-statement email below and the salary-slip email MarkPaidAsync sends later,
+            // so an unfloored negative total would be emailed to the teacher as if it meant
+            // "you owe us money" — never the intent of a deduction, which should read as "you
+            // earned nothing this period," not a debt.
+            payout.TotalAmount = Math.Max(0m, items.Sum(i => i.Amount));
             payout.FinalizedAtUtc = DateTime.UtcNow;
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(Payout), payout.Id.ToString(), cancellationToken: cancellationToken);
@@ -380,7 +485,7 @@ namespace iucs.readernest.application.Services
         private IQueryable<Payout> BaseQuery()
         {
             return _unitOfWork.Repository<Payout>().Query()
-                .Include(p => p.Items)
+                .Include(p => p.Items).ThenInclude(i => i.ClassSession).ThenInclude(cs => cs!.Batch)
                 .Include(p => p.TeacherProfile).ThenInclude(t => t.User);
         }
     }

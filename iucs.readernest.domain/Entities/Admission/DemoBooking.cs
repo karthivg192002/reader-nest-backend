@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Common;
 using iucs.readernest.domain.Entities.Sessions;
@@ -33,6 +34,8 @@ namespace iucs.readernest.domain.Entities.Admission
 
         public int? ChildAge { get; set; }
 
+        public Guid? DepartmentId { get; set; }
+
         public Department? Department { get; set; }
 
         public ConversionStatus ConversionStatus { get; set; } = ConversionStatus.DemoScheduled;
@@ -47,6 +50,17 @@ namespace iucs.readernest.domain.Entities.Admission
         public Guid? InvoiceId { get; set; }
 
         public Invoice? Invoice { get; set; }
+
+        /// <summary>
+        /// Join-based attendance capture for the primary parent (PDF's "System Marks
+        /// Attendance", extended to demo leads): set the first time a signed-in account
+        /// whose email matches <see cref="ParentEmail"/> joins this demo's classroom hub.
+        /// A demo lead has no <see cref="Entities.Users.User"/>/<see cref="Entities.Users.Child"/>
+        /// row to hang a <see cref="Sessions.SessionAttendance"/> entry off of (that table
+        /// requires a real Child or TeacherProfile FK), so this lightweight field is the demo
+        /// equivalent — mirrors <see cref="DemoParticipant.HasJoined"/> for additional invitees.
+        /// </summary>
+        public DateTime? ParentJoinedAtUtc { get; set; }
 
         public ICollection<DemoParticipant> Participants { get; set; } = new List<DemoParticipant>();
     }

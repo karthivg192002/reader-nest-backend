@@ -10,6 +10,8 @@
 
   <ItemGroup>
     <PackageReference Include="AWSSDK.S3" Version="4.0.102.1" />
+    <!-- Bulk-import .xlsx parsing only (BulkFileReader) — pure .NET, no Excel install needed. -->
+    <PackageReference Include="ClosedXML" Version="0.104.2" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.4" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.4" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.4">
@@ -21,11 +23,18 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.21.0" />
+    <PackageReference Include="QuestPDF" Version="2026.8.0" />
     <PackageReference Include="Scalar.AspNetCore" Version="2.16.11" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\iucs.readernest.application\iucs.readernest.application.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Bundled into the assembly (not deployed as a loose file) so InvoicePdfGenerator can
+         load it via GetManifestResourceStream regardless of the process's working directory. -->
+    <EmbeddedResource Include="Assets\invoice-logo.png" />
   </ItemGroup>
 
 </Project>

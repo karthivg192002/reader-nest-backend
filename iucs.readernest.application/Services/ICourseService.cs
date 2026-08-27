@@ -1,3 +1,4 @@
+using iucs.readernest.application.Dto.Common;
 using iucs.readernest.application.Dto.Courses;
 
 namespace iucs.readernest.application.Services
@@ -18,5 +19,12 @@ namespace iucs.readernest.application.Services
         Task<CourseDto> CreateAsync(SaveCourseRequest request, CancellationToken cancellationToken = default);
 
         Task<CourseDto> UpdateAsync(Guid id, SaveCourseRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>Row-by-row. Columns: DepartmentName, CategoryName, Name, Type (Individual/Group),
+        /// DurationMinutes, Price, TotalSessions, IsActive. DepartmentName must match an existing
+        /// department; CategoryName is matched within that department or created if new.</summary>
+        Task<BulkImportResult> BulkImportAsync(Stream file, string fileName, CancellationToken cancellationToken = default);
+
+        Task<string> ExportCsvAsync(bool includeInactive, CancellationToken cancellationToken = default);
     }
 }

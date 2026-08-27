@@ -1,5 +1,4 @@
 using System.ComponentModel.DataAnnotations;
-using iucs.readernest.domain.Enums;
 
 namespace iucs.readernest.application.Dto.Courses
 {
@@ -11,7 +10,9 @@ namespace iucs.readernest.application.Dto.Courses
 
         public string? Description { get; set; }
 
-        public Department Department { get; set; }
+        public Guid DepartmentId { get; set; }
+
+        public string DepartmentName { get; set; } = null!;
     }
 
     public class CreateCourseCategoryRequest
@@ -24,6 +25,6 @@ namespace iucs.readernest.application.Dto.Courses
         public string? Description { get; set; }
 
         [Required]
-        public Department Department { get; set; }
+        public Guid DepartmentId { get; set; }
     }
 }

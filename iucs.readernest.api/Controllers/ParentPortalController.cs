@@ -111,7 +111,7 @@ namespace iucs.readernest.api.Controllers
   <div class="muted">Issued {{invoice.IssuedAtUtc:dd MMM yyyy}} &middot; Due {{invoice.DueDate:dd MMM yyyy}} &middot; <span class="badge">{{invoice.Status}}</span></div>
   <table>
     <tr><th>Description</th><th style="text-align:right">Amount ({{invoice.Currency}})</th></tr>
-    <tr><td>{{invoice.Department}} programme fees</td><td style="text-align:right">{{invoice.Amount:0.00}}</td></tr>
+    <tr><td>{{invoice.DepartmentName}} programme fees</td><td style="text-align:right">{{invoice.Amount:0.00}}</td></tr>
     <tr><td>Paid to date</td><td style="text-align:right">-{{invoice.AmountPaid:0.00}}</td></tr>
     <tr class="total"><td>Balance due</td><td style="text-align:right">{{balance:0.00}}</td></tr>
   </table>

@@ -148,6 +148,34 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _sessionService.AddRecordingAsync(id, request, cancellationToken));
         }
 
+        /// <summary>
+        /// Machine-to-machine: the Jibri finalize-recording hook on the video server calls this
+        /// once a recording finishes, identifying the class by Jitsi room name (it has no
+        /// ClassSession id, and no logged-in user to authorize as) — see
+        /// docs/JITSI_ARCHITECTURE.md. Deliberately anonymous at the ASP.NET auth layer: the
+        /// bearer token in the Authorization header is validated inside the service against the
+        /// same appId/appSecret as room-join tokens, which is the actual authorization here.
+        /// Returns 204 rather than a recording body when the room isn't a known ClassSession
+        /// (personal/demo rooms) — not an error, just nothing to attach.
+        /// </summary>
+        [HttpPost("recordings/finalize")]
+        [AllowAnonymous]
+        public async Task<ActionResult<SessionRecordingDto>> FinalizeJibriRecording(
+            FinalizeJibriRecordingRequest request,
+            CancellationToken cancellationToken)
+        {
+            string? bearerToken = null;
+            var header = Request.Headers.Authorization.ToString();
+            if (header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            {
+                bearerToken = header["Bearer ".Length..];
+            }
+
+            var recording = await _sessionService.FinalizeJibriRecordingAsync(
+                request.RoomName, bearerToken, request.StorageUrl, request.DurationSeconds, cancellationToken);
+            return recording is null ? NoContent() : Ok(recording);
+        }
+
         /// <summary>Parents see their own child's recordings only via the scoped parent-portal resources endpoint.</summary>
         [HttpGet("{id:guid}/recordings")]
         [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]

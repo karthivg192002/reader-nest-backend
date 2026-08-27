@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Security.Claims;
+using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
 using Microsoft.AspNetCore.Authorization;
@@ -19,14 +20,24 @@ namespace iucs.readernest.api.Hubs
     {
         private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, ParticipantState>> Rooms = new();
         private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, int>> Scores = new();
+        // Keyed "{sessionId}:{connectionId}:{questionIndex}" — see AnswerQuiz for why this exists.
+        private static readonly ConcurrentDictionary<string, byte> AnsweredQuestions = new();
 
         private readonly ISessionService _sessionService;
         private readonly IGamificationService _gamificationService;
+        private readonly IAcademicOpsService _academicOpsService;
+        private readonly IClassroomPresenceTracker _presenceTracker;
 
-        public ClassroomHub(ISessionService sessionService, IGamificationService gamificationService)
+        public ClassroomHub(
+            ISessionService sessionService,
+            IGamificationService gamificationService,
+            IAcademicOpsService academicOpsService,
+            IClassroomPresenceTracker presenceTracker)
         {
             _sessionService = sessionService;
             _gamificationService = gamificationService;
+            _academicOpsService = academicOpsService;
+            _presenceTracker = presenceTracker;
         }
 
         public record ParticipantState(string Name, string Role, bool HandRaised);
@@ -115,8 +126,14 @@ namespace iucs.readernest.api.Hubs
             }
 
             await Groups.AddToGroupAsync(Context.ConnectionId, Group(sessionId));
+            _presenceTracker.UserJoined(sessionId, Context.ConnectionId);
             await BroadcastRosterAsync(sessionId);
             await SendLeaderboardAsync(sessionId);
+
+            // PDF's "System Marks Attendance" — join-based capture, fired now that the caller
+            // is confirmed to genuinely belong to this session. Best-effort by design (see the
+            // method's own doc comment); never allowed to affect the join that already succeeded.
+            await _academicOpsService.CaptureJoinAttendanceAsync(sessionGuid, userId, Context.ConnectionAborted);
         }
 
         public async Task LeaveSession(string sessionId)
@@ -182,7 +199,18 @@ namespace iucs.readernest.api.Hubs
             await Clients.Group(Group(sessionId)).SendAsync("QuizEnded");
         }
 
-        /// <summary>Student answer: correct answers score a star; the leaderboard broadcasts live.</summary>
+        /// <summary>
+        /// Student answer: correct answers score a star; the leaderboard broadcasts live.
+        /// `correct` is reported by the client and isn't independently verifiable here — the
+        /// quiz question bank lives entirely in the frontend, so the server has no way to look
+        /// up the actual right answer for a given questionIndex. That means a single dishonest
+        /// claim per question can't be ruled out architecturally, but this method used to be
+        /// callable directly (bypassing the UI's own one-answer-per-question guard) any number
+        /// of times for the same question, letting one participant repeatedly credit themselves
+        /// and inflate the whole class's live leaderboard. The dedup below caps the exposure at
+        /// one claim per (connection, question) — matching what the UI already enforces — rather
+        /// than leaving it fully open to a direct hub invoke.
+        /// </summary>
         public async Task AnswerQuiz(string sessionId, int questionIndex, int selectedIndex, bool correct)
         {
             if (!IsJoined(sessionId))
@@ -190,14 +218,59 @@ namespace iucs.readernest.api.Hubs
                 return;
             }
 
+            if (!AnsweredQuestions.TryAdd($"{sessionId}:{Context.ConnectionId}:{questionIndex}", 0))
+            {
+                return;
+            }
+
             var name = UserNameFor(sessionId);
             if (correct)
             {
-                var scores = Scores.GetOrAdd(sessionId, _ => new ConcurrentDictionary<string, int>());
-                scores.AddOrUpdate(name, 1, (_, current) => current + 1);
+                AddLiveStar(sessionId, name);
             }
 
             await Clients.Group(Group(sessionId)).SendAsync("QuizAnswer", name, questionIndex, selectedIndex, correct);
+            await SendLeaderboardAsync(sessionId);
+        }
+
+        /// <summary>
+        /// Live-leaderboard bump for completing a whiteboard mini-game (drag & drop / tag &
+        /// match / hotspot) — these activities only fire their completion callback once every
+        /// item is correctly placed, so "completed" already means "correct," same as a right
+        /// quiz answer. This only keeps everyone's in-room leaderboard view in sync instantly;
+        /// the durable record (StudentAward row, milestone auto-grant) is the client's separate
+        /// REST call to POST /api/gamification/awards, exactly like the quiz's own star flow.
+        /// </summary>
+        public async Task AwardStar(string sessionId)
+        {
+            if (!IsJoined(sessionId))
+            {
+                return;
+            }
+
+            AddLiveStar(sessionId, UserNameFor(sessionId));
+            await SendLeaderboardAsync(sessionId);
+        }
+
+        /// <summary>
+        /// Teacher-initiated star for a named student — the manual counterpart to the
+        /// self-attributed <see cref="AwardStar"/> above (which only ever credits the caller's
+        /// own name), for rewarding participation that doesn't happen to run through the quiz
+        /// or a whiteboard mini-game. Teacher-only: this is the same trust boundary
+        /// GamificationService.GrantAsync already draws server-side (a Parent may only
+        /// self-report their own child's Star; a Teacher/Admin may name anyone in the class),
+        /// mirrored here since this call only touches the ephemeral live leaderboard — the
+        /// durable award is the client's separate POST /api/gamification/awards, which
+        /// re-checks that same rule independently.
+        /// </summary>
+        public async Task AwardStarToParticipant(string sessionId, string participantName)
+        {
+            if (!IsTeacherInRoom(sessionId) || string.IsNullOrWhiteSpace(participantName))
+            {
+                return;
+            }
+
+            AddLiveStar(sessionId, participantName.Trim());
             await SendLeaderboardAsync(sessionId);
         }
 
@@ -247,13 +320,35 @@ namespace iucs.readernest.api.Hubs
 
         private async Task RemoveFromSessionAsync(string sessionId)
         {
+            _presenceTracker.UserLeft(sessionId, Context.ConnectionId);
+
             if (Rooms.TryGetValue(sessionId, out var room))
             {
-                room.TryRemove(Context.ConnectionId, out _);
+                room.TryRemove(Context.ConnectionId, out var removedState);
+
+                // Real departure time, for payout accuracy (see CaptureLeaveAttendanceAsync's own
+                // doc comment) — without this, nothing ever recorded when a teacher actually left
+                // a live class, so one who taught the whole thing and one who left after a few
+                // minutes were indistinguishable. Only worth the lookup for the departing
+                // participant's own role, not every student/parent leaving too.
+                if (removedState?.Role == "teacher"
+                    && Guid.TryParse(sessionId, out var sessionGuid)
+                    && Guid.TryParse(Context.User?.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
+                {
+                    // CancellationToken.None, deliberately: this is exactly the abrupt-disconnect
+                    // (network drop) case that matters most to capture, and Context.ConnectionAborted
+                    // may already be signalled by the time OnDisconnectedAsync runs.
+                    await _academicOpsService.CaptureLeaveAttendanceAsync(sessionGuid, userId, CancellationToken.None);
+                }
+
                 if (room.IsEmpty)
                 {
                     Rooms.TryRemove(sessionId, out _);
                     Scores.TryRemove(sessionId, out _); // class over — scoreboard resets
+                    foreach (var key in AnsweredQuestions.Keys.Where(k => k.StartsWith($"{sessionId}:", StringComparison.Ordinal)))
+                    {
+                        AnsweredQuestions.TryRemove(key, out _);
+                    }
                 }
                 else
                 {
@@ -262,6 +357,13 @@ namespace iucs.readernest.api.Hubs
             }
 
             await Groups.RemoveFromGroupAsync(Context.ConnectionId, Group(sessionId));
+        }
+
+        /// <summary>Shared by AnswerQuiz and AwardStar — bumps the in-memory live score only.</summary>
+        private static void AddLiveStar(string sessionId, string name)
+        {
+            var scores = Scores.GetOrAdd(sessionId, _ => new ConcurrentDictionary<string, int>());
+            scores.AddOrUpdate(name, 1, (_, current) => current + 1);
         }
 
         private string UserNameFor(string sessionId) =>

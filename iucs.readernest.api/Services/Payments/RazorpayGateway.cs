@@ -1,8 +1,10 @@
 using System.Text;
 using System.Text.Json;
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.domain.Entities.Billing;
+using iucs.readernest.domain.Repository;
 
 namespace iucs.readernest.api.Services.Payments
 {
@@ -15,11 +17,13 @@ namespace iucs.readernest.api.Services.Payments
     {
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly ILogger<RazorpayGateway> _logger;
+        private readonly IUnitOfWork _unitOfWork;
 
-        public RazorpayGateway(IHttpClientFactory httpClientFactory, ILogger<RazorpayGateway> logger)
+        public RazorpayGateway(IHttpClientFactory httpClientFactory, ILogger<RazorpayGateway> logger, IUnitOfWork unitOfWork)
         {
             _httpClientFactory = httpClientFactory;
             _logger = logger;
+            _unitOfWork = unitOfWork;
         }
 
         public string IntegrationKey => "razorpay";
@@ -45,14 +49,15 @@ namespace iucs.readernest.api.Services.Payments
             var keyId = KeyId(config)!;
             var keySecret = KeySecret(config)!;
             var remaining = invoice.Amount - invoice.AmountPaid;
+            var brandName = await BrandSettings.GetNameAsync(_unitOfWork, cancellationToken);
 
             var payload = JsonSerializer.Serialize(new
             {
                 amount = (long)Math.Round(remaining * 100m), // paise
                 currency = invoice.Currency,
                 reference_id = $"{invoice.InvoiceNumber}-{Guid.NewGuid():N}"[..40],
-                description = $"The Reader Nest — invoice {invoice.InvoiceNumber} ({account.Department})",
-                notes = new { invoiceId = invoice.Id.ToString(), department = account.Department.ToString() },
+                description = $"{brandName} — invoice {invoice.InvoiceNumber} ({account.Department?.Name ?? account.Name})",
+                notes = new { invoiceId = invoice.Id.ToString(), department = account.Department?.Name ?? account.Name },
             });
 
             var client = _httpClientFactory.CreateClient(nameof(RazorpayGateway));
@@ -101,13 +106,14 @@ namespace iucs.readernest.api.Services.Payments
             var keySecret = KeySecret(config)!;
             var remaining = invoice.Amount - invoice.AmountPaid;
             var amountMinor = (long)Math.Round(remaining * 100m); // paise
+            var brandName = await BrandSettings.GetNameAsync(_unitOfWork, cancellationToken);
 
             var payload = JsonSerializer.Serialize(new
             {
                 amount = amountMinor,
                 currency = invoice.Currency,
                 receipt = $"{invoice.InvoiceNumber}-{Guid.NewGuid():N}"[..40],
-                notes = new { invoiceId = invoice.Id.ToString(), department = account.Department.ToString() },
+                notes = new { invoiceId = invoice.Id.ToString(), department = account.Department?.Name ?? account.Name },
             });
 
             var client = _httpClientFactory.CreateClient(nameof(RazorpayGateway));
@@ -136,7 +142,7 @@ namespace iucs.readernest.api.Services.Payments
                 OrderId = json.RootElement.GetProperty("id").GetString()!,
                 AmountMinor = amountMinor,
                 Currency = invoice.Currency,
-                Description = $"The Reader Nest — invoice {invoice.InvoiceNumber} ({account.Department})",
+                Description = $"{brandName} — invoice {invoice.InvoiceNumber} ({account.Department?.Name ?? account.Name})",
                 PrefillName = payer.Name,
                 PrefillEmail = payer.Email,
                 PrefillContact = payer.Contact,

@@ -14,6 +14,17 @@ namespace iucs.readernest.application.Services
         /// <summary>Public self-booking: always auto-assigns a teacher, fixed 30-minute slot, no login.</summary>
         Task<StoreDemoBookingConfirmationDto> BookDemoAsync(CreateStoreDemoBookingRequest request, CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// Every bookable 30-minute demo start time on <paramref name="date"/> (org business
+        /// hours, 9am-7pm IST) that still has at least one matching active teacher free — lets
+        /// the public booking form show real openings instead of a visitor guessing a time and
+        /// hitting "no teacher available".
+        /// </summary>
+        Task<IReadOnlyList<AvailableDemoSlotDto>> ListAvailableDemoSlotsAsync(
+            DateOnly date,
+            Guid? departmentId,
+            CancellationToken cancellationToken = default);
+
         Task<IReadOnlyList<StoreInquiryDto>> ListInquiriesAsync(StoreInquiryStatus? status, CancellationToken cancellationToken = default);
 
         Task<StoreInquiryDto> UpdateInquiryStatusAsync(

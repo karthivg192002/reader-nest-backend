@@ -19,6 +19,9 @@ namespace iucs.readernest.application.Dto.Admission
 
         /// <summary>True marks an additional child attending the demo.</summary>
         public bool IsChild { get; set; }
+
+        /// <summary>Join-based attendance capture: set once a matching email joins the demo's classroom hub.</summary>
+        public bool HasJoined { get; set; }
     }
 
     public class CreateDemoBookingRequest
@@ -42,7 +45,7 @@ namespace iucs.readernest.application.Dto.Admission
         [Range(1, 18)]
         public int? ChildAge { get; set; }
 
-        public Department? Department { get; set; }
+        public Guid? DepartmentId { get; set; }
 
         /// <summary>Omit to auto-assign the least-loaded available teacher (department-matched when set).</summary>
         public Guid? TeacherProfileId { get; set; }
@@ -82,13 +85,17 @@ namespace iucs.readernest.application.Dto.Admission
 
         public int? ChildAge { get; set; }
 
-        public Department? Department { get; set; }
+        public Guid? DepartmentId { get; set; }
+
+        public string? DepartmentName { get; set; }
 
         public ConversionStatus ConversionStatus { get; set; }
 
         public string? FollowUpNotes { get; set; }
 
         public DateTime? ScheduledStartAtUtc { get; set; }
+
+        public DateTime? ScheduledEndAtUtc { get; set; }
 
         public string? MeetingRoomId { get; set; }
 
@@ -100,7 +107,56 @@ namespace iucs.readernest.application.Dto.Admission
         /// <summary>Auto-calculated demo fee: ₹50 per demo, ₹100 once the lead is Enrolled.</summary>
         public decimal PayableAmount { get; set; }
 
+        /// <summary>Join-based attendance capture for the primary parent — set the first time a
+        /// signed-in account matching <see cref="ParentEmail"/> joins this demo's classroom hub.</summary>
+        public DateTime? ParentJoinedAtUtc { get; set; }
+
         public IReadOnlyList<DemoParticipantDto> Participants { get; set; } = [];
+    }
+
+    public class ReassignTeacherRequest
+    {
+        [Required]
+        public Guid TeacherProfileId { get; set; }
+
+        /// <summary>Optional free-text reason (e.g. "Original teacher called in sick") kept in the audit trail.</summary>
+        [MaxLength(500)]
+        public string? Reason { get; set; }
+    }
+
+    /// <summary>One active teacher's load around a booking's slot — powers the reassignment page's availability view.</summary>
+    public class TeacherWorkloadDto
+    {
+        public Guid TeacherProfileId { get; set; }
+
+        public string TeacherName { get; set; } = null!;
+
+        public Guid? DepartmentId { get; set; }
+
+        public string? DepartmentName { get; set; }
+
+        /// <summary>True if this teacher already has an overlapping session at the booking's slot.</summary>
+        public bool IsBusyAtSlot { get; set; }
+
+        public int SessionsToday { get; set; }
+
+        public int SessionsThisWeek { get; set; }
+    }
+
+    /// <summary>One manual teacher reassignment on a demo booking, for the page's audit-trail panel.</summary>
+    public class DemoReassignmentHistoryDto
+    {
+        public Guid Id { get; set; }
+
+        public DateTime AtUtc { get; set; }
+
+        public string? ActorName { get; set; }
+
+        public string? OldTeacherName { get; set; }
+
+        public string NewTeacherName { get; set; } = null!;
+
+        public string? Reason { get; set; }
     }
 
     /// <summary>Per-parent demo record: every demo this parent has ever taken, with totals.</summary>

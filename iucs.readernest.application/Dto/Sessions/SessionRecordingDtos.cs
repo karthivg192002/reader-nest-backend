@@ -28,6 +28,25 @@ namespace iucs.readernest.application.Dto.Sessions
         public int? DurationSeconds { get; set; }
     }
 
+    /// <summary>
+    /// Machine-to-machine: registers a finished recording by Jitsi room name, called by the
+    /// Jibri finalize-recording hook on the video server — see docs/JITSI_ARCHITECTURE.md.
+    /// There's no logged-in user on this call, so it carries its own bearer token (signed with
+    /// the same appId/appSecret as room-join tokens) instead of relying on EnsureSessionParticipantAsync.
+    /// </summary>
+    public class FinalizeJibriRecordingRequest
+    {
+        [Required]
+        [MaxLength(200)]
+        public string RoomName { get; set; } = null!;
+
+        [Required]
+        [MaxLength(1000)]
+        public string StorageUrl { get; set; } = null!;
+
+        public int? DurationSeconds { get; set; }
+    }
+
     public class EngagementEntryDto
     {
         public Guid? ChildId { get; set; }

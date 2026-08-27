@@ -1,5 +1,6 @@
 using System.Text.Json;
 using iucs.readernest.application.Common.Exceptions;
+using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Billing;
 using iucs.readernest.application.Dto.Integrations;
 using iucs.readernest.domain.Entities.Integrations;
@@ -13,11 +14,13 @@ namespace iucs.readernest.application.Services
     {
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
+        private readonly IPaymentGateway _paymentGateway;
 
-        public IntegrationService(IUnitOfWork unitOfWork, IAuditLogService auditLog)
+        public IntegrationService(IUnitOfWork unitOfWork, IAuditLogService auditLog, IPaymentGateway paymentGateway)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
+            _paymentGateway = paymentGateway;
         }
 
         public async Task<IReadOnlyList<IntegrationDto>> ListAsync(CancellationToken cancellationToken = default)
@@ -31,11 +34,26 @@ namespace iucs.readernest.application.Services
 
         public async Task<IReadOnlyList<PaymentMethodOptionDto>> GetEnabledPaymentMethodsAsync(CancellationToken cancellationToken = default)
         {
-            return await _unitOfWork.Repository<Integration>().Query()
+            var enabled = await _unitOfWork.Repository<Integration>().Query()
                 .Where(i => i.Category == IntegrationCategory.PaymentGateway && i.IsEnabled)
                 .OrderBy(i => i.Name)
-                .Select(i => new PaymentMethodOptionDto { Key = i.Key, Name = i.Name })
                 .ToListAsync(cancellationToken);
+
+            // "Enabled" alone isn't enough to offer a method to a payer: Razorpay/Cashfree can be
+            // switched on with no API keys yet (CreatePaymentLinkAsync's own fallback silently
+            // simulates for internal/API callers, which is fine there, but a parent who picks
+            // "Razorpay" expecting a real checkout and getting a fake link that collects nothing
+            // is a real problem). Filter to what can actually take a payment right now.
+            var result = new List<PaymentMethodOptionDto>();
+            foreach (var integration in enabled)
+            {
+                if (await _paymentGateway.IsMethodConfiguredAsync(integration.Key, cancellationToken))
+                {
+                    result.Add(new PaymentMethodOptionDto { Key = integration.Key, Name = integration.Name });
+                }
+            }
+
+            return result;
         }
 
         public async Task<IntegrationDto> CreateAsync(

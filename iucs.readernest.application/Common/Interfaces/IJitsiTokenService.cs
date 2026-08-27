@@ -23,5 +23,16 @@ namespace iucs.readernest.application.Common.Interfaces
             string? participantEmail,
             bool moderator,
             DateTime expiresAtUtc);
+
+        /// <summary>
+        /// Validates a Jibri finalize-recording bearer token: same appId/appSecret as room-join
+        /// tokens (signature, issuer, audience, expiry), but additionally requires a
+        /// <c>purpose: "recording-finalize"</c> claim — so a leaked/logged room-join token can't
+        /// be replayed here — and the token's own <c>room</c> claim must equal
+        /// <paramref name="expectedRoom"/>, so a token minted for one room can't register a
+        /// recording under another. Returns false for anything else, including no "jitsi"
+        /// Integration configured at all (there's nothing to verify a signature against).
+        /// </summary>
+        bool ValidateFinalizeToken(string? bearerToken, string? jitsiConfigJson, string expectedRoom);
     }
 }

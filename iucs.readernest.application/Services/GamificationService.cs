@@ -1,5 +1,6 @@
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Sessions;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
@@ -64,6 +65,35 @@ namespace iucs.readernest.application.Services
             }
 
             var name = request.ParticipantName.Trim();
+
+            // The self-report Star flow (a parent's child answering their own live quiz) took
+            // ParticipantName as free text with no check it was actually the caller's own
+            // child — any session participant could post a Star under a classmate's name (or
+            // any name at all), inflating that name's persisted award history and leaderboard
+            // rank. Scoped to Parent + Star + session-scoped specifically: that's the only
+            // combination reachable through the self-report path (staff-granted badges/stars
+            // legitimately name a student who isn't the caller, and IsSessionParticipantAsync's
+            // own Parent branch already guarantees session.BatchId is set for this caller to
+            // have gotten this far, so there's always a batch to check enrollment against).
+            if (caller.Role == UserRole.Parent && request.Kind == AwardKind.Star && request.SessionId.HasValue)
+            {
+                var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(request.SessionId.Value, cancellationToken);
+                var ownChildNames = session?.BatchId is Guid batchId
+                    ? await _unitOfWork.Repository<Child>().Query()
+                        .Where(c => c.ParentProfile.UserId == callerUserId)
+                        .Join(
+                            _unitOfWork.Repository<BatchEnrollment>().Query().Where(e => e.BatchId == batchId),
+                            c => c.Id,
+                            e => e.ChildId,
+                            (c, _) => c.FirstName + " " + c.LastName)
+                        .ToListAsync(cancellationToken)
+                    : [];
+
+                if (!ownChildNames.Any(n => n.Trim().Equals(name, StringComparison.OrdinalIgnoreCase)))
+                {
+                    throw new ForbiddenException("You can only report a star for your own child in this class.");
+                }
+            }
             var repository = _unitOfWork.Repository<StudentAward>();
             var granted = new List<StudentAward>();
 

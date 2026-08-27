@@ -12,6 +12,8 @@ namespace iucs.readernest.domain.Entities.Academics
     /// rather than fixed columns. Admin can view/edit/approve/download submissions.
     /// </summary>
     [Index(nameof(DemoBookingId), IsUnique = true)]
+    // The Admission review queue (ListAsync) filters on this directly.
+    [Index(nameof(Status))]
     public class EnrollmentForm : AuditEntity
     {
         public Guid ParentProfileId { get; set; }

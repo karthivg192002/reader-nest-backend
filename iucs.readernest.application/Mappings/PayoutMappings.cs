@@ -14,8 +14,7 @@ namespace iucs.readernest.application.Mappings
                 TeacherName = rate.TeacherProfile is null
                     ? "All teachers (default)"
                     : $"{rate.TeacherProfile.User.FirstName} {rate.TeacherProfile.User.LastName}".Trim(),
-                DurationMinutes = rate.DurationMinutes,
-                RatePerSession = rate.RatePerSession,
+                RatePerMinute = rate.RatePerMinute,
                 TeacherNoShowPenaltyPercent = rate.TeacherNoShowPenaltyPercent,
                 EffectiveFrom = rate.EffectiveFrom,
                 IsActive = rate.IsActive,
@@ -41,10 +40,13 @@ namespace iucs.readernest.application.Mappings
                     {
                         Id = i.Id,
                         ClassSessionId = i.ClassSessionId,
+                        ClassName = i.ClassSession?.Batch?.Name,
+                        SessionDate = i.ClassSession?.ScheduledStartAtUtc,
                         Type = i.Type,
                         Amount = i.Amount,
                         Note = i.Note,
                         CreatedAtUtc = i.CreatedAtUtc,
+                        RequiresReview = i.RequiresReview,
                     })
                     .ToList(),
             };

@@ -1,4 +1,5 @@
 using iucs.readernest.api.Auth;
+using iucs.readernest.application.Dto.Common;
 using iucs.readernest.application.Dto.Courses;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
@@ -72,6 +73,31 @@ namespace iucs.readernest.api.Controllers
         public async Task<ActionResult<CourseDto>> Update(Guid id, SaveCourseRequest request, CancellationToken cancellationToken)
         {
             return Ok(await _courseService.UpdateAsync(id, request, cancellationToken));
+        }
+
+        private const long MaxBulkImportBytes = 5 * 1024 * 1024;
+
+        /// <summary>Columns: DepartmentName, CategoryName, Name, Description, Type, DurationMinutes, Price, TotalSessions, IsActive.</summary>
+        [HttpPost("bulk-import")]
+        [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.Create)]
+        [RequestSizeLimit(MaxBulkImportBytes)]
+        public async Task<ActionResult<BulkImportResult>> BulkImport(IFormFile file, CancellationToken cancellationToken)
+        {
+            if (file.Length == 0)
+            {
+                return BadRequest("The uploaded file is empty.");
+            }
+
+            await using var stream = file.OpenReadStream();
+            return Ok(await _courseService.BulkImportAsync(stream, file.FileName, cancellationToken));
+        }
+
+        [HttpGet("export")]
+        [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.View)]
+        public async Task<IActionResult> Export([FromQuery] bool includeInactive = true, CancellationToken cancellationToken = default)
+        {
+            var csv = await _courseService.ExportCsvAsync(includeInactive, cancellationToken);
+            return File(System.Text.Encoding.UTF8.GetBytes(csv), "text/csv", $"courses-{DateTime.UtcNow:yyyyMMdd}.csv");
         }
     }
 }

@@ -48,7 +48,9 @@ namespace iucs.readernest.domain.Entities.Billing
 
         public PaymentAccount PaymentAccount { get; set; } = null!;
 
-        public Department Department { get; set; }
+        public Guid DepartmentId { get; set; }
+
+        public Department Department { get; set; } = null!;
 
         public decimal Amount { get; set; }
 

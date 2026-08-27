@@ -22,7 +22,9 @@ namespace iucs.readernest.application.Dto.Users
 
         public string TimeZoneId { get; set; } = null!;
 
-        public Department? Department { get; set; }
+        public Guid? DepartmentId { get; set; }
+
+        public string? DepartmentName { get; set; }
 
         /// <summary>Assigned role (preset) id; only meaningful for Sub Admin accounts.</summary>
         public Guid? RoleDefinitionId { get; set; }

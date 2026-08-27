@@ -1,5 +1,6 @@
 using iucs.readernest.api.Auth;
 using iucs.readernest.application.Dto.Billing;
+using iucs.readernest.application.Dto.Common;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
 using Microsoft.AspNetCore.Authorization;
@@ -45,6 +46,31 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             return Ok(await _billingService.UpdatePlanAsync(id, request, cancellationToken));
+        }
+
+        private const long MaxBulkImportBytes = 5 * 1024 * 1024;
+
+        /// <summary>Columns: Name, CourseName (optional), BillingType, BillingCycle, Price, SessionsIncluded (optional), IsActive.</summary>
+        [HttpPost("bulk-import")]
+        [HasPermission(PermissionModule.BillingFinance, PermissionAction.Create)]
+        [RequestSizeLimit(MaxBulkImportBytes)]
+        public async Task<ActionResult<BulkImportResult>> BulkImport(IFormFile file, CancellationToken cancellationToken)
+        {
+            if (file.Length == 0)
+            {
+                return BadRequest("The uploaded file is empty.");
+            }
+
+            await using var stream = file.OpenReadStream();
+            return Ok(await _billingService.BulkImportPlansAsync(stream, file.FileName, cancellationToken));
+        }
+
+        [HttpGet("export")]
+        [HasPermission(PermissionModule.BillingFinance, PermissionAction.View)]
+        public async Task<IActionResult> Export(CancellationToken cancellationToken)
+        {
+            var csv = await _billingService.ExportPlansCsvAsync(cancellationToken);
+            return File(System.Text.Encoding.UTF8.GetBytes(csv), "text/csv", $"package-plans-{DateTime.UtcNow:yyyyMMdd}.csv");
         }
     }
 }

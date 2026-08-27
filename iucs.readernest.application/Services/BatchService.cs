@@ -211,60 +211,74 @@ namespace iucs.readernest.application.Services
 
         public async Task<BatchStudentDto> AssignStudentAsync(Guid batchId, Guid childId, CancellationToken cancellationToken = default)
         {
-            // Load tracked (Repository.Query() is AsNoTracking) — no Include, so nothing here
-            // pulls the Enrollments navigation into the tracker just to mutate one row of it.
-            var batch = await _unitOfWork.Repository<Batch>().FirstOrDefaultAsync(b => b.Id == batchId, cancellationToken)
-                ?? throw new NotFoundException(nameof(Batch), batchId);
-
-            if (batch.Status != BatchStatus.Active)
+            // The capacity check (count active enrollments, compare to batch.Capacity) and the
+            // enrollment insert below are a check-then-act pair with nothing atomic binding them
+            // together — two admins/coordinators assigning two DIFFERENT children to the same
+            // near-full batch within the same window can both read the same activeCount under
+            // capacity, both pass the check, and both insert (the only unique index is
+            // (BatchId, ChildId), which guards the same child twice, not the batch's headcount).
+            // A 10-seat batch could silently fill to 11. SERIALIZABLE — with every read fresh
+            // inside, not values fetched before this block started — makes Postgres abort one of
+            // two truly concurrent attempts instead of letting both squeeze through.
+            var (batch, child, enrollment) = await _unitOfWork.ExecuteInSerializableTransactionAsync(async ct =>
             {
-                throw new DomainValidationException($"Batch '{batch.Name}' is {batch.Status} and cannot take new enrollments.");
-            }
+                // Load tracked (Repository.Query() is AsNoTracking) — no Include, so nothing here
+                // pulls the Enrollments navigation into the tracker just to mutate one row of it.
+                var b = await _unitOfWork.Repository<Batch>().FirstOrDefaultAsync(x => x.Id == batchId, ct)
+                    ?? throw new NotFoundException(nameof(Batch), batchId);
 
-            var child = await _unitOfWork.Repository<Child>().Query()
-                .Include(c => c.ParentProfile).ThenInclude(p => p.User)
-                .FirstOrDefaultAsync(c => c.Id == childId, cancellationToken)
-                ?? throw new NotFoundException(nameof(Child), childId);
+                if (b.Status != BatchStatus.Active)
+                {
+                    throw new DomainValidationException($"Batch '{b.Name}' is {b.Status} and cannot take new enrollments.");
+                }
 
-            // Tracked lookup for this exact pair — the only row we might mutate below. Loading
-            // it via the Batch.Enrollments navigation instead would return a second, detached
-            // copy whenever the row is already tracked elsewhere in this DbContext, and
-            // Update()-ing that copy throws ("already tracked with the same key").
-            var existing = await _unitOfWork.Repository<BatchEnrollment>()
-                .FirstOrDefaultAsync(e => e.BatchId == batchId && e.ChildId == childId, cancellationToken);
-            if (existing?.Status == EnrollmentStatus.Active)
-            {
-                throw new ConflictException($"{child.FirstName} is already enrolled in this batch.");
-            }
+                var c = await _unitOfWork.Repository<Child>().Query()
+                    .Include(x => x.ParentProfile).ThenInclude(p => p.User)
+                    .FirstOrDefaultAsync(x => x.Id == childId, ct)
+                    ?? throw new NotFoundException(nameof(Child), childId);
 
-            var activeCount = await _unitOfWork.Repository<BatchEnrollment>().Query()
-                .CountAsync(e => e.BatchId == batchId && e.Status == EnrollmentStatus.Active, cancellationToken);
-            if (activeCount >= batch.Capacity)
-            {
-                throw new DomainValidationException(
-                    $"Batch '{batch.Name}' is at capacity ({batch.Capacity}/{batch.Capacity}). Increase capacity or choose another batch.");
-            }
+                // Tracked lookup for this exact pair — the only row we might mutate below. Loading
+                // it via the Batch.Enrollments navigation instead would return a second, detached
+                // copy whenever the row is already tracked elsewhere in this DbContext, and
+                // Update()-ing that copy throws ("already tracked with the same key").
+                var existing = await _unitOfWork.Repository<BatchEnrollment>()
+                    .FirstOrDefaultAsync(x => x.BatchId == batchId && x.ChildId == childId, ct);
+                if (existing?.Status == EnrollmentStatus.Active)
+                {
+                    throw new ConflictException($"{c.FirstName} is already enrolled in this batch.");
+                }
 
-            BatchEnrollment enrollment;
-            if (existing is not null)
-            {
-                // A unique (BatchId, ChildId) index means a previously withdrawn student is
-                // re-activated in place, never re-inserted.
-                existing.Status = EnrollmentStatus.Active;
-                _unitOfWork.Repository<BatchEnrollment>().Update(existing);
-                enrollment = existing;
-            }
-            else
-            {
-                enrollment = new BatchEnrollment { BatchId = batchId, ChildId = childId, Status = EnrollmentStatus.Active };
-                await _unitOfWork.Repository<BatchEnrollment>().AddAsync(enrollment, cancellationToken);
-            }
+                var activeCount = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                    .CountAsync(x => x.BatchId == batchId && x.Status == EnrollmentStatus.Active, ct);
+                if (activeCount >= b.Capacity)
+                {
+                    throw new DomainValidationException(
+                        $"Batch '{b.Name}' is at capacity ({b.Capacity}/{b.Capacity}). Increase capacity or choose another batch.");
+                }
 
-            // AuditLog.EntityId is MaxLength(64) — a single Guid fits, "batchId:childId" (73
-            // chars) doesn't. The enrollment's own id is enough to look the row up.
-            await _auditLog.StageAsync(AuditAction.Create, nameof(BatchEnrollment), enrollment.Id.ToString(), cancellationToken: cancellationToken);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
+                BatchEnrollment e;
+                if (existing is not null)
+                {
+                    // A unique (BatchId, ChildId) index means a previously withdrawn student is
+                    // re-activated in place, never re-inserted.
+                    existing.Status = EnrollmentStatus.Active;
+                    _unitOfWork.Repository<BatchEnrollment>().Update(existing);
+                    e = existing;
+                }
+                else
+                {
+                    e = new BatchEnrollment { BatchId = batchId, ChildId = childId, Status = EnrollmentStatus.Active };
+                    await _unitOfWork.Repository<BatchEnrollment>().AddAsync(e, ct);
+                }
 
+                // AuditLog.EntityId is MaxLength(64) — a single Guid fits, "batchId:childId" (73
+                // chars) doesn't. The enrollment's own id is enough to look the row up.
+                await _auditLog.StageAsync(AuditAction.Create, nameof(BatchEnrollment), e.Id.ToString(), cancellationToken: ct);
+                await _unitOfWork.SaveChangesAsync(ct);
+                return (b, c, e);
+            }, cancellationToken);
+
+            // Outside the transaction: a retried attempt must not re-send this email.
             var parentUser = child.ParentProfile?.User;
             if (parentUser is not null)
             {

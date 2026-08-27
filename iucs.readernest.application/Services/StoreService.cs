@@ -1,8 +1,11 @@
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Admission;
+using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Entities.Admission;
 using iucs.readernest.domain.Entities.Billing;
+using iucs.readernest.domain.Entities.Sessions;
+using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using iucs.readernest.domain.Repository;
 using Microsoft.EntityFrameworkCore;
@@ -19,6 +22,10 @@ namespace iucs.readernest.application.Services
         // that the slot picker stays meaningful (not an open-ended spam surface).
         private static readonly TimeSpan MinLeadTime = TimeSpan.FromHours(2);
         private const int MaxLeadDays = 30;
+        // The org runs on IST (DateTimeDisplay.DefaultTimeZoneId) with no configured business-hours
+        // setting to read instead — 9am-7pm covers every teacher's actual class-day span today.
+        private const int BusinessDayStartHour = 9;
+        private const int BusinessDayEndHour = 19;
 
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
@@ -94,7 +101,7 @@ namespace iucs.readernest.application.Services
                     ParentPhone = request.ParentPhone.Trim(),
                     ChildName = request.ChildName.Trim(),
                     ChildAge = request.ChildAge,
-                    Department = request.Department,
+                    DepartmentId = request.DepartmentId,
                     TeacherProfileId = null,
                     ScheduledStartAtUtc = request.PreferredStartAtUtc,
                     ScheduledEndAtUtc = request.PreferredStartAtUtc.AddMinutes(DemoDurationMinutes),
@@ -108,6 +115,68 @@ namespace iucs.readernest.application.Services
                 ScheduledStartAtUtc = request.PreferredStartAtUtc,
                 ScheduledEndAtUtc = request.PreferredStartAtUtc.AddMinutes(DemoDurationMinutes),
             };
+        }
+
+        public async Task<IReadOnlyList<AvailableDemoSlotDto>> ListAvailableDemoSlotsAsync(
+            DateOnly date,
+            Guid? departmentId,
+            CancellationToken cancellationToken = default)
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById(DateTimeDisplay.DefaultTimeZoneId);
+            var dayStartLocal = new DateTime(date.Year, date.Month, date.Day, BusinessDayStartHour, 0, 0, DateTimeKind.Unspecified);
+            var dayEndLocal = new DateTime(date.Year, date.Month, date.Day, BusinessDayEndHour, 0, 0, DateTimeKind.Unspecified);
+            var dayStartUtc = TimeZoneInfo.ConvertTimeToUtc(dayStartLocal, zone);
+            var dayEndUtc = TimeZoneInfo.ConvertTimeToUtc(dayEndLocal, zone);
+
+            var now = DateTime.UtcNow;
+            var earliest = now + MinLeadTime;
+            var latest = now.AddDays(MaxLeadDays);
+            if (dayStartUtc > latest || dayEndUtc < earliest)
+            {
+                return [];
+            }
+
+            IQueryable<TeacherProfile> teachers = _unitOfWork.Repository<TeacherProfile>().Query()
+                .Where(t => t.User.Status == UserStatus.Active);
+            if (departmentId.HasValue)
+            {
+                teachers = teachers.Where(t => t.DepartmentId == departmentId.Value);
+            }
+            var teacherIds = await teachers.Select(t => t.Id).ToListAsync(cancellationToken);
+            if (teacherIds.Count == 0)
+            {
+                return [];
+            }
+
+            // Every one of this day's sessions across the matching teachers, fetched once —
+            // an in-memory overlap check per candidate slot is far cheaper than one query per
+            // slot (up to 20 slots/day), same reasoning as AutoAssignTeacherAsync's single read.
+            var busyWindows = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => teacherIds.Contains(s.TeacherProfileId)
+                    && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                    && s.ScheduledStartAtUtc < dayEndUtc
+                    && s.ScheduledEndAtUtc > dayStartUtc)
+                .Select(s => new { s.TeacherProfileId, s.ScheduledStartAtUtc, s.ScheduledEndAtUtc })
+                .ToListAsync(cancellationToken);
+
+            var slots = new List<AvailableDemoSlotDto>();
+            for (var slotStart = dayStartUtc; slotStart.AddMinutes(DemoDurationMinutes) <= dayEndUtc; slotStart = slotStart.AddMinutes(DemoDurationMinutes))
+            {
+                if (slotStart < earliest || slotStart > latest)
+                {
+                    continue;
+                }
+
+                var slotEnd = slotStart.AddMinutes(DemoDurationMinutes);
+                var hasFreeTeacher = teacherIds.Any(teacherId =>
+                    !busyWindows.Any(w => w.TeacherProfileId == teacherId && w.ScheduledStartAtUtc < slotEnd && w.ScheduledEndAtUtc > slotStart));
+                if (hasFreeTeacher)
+                {
+                    slots.Add(new AvailableDemoSlotDto { StartAtUtc = slotStart, EndAtUtc = slotEnd });
+                }
+            }
+
+            return slots;
         }
 
         public async Task<IReadOnlyList<StoreInquiryDto>> ListInquiriesAsync(

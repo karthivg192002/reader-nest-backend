@@ -102,5 +102,32 @@ namespace iucs.readernest.api.Controllers
         {
             return Ok(await _demoBookingService.ListFeedbackAsync(cancellationToken));
         }
+
+        /// <summary>Manually override the teacher assigned to a demo booking.</summary>
+        [HttpPut("{id:guid}/teacher")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<DemoBookingDto>> ReassignTeacher(
+            Guid id,
+            ReassignTeacherRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _demoBookingService.ReassignTeacherAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>Every active teacher's load around this booking's slot, for the reassignment page.</summary>
+        [HttpGet("{id:guid}/teacher-workload")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<TeacherWorkloadDto>>> TeacherWorkload(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _demoBookingService.GetTeacherWorkloadAsync(id, cancellationToken));
+        }
+
+        /// <summary>Every manual teacher reassignment made on this booking, newest first.</summary>
+        [HttpGet("{id:guid}/reassignment-history")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<DemoReassignmentHistoryDto>>> ReassignmentHistory(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _demoBookingService.GetReassignmentHistoryAsync(id, cancellationToken));
+        }
     }
 }

@@ -36,5 +36,25 @@ namespace iucs.readernest.application.Services
 
         /// <summary>The signed-in teacher's own submitted feedback.</summary>
         Task<IReadOnlyList<DemoFeedbackDto>> ListFeedbackForTeacherUserAsync(Guid userId, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Manually override the teacher assigned to a demo booking (e.g. the auto-assigned or
+        /// originally-picked teacher called in sick). Runs the same busy-slot check as booking
+        /// creation, notifies both the newly-assigned and displaced teacher, and records the
+        /// change in the audit trail (see <see cref="GetReassignmentHistoryAsync"/>).
+        /// </summary>
+        Task<DemoBookingDto> ReassignTeacherAsync(
+            Guid bookingId,
+            ReassignTeacherRequest request,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Every active teacher's load around the booking's slot, so staff can see who's
+        /// free/light before overriding the assignment — not just a blind name dropdown.
+        /// </summary>
+        Task<IReadOnlyList<TeacherWorkloadDto>> GetTeacherWorkloadAsync(Guid bookingId, CancellationToken cancellationToken = default);
+
+        /// <summary>Every manual teacher reassignment ever made on this booking, newest first.</summary>
+        Task<IReadOnlyList<DemoReassignmentHistoryDto>> GetReassignmentHistoryAsync(Guid bookingId, CancellationToken cancellationToken = default);
     }
 }

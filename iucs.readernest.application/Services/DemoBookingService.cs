@@ -1,9 +1,12 @@
+using System.Text.Json;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Admission;
 using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Admission;
+using iucs.readernest.domain.Entities.Auditing;
 using iucs.readernest.domain.Entities.Integrations;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
@@ -16,12 +19,15 @@ namespace iucs.readernest.application.Services
 {
     public class DemoBookingService : IDemoBookingService
     {
+        private const string ReassignmentAuditEntityName = "DemoBookingTeacherReassignment";
+
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
         private readonly ICrmNotifier _crmNotifier;
         private readonly IEmailSender _emailSender;
         private readonly IEmailTemplateService _emailTemplateService;
         private readonly IJitsiTokenService _jitsiTokenService;
+        private readonly INotificationService _notificationService;
         private readonly ILogger<DemoBookingService> _logger;
 
         public DemoBookingService(
@@ -31,6 +37,7 @@ namespace iucs.readernest.application.Services
             IEmailTemplateService emailTemplateService,
             ICrmNotifier crmNotifier,
             IJitsiTokenService jitsiTokenService,
+            INotificationService notificationService,
             ILogger<DemoBookingService> logger)
         {
             _unitOfWork = unitOfWork;
@@ -39,6 +46,7 @@ namespace iucs.readernest.application.Services
             _emailTemplateService = emailTemplateService;
             _crmNotifier = crmNotifier;
             _jitsiTokenService = jitsiTokenService;
+            _notificationService = notificationService;
             _logger = logger;
         }
 
@@ -133,7 +141,7 @@ namespace iucs.readernest.application.Services
                     ParentPhone = request.ParentPhone,
                     ChildName = request.ChildName.Trim(),
                     ChildAge = request.ChildAge,
-                    Department = request.Department,
+                    DepartmentId = request.DepartmentId,
                     Participants = request.Participants
                         .Select(p =>
                         {
@@ -227,7 +235,9 @@ namespace iucs.readernest.application.Services
                 booking.ParentEmail,
                 booking.ParentPhone,
                 booking.ChildName,
-                Department = booking.Department?.ToString(),
+                Department = booking.DepartmentId.HasValue
+                    ? (await _unitOfWork.Repository<Department>().GetByIdAsync(booking.DepartmentId.Value, cancellationToken))?.Name
+                    : null,
                 DemoAtUtc = request.ScheduledStartAtUtc,
             }, cancellationToken);
 
@@ -269,9 +279,9 @@ namespace iucs.readernest.application.Services
         {
             IQueryable<TeacherProfile> teachers = _unitOfWork.Repository<TeacherProfile>().Query()
                 .Where(t => t.User.Status == UserStatus.Active);
-            if (request.Department.HasValue)
+            if (request.DepartmentId.HasValue)
             {
-                teachers = teachers.Where(t => t.Department == request.Department.Value);
+                teachers = teachers.Where(t => t.DepartmentId == request.DepartmentId.Value);
             }
 
             var dayStart = request.ScheduledStartAtUtc.Date;
@@ -500,11 +510,272 @@ namespace iucs.readernest.application.Services
                 .ToList();
         }
 
+        public async Task<DemoBookingDto> ReassignTeacherAsync(
+            Guid bookingId,
+            ReassignTeacherRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            // Same reasoning as CreateAsync's auto-assign race: the "is the new teacher free"
+            // read and the write that commits them to the slot must be one indivisible decision,
+            // or a concurrent booking/reassignment could double-book them in the gap between the
+            // two. Nothing irreversible (the audit row, the emails) happens inside — a retry must
+            // be free to redo the whole thing.
+            var result = await _unitOfWork.ExecuteInSerializableTransactionAsync(async ct =>
+            {
+                var booking = await _unitOfWork.Repository<DemoBooking>().Query()
+                    .FirstOrDefaultAsync(b => b.Id == bookingId, ct)
+                    ?? throw new NotFoundException(nameof(DemoBooking), bookingId);
+
+                // The frontend only offers this action for a still-scheduled demo, but that's a
+                // UI convenience, not a boundary — this is the actual enforcement point. Without
+                // it, a booking reached directly by id could get "reassigned" after the demo
+                // already happened, was cancelled, or converted, silently emailing a teacher who
+                // has nothing to do.
+                if (booking.ConversionStatus != ConversionStatus.DemoScheduled)
+                {
+                    throw new DomainValidationException("Only a demo that is still scheduled can have its teacher reassigned.");
+                }
+
+                if (booking.ClassSessionId is not { } classSessionId)
+                {
+                    throw new DomainValidationException("This booking has no linked class session to reassign.");
+                }
+
+                // Tracked, not the no-tracking Query() the rest of this method reads through --
+                // this is the entity whose TeacherProfileId is actually mutated and saved below.
+                var demoSession = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                    .FirstOrDefaultAsync(s => s.Id == classSessionId, ct)
+                    ?? throw new NotFoundException(nameof(ClassSession), classSessionId);
+
+                var newTeacher = await _unitOfWork.Repository<TeacherProfile>().Query()
+                    .Include(t => t.User)
+                    .FirstOrDefaultAsync(t => t.Id == request.TeacherProfileId, ct)
+                    ?? throw new NotFoundException(nameof(TeacherProfile), request.TeacherProfileId);
+
+                if (newTeacher.User.Status != UserStatus.Active)
+                {
+                    throw new DomainValidationException("Cannot assign an inactive teacher.");
+                }
+
+                if (newTeacher.Id == demoSession.TeacherProfileId)
+                {
+                    throw new DomainValidationException("This teacher is already assigned to this demo.");
+                }
+
+                // Same overlap rule CreateAsync/AutoAssignTeacherAsync enforce for a fresh
+                // booking — a manual override must not be allowed to double-book the new teacher.
+                var conflict = await _unitOfWork.Repository<ClassSession>().ExistsAsync(
+                    s => s.Id != demoSession.Id
+                         && s.TeacherProfileId == newTeacher.Id
+                         && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                         && s.ScheduledStartAtUtc < demoSession.ScheduledEndAtUtc
+                         && s.ScheduledEndAtUtc > demoSession.ScheduledStartAtUtc,
+                    ct);
+                if (conflict)
+                {
+                    throw new DomainValidationException(
+                        $"{newTeacher.User.FirstName} {newTeacher.User.LastName} already has a session booked during that time.");
+                }
+
+                var oldTeacher = await _unitOfWork.Repository<TeacherProfile>().Query()
+                    .Include(t => t.User)
+                    .FirstOrDefaultAsync(t => t.Id == demoSession.TeacherProfileId, ct);
+
+                demoSession.TeacherProfileId = newTeacher.Id;
+
+                await _auditLog.StageAsync(
+                    AuditAction.Update,
+                    ReassignmentAuditEntityName,
+                    booking.Id.ToString(),
+                    JsonSerializer.Serialize(new
+                    {
+                        OldTeacherProfileId = oldTeacher?.Id,
+                        OldTeacherName = oldTeacher is not null ? $"{oldTeacher.User.FirstName} {oldTeacher.User.LastName}" : null,
+                        NewTeacherProfileId = newTeacher.Id,
+                        NewTeacherName = $"{newTeacher.User.FirstName} {newTeacher.User.LastName}",
+                        request.Reason,
+                    }),
+                    ct);
+                await _unitOfWork.SaveChangesAsync(ct);
+
+                return (Booking: booking, Session: demoSession, OldTeacher: oldTeacher, NewTeacher: newTeacher);
+            }, cancellationToken);
+
+            // Notify both sides after the reassignment commits -- a retried attempt must not
+            // re-send these emails, and an email failure must not undo an already-saved change.
+            try
+            {
+                await _notificationService.SendTemplatedEmailAsync(
+                    result.NewTeacher.User.Id,
+                    result.NewTeacher.User.Email,
+                    NotificationType.BookingConfirmation,
+                    "demo-teacher-assigned",
+                    new Dictionary<string, string>
+                    {
+                        ["ChildName"] = result.Booking.ChildName,
+                        ["StartAtLocal"] = DateTimeDisplay.ToLocal(result.Session.ScheduledStartAtUtc, result.NewTeacher.User.TimeZoneId),
+                        ["EndAtLocal"] = DateTimeDisplay.ToLocal(result.Session.ScheduledEndAtUtc, result.NewTeacher.User.TimeZoneId),
+                        ["Reason"] = string.IsNullOrWhiteSpace(request.Reason) ? string.Empty : $"Reason: {request.Reason}",
+                    },
+                    cancellationToken);
+
+                if (result.OldTeacher is not null)
+                {
+                    await _notificationService.SendTemplatedEmailAsync(
+                        result.OldTeacher.User.Id,
+                        result.OldTeacher.User.Email,
+                        NotificationType.BookingConfirmation,
+                        "demo-teacher-unassigned",
+                        new Dictionary<string, string>
+                        {
+                            ["ChildName"] = result.Booking.ChildName,
+                            ["StartAtLocal"] = DateTimeDisplay.ToLocal(result.Session.ScheduledStartAtUtc, result.OldTeacher.User.TimeZoneId),
+                            ["EndAtLocal"] = DateTimeDisplay.ToLocal(result.Session.ScheduledEndAtUtc, result.OldTeacher.User.TimeZoneId),
+                        },
+                        cancellationToken);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "Teacher reassignment notification failed for booking {BookingId}", bookingId);
+            }
+
+            return await GetAsync(bookingId, cancellationToken);
+        }
+
+        public async Task<IReadOnlyList<TeacherWorkloadDto>> GetTeacherWorkloadAsync(
+            Guid bookingId,
+            CancellationToken cancellationToken = default)
+        {
+            var booking = await _unitOfWork.Repository<DemoBooking>().Query()
+                .Include(b => b.ClassSession)
+                .FirstOrDefaultAsync(b => b.Id == bookingId, cancellationToken)
+                ?? throw new NotFoundException(nameof(DemoBooking), bookingId);
+
+            if (booking.ClassSession is not { } session)
+            {
+                throw new DomainValidationException("This booking has no linked class session.");
+            }
+
+            var dayStart = session.ScheduledStartAtUtc.Date;
+            var dayEnd = dayStart.AddDays(1);
+            // Mon-Sun week containing the slot, for a stable "this week" figure no matter when it's viewed.
+            var mondayOffset = ((int)session.ScheduledStartAtUtc.DayOfWeek + 6) % 7;
+            var weekStart = dayStart.AddDays(-mondayOffset);
+            var weekEnd = weekStart.AddDays(7);
+
+            var teachers = await _unitOfWork.Repository<TeacherProfile>().Query()
+                .Include(t => t.User)
+                .Include(t => t.Department)
+                .Where(t => t.User.Status == UserStatus.Active)
+                .Select(t => new
+                {
+                    t.Id,
+                    Name = t.User.FirstName + " " + t.User.LastName,
+                    t.DepartmentId,
+                    DepartmentName = t.Department != null ? t.Department.Name : null,
+                    IsBusyAtSlot = _unitOfWork.Repository<ClassSession>().Query().Any(
+                        s => s.Id != session.Id
+                             && s.TeacherProfileId == t.Id
+                             && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                             && s.ScheduledStartAtUtc < session.ScheduledEndAtUtc
+                             && s.ScheduledEndAtUtc > session.ScheduledStartAtUtc),
+                    SessionsToday = _unitOfWork.Repository<ClassSession>().Query().Count(
+                        s => s.Id != session.Id
+                             && s.TeacherProfileId == t.Id
+                             && s.ScheduledStartAtUtc >= dayStart
+                             && s.ScheduledStartAtUtc < dayEnd),
+                    SessionsThisWeek = _unitOfWork.Repository<ClassSession>().Query().Count(
+                        s => s.Id != session.Id
+                             && s.TeacherProfileId == t.Id
+                             && s.ScheduledStartAtUtc >= weekStart
+                             && s.ScheduledStartAtUtc < weekEnd),
+                })
+                .ToListAsync(cancellationToken);
+
+            return teachers
+                .OrderBy(t => t.IsBusyAtSlot)
+                .ThenBy(t => t.SessionsToday)
+                .ThenBy(t => t.SessionsThisWeek)
+                .Select(t => new TeacherWorkloadDto
+                {
+                    TeacherProfileId = t.Id,
+                    TeacherName = t.Name,
+                    DepartmentId = t.DepartmentId,
+                    DepartmentName = t.DepartmentName,
+                    IsBusyAtSlot = t.IsBusyAtSlot,
+                    SessionsToday = t.SessionsToday,
+                    SessionsThisWeek = t.SessionsThisWeek,
+                })
+                .ToList();
+        }
+
+        public async Task<IReadOnlyList<DemoReassignmentHistoryDto>> GetReassignmentHistoryAsync(
+            Guid bookingId,
+            CancellationToken cancellationToken = default)
+        {
+            var exists = await _unitOfWork.Repository<DemoBooking>().ExistsAsync(b => b.Id == bookingId, cancellationToken);
+            if (!exists)
+            {
+                throw new NotFoundException(nameof(DemoBooking), bookingId);
+            }
+
+            var logs = await _unitOfWork.Repository<AuditLog>().Query()
+                .Where(a => a.EntityName == ReassignmentAuditEntityName && a.EntityId == bookingId.ToString())
+                .OrderByDescending(a => a.CreatedAtUtc)
+                .ToListAsync(cancellationToken);
+
+            if (logs.Count == 0)
+            {
+                return [];
+            }
+
+            var actorIds = logs.Where(l => l.ActorUserId.HasValue).Select(l => l.ActorUserId!.Value).Distinct().ToList();
+            var actorNames = await _unitOfWork.Repository<User>().Query()
+                .Where(u => actorIds.Contains(u.Id))
+                .Select(u => new { u.Id, Name = u.FirstName + " " + u.LastName })
+                .ToDictionaryAsync(u => u.Id, u => u.Name, cancellationToken);
+
+            return logs.Select(log =>
+            {
+                // This audit trail is only ever written by ReassignTeacherAsync above, so a
+                // malformed payload shouldn't occur -- but one bad row (e.g. rewritten by an
+                // untested future caller) failing to parse must not 500 the entire history for
+                // this booking; it just renders with the fields it can't recover blanked out.
+                ReassignmentAuditPayload? payload = null;
+                if (!string.IsNullOrWhiteSpace(log.ChangesJson))
+                {
+                    try
+                    {
+                        payload = JsonSerializer.Deserialize<ReassignmentAuditPayload>(log.ChangesJson);
+                    }
+                    catch (JsonException)
+                    {
+                        _logger.LogWarning("Unparseable teacher-reassignment audit payload on log {LogId} for booking {BookingId}", log.Id, bookingId);
+                    }
+                }
+
+                return new DemoReassignmentHistoryDto
+                {
+                    Id = log.Id,
+                    AtUtc = log.CreatedAtUtc,
+                    ActorName = log.ActorUserId.HasValue && actorNames.TryGetValue(log.ActorUserId.Value, out var name) ? name : null,
+                    OldTeacherName = payload?.OldTeacherName,
+                    NewTeacherName = payload?.NewTeacherName ?? "—",
+                    Reason = payload?.Reason,
+                };
+            }).ToList();
+        }
+
+        private sealed record ReassignmentAuditPayload(
+            Guid? OldTeacherProfileId, string? OldTeacherName, Guid NewTeacherProfileId, string NewTeacherName, string? Reason);
+
         private IQueryable<DemoBooking> BaseQuery()
         {
             return _unitOfWork.Repository<DemoBooking>().Query()
                 .Include(b => b.ClassSession!).ThenInclude(s => s.TeacherProfile).ThenInclude(t => t.User)
-                .Include(b => b.Participants);
+                .Include(b => b.Participants)
+                .Include(b => b.Department);
         }
     }
 }

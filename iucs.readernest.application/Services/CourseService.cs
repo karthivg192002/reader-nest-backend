@@ -1,4 +1,7 @@
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
+using iucs.readernest.application.Common.Interfaces;
+using iucs.readernest.application.Dto.Common;
 using iucs.readernest.application.Dto.Courses;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Entities.Academics;
@@ -12,20 +15,21 @@ namespace iucs.readernest.application.Services
 {
     public class CourseService : ICourseService
     {
-        private static readonly int[] AllowedDurations = [30, 45, 60];
-
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
+        private readonly IBulkFileReader _bulkFileReader;
 
-        public CourseService(IUnitOfWork unitOfWork, IAuditLogService auditLog)
+        public CourseService(IUnitOfWork unitOfWork, IAuditLogService auditLog, IBulkFileReader bulkFileReader)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
+            _bulkFileReader = bulkFileReader;
         }
 
         public async Task<IReadOnlyList<CourseCategoryDto>> ListCategoriesAsync(CancellationToken cancellationToken = default)
         {
             var categories = await _unitOfWork.Repository<CourseCategory>().Query()
+                .Include(c => c.Department)
                 .OrderBy(c => c.Name)
                 .ToListAsync(cancellationToken);
 
@@ -39,16 +43,33 @@ namespace iucs.readernest.application.Services
             var name = request.Name.Trim();
             var repository = _unitOfWork.Repository<CourseCategory>();
 
-            if (await repository.ExistsAsync(c => c.Name == name, cancellationToken))
+            // Scoped to the department, not global: two departments legitimately reuse the same
+            // category name (e.g. a "Level 1" under both Hindi and Maths), and the frontend's
+            // own ensureCategory() already assumes this -- it only treats an existing category as
+            // a match when its DepartmentId matches too, otherwise it tries to create a new one
+            // scoped to the target department. A global check here rejected that second create
+            // outright, even though nothing actually collided.
+            if (await repository.ExistsAsync(c => c.Name == name && c.DepartmentId == request.DepartmentId, cancellationToken))
             {
-                throw new ConflictException($"A course category named '{name}' already exists.");
+                throw new ConflictException($"A course category named '{name}' already exists in this department.");
             }
+
+            // Fetched (not just checked for existence) so the navigation is set below —
+            // ToDto() reads category.Department.Name directly, and without it the create
+            // response comes back with an empty departmentName even though the same row
+            // shows the real name a moment later from ListCategoriesAsync (which does
+            // Include(c => c.Department)). Two endpoints for the same resource returning a
+            // different shape for the same field is exactly the kind of thing a client can't
+            // work around.
+            var department = await _unitOfWork.Repository<Department>().GetByIdAsync(request.DepartmentId, cancellationToken)
+                ?? throw new NotFoundException(nameof(Department), request.DepartmentId);
 
             var category = new CourseCategory
             {
                 Name = name,
                 Description = request.Description,
-                Department = request.Department,
+                DepartmentId = request.DepartmentId,
+                Department = department,
             };
             await repository.AddAsync(category, cancellationToken);
             await _auditLog.StageAsync(AuditAction.Create, nameof(CourseCategory), category.Id.ToString(), cancellationToken: cancellationToken);
@@ -59,7 +80,10 @@ namespace iucs.readernest.application.Services
 
         public async Task<IReadOnlyList<CourseDto>> ListAsync(bool includeInactive = false, CancellationToken cancellationToken = default)
         {
-            var query = _unitOfWork.Repository<Course>().Query().Include(c => c.CourseCategory).AsQueryable();
+            var query = _unitOfWork.Repository<Course>().Query()
+                .Include(c => c.CourseCategory)
+                .Include(c => c.Department)
+                .AsQueryable();
             if (!includeInactive)
             {
                 query = query.Where(c => c.IsActive);
@@ -114,7 +138,7 @@ namespace iucs.readernest.application.Services
             return await _unitOfWork.Repository<Course>().Query()
                 .Where(c => c.IsActive)
                 .OrderBy(c => c.Name)
-                .Select(c => new CourseOptionDto { Id = c.Id, Name = c.Name })
+                .Select(c => new CourseOptionDto { Id = c.Id, Name = c.Name, Type = c.Type })
                 .ToListAsync(cancellationToken);
         }
 
@@ -122,6 +146,7 @@ namespace iucs.readernest.application.Services
         {
             var course = await _unitOfWork.Repository<Course>().Query()
                 .Include(c => c.CourseCategory)
+                .Include(c => c.Department)
                 .FirstOrDefaultAsync(c => c.Id == id, cancellationToken)
                 ?? throw new NotFoundException(nameof(Course), id);
 
@@ -132,7 +157,7 @@ namespace iucs.readernest.application.Services
 
         public async Task<CourseDto> CreateAsync(SaveCourseRequest request, CancellationToken cancellationToken = default)
         {
-            var category = await ValidateAsync(request, cancellationToken);
+            var (category, department) = await ValidateAsync(request, cancellationToken);
 
             var course = new Course
             {
@@ -144,7 +169,8 @@ namespace iucs.readernest.application.Services
                 DurationMinutes = request.DurationMinutes,
                 Price = request.Price,
                 TotalSessions = request.TotalSessions,
-                Department = request.Department,
+                DepartmentId = request.DepartmentId,
+                Department = department,
                 IsActive = request.IsActive,
             };
             await _unitOfWork.Repository<Course>().AddAsync(course, cancellationToken);
@@ -156,7 +182,7 @@ namespace iucs.readernest.application.Services
 
         public async Task<CourseDto> UpdateAsync(Guid id, SaveCourseRequest request, CancellationToken cancellationToken = default)
         {
-            var category = await ValidateAsync(request, cancellationToken);
+            var (category, department) = await ValidateAsync(request, cancellationToken);
             var course = await _unitOfWork.Repository<Course>().GetByIdAsync(id, cancellationToken)
                 ?? throw new NotFoundException(nameof(Course), id);
 
@@ -205,7 +231,8 @@ namespace iucs.readernest.application.Services
             course.DurationMinutes = request.DurationMinutes;
             course.Price = request.Price;
             course.TotalSessions = request.TotalSessions;
-            course.Department = request.Department;
+            course.DepartmentId = request.DepartmentId;
+            course.Department = department;
             course.IsActive = request.IsActive;
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(Course), course.Id.ToString(), cancellationToken: cancellationToken);
@@ -214,15 +241,116 @@ namespace iucs.readernest.application.Services
             return course.ToDto();
         }
 
-        private async Task<CourseCategory> ValidateAsync(SaveCourseRequest request, CancellationToken cancellationToken)
+        public async Task<BulkImportResult> BulkImportAsync(Stream file, string fileName, CancellationToken cancellationToken = default)
         {
-            if (!AllowedDurations.Contains(request.DurationMinutes))
+            var rows = _bulkFileReader.ReadRows(file, fileName);
+            var result = new BulkImportResult { TotalRows = rows.Count };
+
+            for (var i = 0; i < rows.Count; i++)
             {
-                throw new DomainValidationException("Class duration must be 30, 45 or 60 minutes.");
+                var rowNumber = i + 2;
+                try
+                {
+                    var row = rows[i];
+                    var name = row.GetOrNull("Name") ?? throw new DomainValidationException("Name is required.");
+                    var departmentName = row.GetOrNull("DepartmentName")
+                        ?? throw new DomainValidationException("DepartmentName is required.");
+                    var categoryName = row.GetOrNull("CategoryName")
+                        ?? throw new DomainValidationException("CategoryName is required.");
+                    var typeText = row.GetOrNull("Type") ?? "Group";
+                    if (!Enum.TryParse<CourseType>(typeText, true, out var type))
+                    {
+                        throw new DomainValidationException($"Type '{typeText}' is not valid — use Individual or Group.");
+                    }
+
+                    var durationText = row.GetOrNull("DurationMinutes")
+                        ?? throw new DomainValidationException("DurationMinutes is required.");
+                    if (!int.TryParse(durationText, out var duration))
+                    {
+                        throw new DomainValidationException($"DurationMinutes '{durationText}' is not a whole number.");
+                    }
+
+                    var priceText = row.GetOrNull("Price") ?? throw new DomainValidationException("Price is required.");
+                    if (!decimal.TryParse(priceText, out var price))
+                    {
+                        throw new DomainValidationException($"Price '{priceText}' is not a number.");
+                    }
+
+                    var sessionsText = row.GetOrNull("TotalSessions")
+                        ?? throw new DomainValidationException("TotalSessions is required.");
+                    if (!int.TryParse(sessionsText, out var totalSessions))
+                    {
+                        throw new DomainValidationException($"TotalSessions '{sessionsText}' is not a whole number.");
+                    }
+
+                    var department = await _unitOfWork.Repository<Department>()
+                        .FirstOrDefaultAsync(d => d.Name == departmentName, cancellationToken)
+                        ?? throw new NotFoundException($"No department named '{departmentName}' — create it first (or via the Departments bulk import).");
+
+                    var category = await _unitOfWork.Repository<CourseCategory>()
+                        .FirstOrDefaultAsync(c => c.Name == categoryName && c.DepartmentId == department.Id, cancellationToken);
+                    if (category is null)
+                    {
+                        var created = await CreateCategoryAsync(
+                            new CreateCourseCategoryRequest { Name = categoryName, DepartmentId = department.Id },
+                            cancellationToken);
+                        category = await _unitOfWork.Repository<CourseCategory>().GetByIdAsync(created.Id, cancellationToken);
+                    }
+
+                    await CreateAsync(
+                        new SaveCourseRequest
+                        {
+                            CourseCategoryId = category!.Id,
+                            Name = name,
+                            Description = row.GetOrNull("Description"),
+                            Type = type,
+                            DurationMinutes = duration,
+                            Price = price,
+                            TotalSessions = totalSessions,
+                            DepartmentId = department.Id,
+                            IsActive = row.GetBool("IsActive"),
+                        },
+                        cancellationToken);
+                    result.SucceededCount++;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    result.FailedCount++;
+                    result.Errors.Add(new BulkImportRowError { RowNumber = rowNumber, Message = ex.Message });
+                }
             }
 
-            return await _unitOfWork.Repository<CourseCategory>().GetByIdAsync(request.CourseCategoryId, cancellationToken)
+            return result;
+        }
+
+        public async Task<string> ExportCsvAsync(bool includeInactive, CancellationToken cancellationToken = default)
+        {
+            var courses = await ListAsync(includeInactive, cancellationToken);
+            string[] headers = ["DepartmentName", "CategoryName", "Name", "Description", "Type", "DurationMinutes", "Price", "TotalSessions", "IsActive"];
+            var rows = courses.Select(c => new List<string?>
+            {
+                c.DepartmentName, c.CategoryName, c.Name, c.Description, c.Type.ToString(),
+                c.DurationMinutes.ToString(), c.Price.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                c.TotalSessions.ToString(), c.IsActive ? "true" : "false",
+            });
+            return CsvWriter.BuildCsv(headers, rows);
+        }
+
+        private async Task<(CourseCategory Category, Department Department)> ValidateAsync(
+            SaveCourseRequest request, CancellationToken cancellationToken)
+        {
+            if (request.DurationMinutes <= 0)
+            {
+                throw new DomainValidationException("Class duration must be a positive number of minutes.");
+            }
+
+            var department = await _unitOfWork.Repository<Department>().GetByIdAsync(request.DepartmentId, cancellationToken)
+                ?? throw new NotFoundException(nameof(Department), request.DepartmentId);
+
+            var category = await _unitOfWork.Repository<CourseCategory>().GetByIdAsync(request.CourseCategoryId, cancellationToken)
                 ?? throw new NotFoundException(nameof(CourseCategory), request.CourseCategoryId);
+
+            return (category, department);
         }
     }
 }

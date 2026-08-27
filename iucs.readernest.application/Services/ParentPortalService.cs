@@ -51,31 +51,37 @@ namespace iucs.readernest.application.Services
             // ever had into memory just to average it — the counting now happens in SQL.
             var childIds = children.Select(c => c.Id).ToList();
 
+            // EnrolledAtUtc (BatchEnrollment.CreatedAtUtc) scopes which of the batch's sessions
+            // actually count for THIS child below — a batch that's been running for weeks
+            // before a new child transfers in must not credit them with classes that happened
+            // before they joined. (Known, accepted limitation: re-activating a previously
+            // withdrawn enrollment updates the same row in place — see AssignStudentAsync — so
+            // CreatedAtUtc reflects the child's first-ever join date, not a later
+            // re-activation. Re-enrollment timing is a separate concern from the bug this fixes.)
             var enrollments = await _unitOfWork.Repository<BatchEnrollment>().Query()
                 .Where(e => childIds.Contains(e.ChildId) && e.Status == EnrollmentStatus.Active)
-                .Select(e => new { e.ChildId, e.BatchId })
+                .Select(e => new { e.ChildId, e.BatchId, EnrolledAtUtc = e.CreatedAtUtc })
                 .ToListAsync(cancellationToken);
             var batchIdsByChild = enrollments
                 .GroupBy(e => e.ChildId)
-                .ToDictionary(g => g.Key, g => g.Select(e => e.BatchId).ToList());
+                .ToDictionary(g => g.Key, g => g.Select(e => (e.BatchId, e.EnrolledAtUtc)).ToList());
             var allBatchIds = enrollments.Select(e => e.BatchId).Distinct().ToList();
 
-            // Counted per batch, then summed across each child's batches — identical to the
-            // per-child "sessions whose BatchId is in this child's batches" count before.
-            var sessionCountsByBatch = await _unitOfWork.Repository<ClassSession>().Query()
-                .Where(s => s.BatchId != null && allBatchIds.Contains(s.BatchId.Value)
-                            && (s.Status == SessionStatus.Completed
-                                || s.Status == SessionStatus.Scheduled
-                                || s.Status == SessionStatus.CarriedForward))
-                .GroupBy(s => s.BatchId!.Value)
-                .Select(g => new
-                {
-                    BatchId = g.Key,
-                    Completed = g.Count(s => s.Status == SessionStatus.Completed),
-                    Upcoming = g.Count(s => s.Status == SessionStatus.Scheduled
-                                            || s.Status == SessionStatus.CarriedForward),
-                })
-                .ToDictionaryAsync(x => x.BatchId, cancellationToken);
+            // Raw session rows per batch (status + start time only) instead of a pre-aggregated
+            // per-batch count: whether a given session counts for a given child now depends on
+            // that child's OWN EnrolledAtUtc, which can differ between two children in the same
+            // batch, so the count can no longer be computed once and shared across every child
+            // enrolled in it. Still one query for the whole sibling group, not one per child —
+            // the per-child filtering below runs in memory over an already-fetched, bounded list.
+            var sessionsByBatch = (await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.BatchId != null && allBatchIds.Contains(s.BatchId.Value)
+                                && (s.Status == SessionStatus.Completed
+                                    || s.Status == SessionStatus.Scheduled
+                                    || s.Status == SessionStatus.CarriedForward))
+                    .Select(s => new { BatchId = s.BatchId!.Value, s.Status, s.ScheduledStartAtUtc })
+                    .ToListAsync(cancellationToken))
+                .GroupBy(s => s.BatchId)
+                .ToDictionary(g => g.Key, g => g.ToList());
 
             var attendanceByChild = await _unitOfWork.Repository<SessionAttendance>().Query()
                 .Where(a => a.ChildId != null && childIds.Contains(a.ChildId.Value))
@@ -93,14 +99,24 @@ namespace iucs.readernest.application.Services
             {
                 var completed = 0;
                 var upcoming = 0;
-                if (batchIdsByChild.TryGetValue(child.Id, out var childBatchIds))
+                if (batchIdsByChild.TryGetValue(child.Id, out var childBatches))
                 {
-                    foreach (var batchId in childBatchIds)
+                    foreach (var (batchId, enrolledAtUtc) in childBatches)
                     {
-                        if (sessionCountsByBatch.TryGetValue(batchId, out var counts))
+                        if (!sessionsByBatch.TryGetValue(batchId, out var sessions))
                         {
-                            completed += counts.Completed;
-                            upcoming += counts.Upcoming;
+                            continue;
+                        }
+
+                        foreach (var s in sessions)
+                        {
+                            if (s.ScheduledStartAtUtc < enrolledAtUtc)
+                            {
+                                continue; // happened before this child actually joined the batch
+                            }
+
+                            if (s.Status == SessionStatus.Completed) completed++;
+                            else upcoming++; // Scheduled or CarriedForward
                         }
                     }
                 }

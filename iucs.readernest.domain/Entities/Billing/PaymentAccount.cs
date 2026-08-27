@@ -1,23 +1,25 @@
 using System.ComponentModel.DataAnnotations;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Common;
-using iucs.readernest.domain.Enums;
 using Microsoft.EntityFrameworkCore;
 
 namespace iucs.readernest.domain.Entities.Billing
 {
     /// <summary>
-    /// A payment gateway account. The platform runs two: one for the Phonics
-    /// department and one for Maths; every invoice/transaction routes through
-    /// exactly one account so revenue is recorded department-wise.
+    /// A payment gateway account. The platform ships with two (Phonics, Maths) but any
+    /// admin-added department needs its own account too, so every invoice/transaction
+    /// routes through exactly one and revenue is recorded department-wise.
     /// Gateway credentials/secrets are NOT stored here — only an external reference.
     /// </summary>
-    [Index(nameof(Department), IsUnique = true)]
+    [Index(nameof(DepartmentId), IsUnique = true)]
     public class PaymentAccount : AuditEntity
     {
         [MaxLength(150)]
         public string Name { get; set; } = null!;
 
-        public Department Department { get; set; }
+        public Guid DepartmentId { get; set; }
+
+        public Department Department { get; set; } = null!;
 
         [MaxLength(100)]
         public string GatewayProvider { get; set; } = null!;

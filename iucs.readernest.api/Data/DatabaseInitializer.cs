@@ -3,6 +3,7 @@ using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Users;
 using iucs.readernest.domain.Data;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Communication;
 using iucs.readernest.domain.Entities.Integrations;
@@ -33,6 +34,7 @@ namespace iucs.readernest.api.Data
 
             await SeedAdminAsync(scope.ServiceProvider, context, configuration);
             await EnsureAdminPinAsync(scope.ServiceProvider, context, configuration);
+            await SeedDepartmentsAsync(context);
             await SeedPaymentAccountsAsync(context);
             await SeedSettingsAsync(context);
             await SeedRolesAsync(context);
@@ -41,6 +43,9 @@ namespace iucs.readernest.api.Data
             await RemoveRetiredMenusAsync(context);
             await EnsureSubAdminIntegrationsMenuAsync(context);
             await EnsurePackagesAndStudentViewMenusAsync(context);
+            await EnsureAdminDepartmentsMenuAsync(context);
+            await EnsureAdminQuizBankMenuAsync(context);
+            await EnsureAdminServerMonitoringMenuAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
             await EnsureCashPaymentMethodAsync(context);
@@ -52,8 +57,14 @@ namespace iucs.readernest.api.Data
             await EnsureEmailTemplatesMenuAsync(context);
             await EnsureProgressReportEmailTemplateAsync(context);
             await EnsurePinResetEmailTemplateAsync(context);
+            await EnsureAccessRequestEmailTemplatesAsync(context);
+            await ReconcileOrgNameEmailTemplatesAsync(context);
             await EnsureProgressReportsMenuAsync(context);
             await EnsureStoreInquiriesMenuAsync(context);
+            await EnsureParentRecordingsMenuAsync(context);
+            await EnsureChatbotMenusAsync(context);
+            await SeedChatFaqsAsync(context);
+            await EnsureAdditionalChatFaqsAsync(context);
             await BackfillPlainTextNotificationBodiesAsync(context);
 
             await context.SaveChangesAsync();
@@ -123,6 +134,25 @@ namespace iucs.readernest.api.Data
             }
         }
 
+        /// <summary>
+        /// Departments used to be a fixed 2-value enum (Phonics, Maths); now they're an
+        /// admin-manageable table (Settings/Departments screen can add more, e.g. Hindi,
+        /// Abacus, Spoken English) but the two original ones still seed under fixed, known
+        /// ids (<see cref="WellKnownDepartments"/>) so the handful of "default to Phonics"
+        /// fallbacks elsewhere (BillingService, EnrollmentService) have a stable id to use.
+        /// </summary>
+        private static async Task SeedDepartmentsAsync(ReaderNestDbContext context)
+        {
+            if (await context.Departments.AnyAsync())
+            {
+                return;
+            }
+
+            context.Departments.AddRange(
+                new Department { Id = WellKnownDepartments.Phonics, Name = "Phonics", IsActive = true },
+                new Department { Id = WellKnownDepartments.Maths, Name = "Maths", IsActive = true });
+        }
+
         private static async Task SeedPaymentAccountsAsync(ReaderNestDbContext context)
         {
             if (await context.PaymentAccounts.AnyAsync())
@@ -138,14 +168,14 @@ namespace iucs.readernest.api.Data
                 new PaymentAccount
                 {
                     Name = "Phonics Department Account",
-                    Department = Department.Phonics,
+                    DepartmentId = WellKnownDepartments.Phonics,
                     GatewayProvider = "razorpay",
                     GatewayAccountRef = "phonics-account",
                 },
                 new PaymentAccount
                 {
                     Name = "Maths Department Account",
-                    Department = Department.Maths,
+                    DepartmentId = WellKnownDepartments.Maths,
                     GatewayProvider = "cashfree",
                     GatewayAccountRef = "maths-account",
                 });
@@ -438,9 +468,11 @@ namespace iucs.readernest.api.Data
         [
             ("admin", null, "Dashboard", "/admin", "LayoutDashboard", null),
             ("admin", "Academics", "Courses", "/admin/courses", "BookOpen", PermissionModule.CourseBatchManagement),
+            ("admin", "Academics", "Departments", "/admin/departments", "Building2", PermissionModule.CourseBatchManagement),
             ("admin", "Academics", "Batches", "/admin/batches", "Layers", PermissionModule.CourseBatchManagement),
             ("admin", "Academics", "Academic Calendar", "/admin/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement),
             ("admin", "Academics", "Sessions", "/admin/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement),
+            ("admin", "Academics", "Quiz Bank", "/admin/quiz-bank", "Sparkles", PermissionModule.CourseBatchManagement),
             ("admin", "People", "Users", "/admin/users", "Users", PermissionModule.UserManagement),
             ("admin", "People", "Roles & Permissions", "/admin/permissions", "ShieldCheck", PermissionModule.UserManagement),
             ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck", PermissionModule.Admission),
@@ -455,18 +487,21 @@ namespace iucs.readernest.api.Data
             ("admin", "Insights", "Bulk Email", "/admin/bulk-email", "Mail", PermissionModule.Communication),
             ("admin", "Insights", "Email Templates", "/admin/email-templates", "FileText", PermissionModule.Communication),
             ("admin", "Insights", "Progress Reports", "/admin/progress-reports", "ScrollText", PermissionModule.Communication),
+            ("admin", "Insights", "Doubt Chatbot", "/admin/chatbot", "MessageCircleQuestion", PermissionModule.Communication),
             ("admin", "System", "Settings & Branding", "/admin/settings", "Settings", PermissionModule.Settings),
             ("teacher", null, "Dashboard", "/teacher", "LayoutDashboard", null),
             ("teacher", "Teaching", "My Classes", "/teacher/classes", "CalendarClock", PermissionModule.SessionCalendarManagement),
             ("teacher", "Teaching", "Live Classroom", "/teacher/live/s-1", "Video", PermissionModule.SessionCalendarManagement),
             ("teacher", "Teaching", "Attendance & Records", "/teacher/attendance", "ClipboardList", PermissionModule.SessionCalendarManagement),
             ("teacher", "Teaching", "Demo Feedback", "/teacher/demo-feedback", "ClipboardCheck", PermissionModule.SessionCalendarManagement),
+            ("teacher", "Teaching", "Student Doubts", "/teacher/doubts", "MessageCircleQuestion", PermissionModule.Communication),
             ("teacher", "My Account", "Leave Management", "/teacher/leave", "CalendarOff", PermissionModule.LeaveManagement),
             ("teacher", "My Account", "My Payout", "/teacher/payout", "Banknote", PermissionModule.Payouts),
             ("teacher", "My Account", "Resources", "/teacher/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
             ("parent", null, "Dashboard", "/parent", "LayoutDashboard", null),
             ("parent", "Learning", "Schedule & Live Class", "/parent/schedule", "CalendarClock", PermissionModule.SessionCalendarManagement),
-            ("parent", "Learning", "Resources & Recordings", "/parent/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
+            ("parent", "Learning", "Resources", "/parent/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
+            ("parent", "Learning", "Recordings", "/parent/recordings", "Video", PermissionModule.ContentAccessManagement),
             ("parent", "Learning", "Student View", "/student", "Sparkles", null),
             ("parent", "Account", "Payments & Billing", "/parent/billing", "CreditCard", PermissionModule.BillingFinance),
             ("parent", "Account", "Notifications & Reports", "/parent/notifications", "Bell", PermissionModule.Communication),
@@ -616,6 +651,125 @@ namespace iucs.readernest.api.Data
                     RequiredModule = null,
                 });
             }
+        }
+
+        /// <summary>
+        /// Inserts the Admin "Departments" menu item into a database that was seeded before
+        /// the dynamic Department feature existed (SeedMenusAsync only ever creates rows
+        /// once). Slotted directly after "Courses" in Academics, nudging Batches/Calendar/
+        /// Sessions down a slot so nothing collides. Mirrors EnsureSubAdminIntegrationsMenuAsync.
+        /// </summary>
+        private static async Task EnsureAdminDepartmentsMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/admin/departments";
+            if (context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == path))
+            {
+                return;
+            }
+
+            var courses = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "admin" && m.Path == "/admin/courses");
+            var academicsItems = await context.MenuItems
+                .Where(m => m.Portal == "admin" && m.Section == "Academics")
+                .ToListAsync();
+            var insertAt = (courses?.SortOrder ?? -1) + 1;
+            foreach (var item in academicsItems.Where(m => m.SortOrder >= insertAt))
+            {
+                item.SortOrder += 1;
+            }
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "admin",
+                Section = "Academics",
+                SectionOrder = courses?.SectionOrder ?? 1,
+                Label = "Departments",
+                Path = path,
+                Icon = "Building2",
+                SortOrder = insertAt,
+                IsActive = true,
+                RequiredModule = PermissionModule.CourseBatchManagement,
+            });
+        }
+
+        /// <summary>
+        /// Inserts the Admin "Quiz Bank" menu item into a database that was seeded before the
+        /// admin-authored quiz bank existed (SeedMenusAsync only ever creates rows once).
+        /// Appended after whatever the Academics section's last item currently is, rather than
+        /// shifted in like EnsureAdminDepartmentsMenuAsync — nothing after it in that section
+        /// needs to move.
+        /// </summary>
+        private static async Task EnsureAdminQuizBankMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/admin/quiz-bank";
+            if (context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == path))
+            {
+                return;
+            }
+
+            var academicsItems = await context.MenuItems
+                .Where(m => m.Portal == "admin" && m.Section == "Academics")
+                .ToListAsync();
+            if (academicsItems.Count == 0)
+            {
+                return; // no Academics section at all (unexpected) — nothing sensible to append after
+            }
+
+            var last = academicsItems.OrderByDescending(m => m.SortOrder).First();
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "admin",
+                Section = "Academics",
+                SectionOrder = last.SectionOrder,
+                Label = "Quiz Bank",
+                Path = path,
+                Icon = "Sparkles",
+                SortOrder = last.SortOrder + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.CourseBatchManagement,
+            });
+        }
+
+        /// <summary>
+        /// Inserts the Admin "Server Monitoring" menu item into a database that was seeded
+        /// before that screen existed (SeedMenusAsync only ever creates rows once). Appended
+        /// after whatever the System section's last item currently is (today just "Settings &amp;
+        /// Branding"), same idiom as EnsureAdminQuizBankMenuAsync.
+        /// </summary>
+        private static async Task EnsureAdminServerMonitoringMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/admin/monitoring";
+            if (context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == path))
+            {
+                return;
+            }
+
+            var systemItems = await context.MenuItems
+                .Where(m => m.Portal == "admin" && m.Section == "System")
+                .ToListAsync();
+            if (systemItems.Count == 0)
+            {
+                return; // no System section at all (unexpected) — nothing sensible to append after
+            }
+
+            var last = systemItems.OrderByDescending(m => m.SortOrder).First();
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "admin",
+                Section = "System",
+                SectionOrder = last.SectionOrder,
+                Label = "Server Monitoring",
+                Path = path,
+                Icon = "Activity",
+                SortOrder = last.SortOrder + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.SystemMonitoring,
+            });
         }
 
         private static async Task SeedMenusAsync(ReaderNestDbContext context)
@@ -885,6 +1039,176 @@ namespace iucs.readernest.api.Data
         }
 
         /// <summary>
+        /// Retrofits the Admin "Doubt Chatbot" and Teacher "Student Doubts" menu items into a
+        /// database seeded before the chatbot feature existed (mirrors EnsureProgressReportsMenuAsync).
+        /// Fresh databases already get both from MenuSeedItems().
+        /// </summary>
+        private static async Task EnsureChatbotMenusAsync(ReaderNestDbContext context)
+        {
+            if (!context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == "/admin/chatbot") &&
+                !await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == "/admin/chatbot"))
+            {
+                var progressReports = await context.MenuItems
+                    .FirstOrDefaultAsync(m => m.Portal == "admin" && m.Path == "/admin/progress-reports");
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "admin",
+                    Section = "Insights",
+                    SectionOrder = progressReports?.SectionOrder ?? 4,
+                    Label = "Doubt Chatbot",
+                    Path = "/admin/chatbot",
+                    Icon = "MessageCircleQuestion",
+                    SortOrder = (progressReports?.SortOrder ?? 0) + 1,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.Communication,
+                });
+            }
+
+            if (!context.MenuItems.Local.Any(m => m.Portal == "teacher" && m.Path == "/teacher/doubts") &&
+                !await context.MenuItems.AnyAsync(m => m.Portal == "teacher" && m.Path == "/teacher/doubts"))
+            {
+                var demoFeedback = await context.MenuItems
+                    .FirstOrDefaultAsync(m => m.Portal == "teacher" && m.Path == "/teacher/demo-feedback");
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "teacher",
+                    Section = "Teaching",
+                    SectionOrder = demoFeedback?.SectionOrder ?? 0,
+                    Label = "Student Doubts",
+                    Path = "/teacher/doubts",
+                    Icon = "MessageCircleQuestion",
+                    SortOrder = (demoFeedback?.SortOrder ?? 0) + 1,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.Communication,
+                });
+            }
+        }
+
+        /// <summary>
+        /// Starter FAQ knowledge base for the "Ask a Doubt" chatbot — without this, a fresh
+        /// database has zero FAQs and every question (including a plain "hi") falls through
+        /// to teacher escalation, which is technically correct but useless out of the box.
+        /// Only runs once: skipped entirely once any ChatFaq row exists, so an admin's own
+        /// edits/deletes here are never re-added or overwritten on the next startup.
+        /// </summary>
+        private static async Task SeedChatFaqsAsync(ReaderNestDbContext context)
+        {
+            if (context.ChatFaqs.Local.Count > 0 || await context.ChatFaqs.AnyAsync())
+            {
+                return;
+            }
+
+            (string Question, string Answer, string Keywords, string Category)[] seeds =
+            [
+                ("How do I join my live class?",
+                 "Go to Schedule & Live Class (or My Classes if you're a teacher) and tap \"Join\" once the session shows as live — it opens a few minutes before the scheduled start time.",
+                 "join, live, class, session, meeting, link", "Classes"),
+                ("How do I schedule a demo class?",
+                 "Demo scheduling is handled by our Admission team — reach out via the contact details on your enrollment confirmation, or ask here and a teacher will follow up to arrange a time.",
+                 "schedule, demo, trial, book, appointment", "Classes"),
+                ("How do I pay my fees?",
+                 "Open Payments & Billing from your portal menu, pick the invoice, and pay by card, UPI, or bank transfer. You'll get a receipt by email once it clears.",
+                 "pay, fees, fee, billing, invoice, payment, money", "Billing"),
+                ("I forgot my password, what do I do?",
+                 "Use \"Forgot password\" on the login screen to reset it by email. If you don't get the email within a few minutes, check your spam folder or contact your coordinator.",
+                 "forgot, password, pin, login, reset, locked, access", "Account"),
+                ("Where can I find recordings of past classes?",
+                 "Recordings live under Recordings in your portal menu, listed by course and date, usually available within a couple of hours after the class ends.",
+                 "recording, recordings, video, past, missed, replay", "Classes"),
+                ("How do I check attendance?",
+                 "Attendance & Records shows every session's status. Teachers mark it right after class; it usually reflects within a few minutes.",
+                 "attendance, present, absent, records", "Classes"),
+                ("How do I contact my teacher?",
+                 "Use Notifications & Reports to message through the platform, or ask during your next live class — teachers don't share personal contact details directly.",
+                 "contact, teacher, message, talk, reach", "Communication"),
+                ("Where do I get homework or study resources?",
+                 "Check Resources in your portal menu — teachers upload homework, worksheets and study material there, organized by course.",
+                 "homework, resources, worksheet, study, material, assignment", "Classes"),
+            ];
+
+            for (var i = 0; i < seeds.Length; i++)
+            {
+                var (question, answer, keywords, category) = seeds[i];
+                context.ChatFaqs.Add(new ChatFaq
+                {
+                    Question = question,
+                    Answer = answer,
+                    Keywords = keywords,
+                    Category = category,
+                    IsActive = true,
+                    SortOrder = i,
+                });
+            }
+        }
+
+        /// <summary>
+        /// Widens the chatbot's free, rule-based coverage with more common doubts, added after
+        /// the original starter set shipped. SeedChatFaqsAsync only ever runs once (it bails
+        /// the instant any ChatFaq row exists), so new starter entries need their own
+        /// idempotent, per-question backfill here instead of just growing that seed array.
+        /// </summary>
+        private static async Task EnsureAdditionalChatFaqsAsync(ReaderNestDbContext context)
+        {
+            (string Question, string Answer, string Keywords, string Category)[] additions =
+            [
+                ("My audio or video isn't working during class",
+                 "Refresh the page and rejoin first — that fixes it most of the time. Otherwise check your browser has given the site camera/microphone permission, and that no other app (Zoom, another tab) is already using your camera or mic.",
+                 "audio, video, mic, microphone, camera, sound, hear, see, not working", "Classes"),
+                ("How do I use the whiteboard in class?",
+                 "The whiteboard opens automatically inside the live classroom. Your teacher controls who can draw — if you can't, ask them to give you board access during the session.",
+                 "whiteboard, draw, board, write", "Classes"),
+                ("How does the quiz during class work?",
+                 "When a teacher launches a live quiz, it pops up automatically in your classroom window — just pick your answer before time runs out. There's nothing to open separately.",
+                 "quiz, test, question, live quiz", "Classes"),
+                ("Can I get a refund if I cancel?",
+                 "Refund and cancellation requests are reviewed case-by-case — raise it here or with Admission and a teacher/admin will get back to you with the details for your enrollment.",
+                 "refund, cancel, cancellation, money back", "Billing"),
+                ("How do I add another child to my account?",
+                 "Use Add Child from your parent portal menu to enroll a sibling under the same account — you'll see both children from the same login afterward.",
+                 "add child, sibling, another child, second child, enroll", "Account"),
+                ("How do I request leave as a teacher?",
+                 "Use Leave Management in your portal menu to submit a request with your dates — your coordinator gets notified and approves or declines it there.",
+                 "leave, time off, absence, sick, vacation", "Account"),
+                ("When will I get my payout?",
+                 "Check My Payout in your portal menu for the schedule and status of your upcoming payout — it's calculated from your completed, attendance-confirmed classes.",
+                 "payout, salary, payment, earn, earnings, paid", "Billing"),
+                ("What if my internet disconnects during class?",
+                 "Just rejoin the same class link as soon as you're back online — the session keeps running, and you'll rejoin right where it is. Recordings are also available afterward if you miss too much.",
+                 "internet, disconnect, connection, dropped, lost, reconnect", "Classes"),
+            ];
+
+            var existingQuestions = (context.ChatFaqs.Local.Count > 0 ? context.ChatFaqs.Local.AsEnumerable() : [])
+                .Concat(await context.ChatFaqs.ToListAsync())
+                .Select(f => f.Question)
+                .ToHashSet();
+
+            var nextSortOrder = (context.ChatFaqs.Local.Count > 0 ? context.ChatFaqs.Local.Max(f => (int?)f.SortOrder) : null)
+                ?? await context.ChatFaqs.MaxAsync(f => (int?)f.SortOrder)
+                ?? -1;
+            nextSortOrder++;
+
+            foreach (var (question, answer, keywords, category) in additions)
+            {
+                if (existingQuestions.Contains(question))
+                {
+                    continue;
+                }
+
+                context.ChatFaqs.Add(new ChatFaq
+                {
+                    Question = question,
+                    Answer = answer,
+                    Keywords = keywords,
+                    Category = category,
+                    IsActive = true,
+                    SortOrder = nextSortOrder++,
+                });
+            }
+        }
+
+        /// <summary>
         /// Retrofits the "Store Inquiries" admin menu item into a database that was seeded
         /// before it existed (mirrors EnsureProgressReportsMenuAsync). Fresh databases already
         /// get it from MenuSeedItems(); this only fires for pre-existing ones.
@@ -911,6 +1235,44 @@ namespace iucs.readernest.api.Data
                 SortOrder = (enrollmentReview?.SortOrder ?? 0) + 1,
                 IsActive = true,
                 RequiredModule = PermissionModule.Admission,
+            });
+        }
+
+        /// <summary>
+        /// Retrofits the "Recordings" parent menu item (mirrors EnsureProgressReportsMenuAsync).
+        /// Fresh databases already get it from MenuSeedItems(); a pre-existing one only had
+        /// "Resources &amp; Recordings" → /parent/resources, whose own Recordings tab actually
+        /// reads a different, unrelated data source (the generic Resource library, not
+        /// SessionRecording) — so this also renames that older row back to plain "Resources"
+        /// (only if it still has its original label, so a since-hand-edited one is left alone)
+        /// to stop the two screens claiming the same name for two different things.
+        /// </summary>
+        private static async Task EnsureParentRecordingsMenuAsync(ReaderNestDbContext context)
+        {
+            var resources = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "parent" && m.Path == "/parent/resources");
+            if (resources is not null && resources.Label == "Resources & Recordings")
+            {
+                resources.Label = "Resources";
+            }
+
+            if (context.MenuItems.Local.Any(m => m.Portal == "parent" && m.Path == "/parent/recordings") ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "parent" && m.Path == "/parent/recordings"))
+            {
+                return;
+            }
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "parent",
+                Section = "Learning",
+                SectionOrder = resources?.SectionOrder ?? 0,
+                Label = "Recordings",
+                Path = "/parent/recordings",
+                Icon = "Video",
+                SortOrder = (resources?.SortOrder ?? 0) + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.ContentAccessManagement,
             });
         }
 
@@ -997,6 +1359,37 @@ namespace iucs.readernest.api.Data
         }
 
         /// <summary>
+        /// SeedEmailTemplatesAsync is insert-only, so a live DB that predates the Sub Admin
+        /// "request additional access" feature never picks these up on its own — inserts
+        /// whichever of the two rows is missing, mirroring EnsurePinResetEmailTemplateAsync.
+        /// </summary>
+        private static async Task EnsureAccessRequestEmailTemplatesAsync(ReaderNestDbContext context)
+        {
+            foreach (var key in new[] { "access-request-submitted-admin-alert", "access-request-reviewed" })
+            {
+                if (context.EmailTemplates.Local.Any(t => t.Key == key) ||
+                    await context.EmailTemplates.AnyAsync(t => t.Key == key))
+                {
+                    continue;
+                }
+
+                var seed = EmailTemplateSeedData.All.First(s => s.Key == key);
+                context.EmailTemplates.Add(new EmailTemplate
+                {
+                    Key = seed.Key,
+                    Name = seed.Name,
+                    Description = seed.Description,
+                    Category = seed.Category,
+                    Subject = seed.Subject,
+                    HtmlBody = seed.HtmlBody,
+                    PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders),
+                    IsActive = true,
+                    IsSystem = true,
+                });
+            }
+        }
+
+        /// <summary>
         /// SeedEmailTemplatesAsync is insert-only, so a live DB never picks up template text
         /// changes on its own — this backfills the direct {{JoinUrl}} join-link button into
         /// the two templates that gained it, skipping any row that already has the token
@@ -1060,6 +1453,31 @@ namespace iucs.readernest.api.Data
             existing.Subject = seed.Subject;
             existing.HtmlBody = seed.HtmlBody;
             existing.PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders);
+        }
+
+        /// <summary>
+        /// SeedEmailTemplatesAsync is insert-only, so a live DB seeded before every template's
+        /// header/footer (and two subjects/bodies) switched from a hardcoded "The Reader Nest"
+        /// to {{OrgName}} — resolved live from Settings -> Branding by EmailTemplateService,
+        /// see docs/WHITE_LABEL_BRANDING.md's "Product naming" row — still has the old fixed
+        /// text baked in. Reconciles every template still missing the token, skipping any an
+        /// admin has already edited themselves (same trade-off as the other Reconcile* methods
+        /// above: an admin's own subsequent edit is left alone, not overwritten again later).
+        /// </summary>
+        private static async Task ReconcileOrgNameEmailTemplatesAsync(ReaderNestDbContext context)
+        {
+            foreach (var seed in EmailTemplateSeedData.All)
+            {
+                var existing = await context.EmailTemplates.FirstOrDefaultAsync(t => t.Key == seed.Key);
+                if (existing is null || existing.HtmlBody.Contains("{{OrgName}}"))
+                {
+                    continue;
+                }
+
+                existing.Subject = seed.Subject;
+                existing.HtmlBody = seed.HtmlBody;
+                existing.PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders);
+            }
         }
     }
 }

@@ -2,9 +2,11 @@ using System.Data.Common;
 using System.Text.Json;
 using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Interfaces;
+using iucs.readernest.application.Dto.Billing;
 using iucs.readernest.domain.Common;
 using iucs.readernest.domain.Data;
 using iucs.readernest.domain.Data.Interceptors;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Communication;
 using iucs.readernest.domain.Entities.Users;
@@ -71,6 +73,30 @@ namespace iucs.readernest.tests
         {
             Sent.Add((toPhone, message));
             return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>Real parsing (CSV/XLSX via ClosedXML) lives in the api project's BulkFileReader,
+    /// which this test project doesn't reference — tests exercise the service-layer bulk-import
+    /// logic directly by preloading the rows a real parse would have produced.</summary>
+    public class FakeBulkFileReader : IBulkFileReader
+    {
+        public List<Dictionary<string, string>> Rows { get; set; } = [];
+
+        public List<Dictionary<string, string>> ReadRows(Stream content, string fileName) => Rows;
+    }
+
+    /// <summary>Real rendering (QuestPDF) lives in the api project's InvoicePdfGenerator, which
+    /// this test project doesn't reference — tests only need to prove GenerateInvoicePdfAsync
+    /// resolves the right invoice/data and calls through, not that a real PDF comes out.</summary>
+    public class FakeInvoicePdfGenerator : IInvoicePdfGenerator
+    {
+        public InvoicePdfData? LastRequest { get; private set; }
+
+        public byte[] Generate(InvoicePdfData data)
+        {
+            LastRequest = data;
+            return [1, 2, 3];
         }
     }
 
@@ -155,6 +181,12 @@ namespace iucs.readernest.tests
         {
             return Task.FromResult(signature == "valid");
         }
+
+        /// <summary>Keys listed here report as configured; everything else does not (default: everything).</summary>
+        public HashSet<string>? UnconfiguredKeys { get; set; }
+
+        public Task<bool> IsMethodConfiguredAsync(string integrationKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(UnconfiguredKeys is null || !UnconfiguredKeys.Contains(integrationKey));
     }
 
     /// <summary>
@@ -192,6 +224,13 @@ namespace iucs.readernest.tests
             string? participantEmail,
             bool moderator,
             DateTime expiresAtUtc) => null;
+
+        /// <summary>Defaults to false (mirrors "unconfigured"/invalid); a test that needs the
+        /// finalize-recording path to succeed sets this true first.</summary>
+        public bool ValidateFinalizeTokenResult { get; set; }
+
+        public bool ValidateFinalizeToken(string? bearerToken, string? jitsiConfigJson, string expectedRoom)
+            => ValidateFinalizeTokenResult;
     }
 
     /// <summary>
@@ -215,6 +254,14 @@ namespace iucs.readernest.tests
             Context = new ReaderNestDbContext(options);
             Context.Database.EnsureCreated();
             UnitOfWork = new UnitOfWork(Context);
+
+            // Departments used to be a fixed 2-value enum; every smoke test that seeds a
+            // Course/CourseCategory/PaymentAccount/etc. still assumes Phonics/Maths exist under
+            // these well-known ids (same as DatabaseInitializer.SeedDepartmentsAsync in the real
+            // app, which this in-memory fixture bypasses entirely via EnsureCreated()).
+            Context.Departments.AddRange(
+                new Department { Id = WellKnownDepartments.Phonics, Name = "Phonics", IsActive = true },
+                new Department { Id = WellKnownDepartments.Maths, Name = "Maths", IsActive = true });
 
             // Same catalog production seeds, so smoke tests exercise real templated
             // content (Subject/HtmlBody) instead of EmailTemplateService's fallback text.

@@ -23,6 +23,9 @@ namespace iucs.readernest.domain.Entities.Billing
 
         public int? SessionsIncluded { get; set; }
 
+        /// <summary>Days of access a subscription on this plan gets from its start date; null means it never expires on its own.</summary>
+        public int? ValidityDays { get; set; }
+
         public bool IsActive { get; set; } = true;
     }
 }

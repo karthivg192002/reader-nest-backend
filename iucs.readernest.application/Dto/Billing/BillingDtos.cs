@@ -19,6 +19,9 @@ namespace iucs.readernest.application.Dto.Billing
 
         public int? SessionsIncluded { get; set; }
 
+        /// <summary>How many days of access this plan grants from a subscription's start date; null means the plan never expires on its own (a recurring Subscription plan typically leaves this unset — BillingCycle already governs it).</summary>
+        public int? ValidityDays { get; set; }
+
         public bool IsActive { get; set; }
     }
 
@@ -42,6 +45,10 @@ namespace iucs.readernest.application.Dto.Billing
 
         [Range(1, 1000)]
         public int? SessionsIncluded { get; set; }
+
+        /// <summary>Days of access from a subscription's start date; leave unset for a plan that never expires on its own.</summary>
+        [Range(1, 3650)]
+        public int? ValidityDays { get; set; }
 
         public bool IsActive { get; set; } = true;
     }
@@ -69,7 +76,9 @@ namespace iucs.readernest.application.Dto.Billing
 
         public string? ParentEmail { get; set; }
 
-        public Department Department { get; set; }
+        public Guid DepartmentId { get; set; }
+
+        public string DepartmentName { get; set; } = null!;
 
         public decimal Amount { get; set; }
 
@@ -86,6 +95,49 @@ namespace iucs.readernest.application.Dto.Billing
         public DateTime? PaidAtUtc { get; set; }
     }
 
+    /// <summary>
+    /// Everything InvoicePdfGenerator needs to render one invoice — deliberately its own small
+    /// shape (not InvoiceDto) so the PDF layout doesn't silently break/change if InvoiceDto ever
+    /// gains or drops fields for unrelated (screen-display) reasons.
+    /// </summary>
+    public class InvoicePdfData
+    {
+        public string InvoiceNumber { get; set; } = null!;
+
+        public DateTime IssuedAtUtc { get; set; }
+
+        public string ParentName { get; set; } = null!;
+
+        public string? ParentPhone { get; set; }
+
+        /// <summary>Line description — the invoiced course's name, or a generic fallback when none is linked.</summary>
+        public string Description { get; set; } = null!;
+
+        public decimal Amount { get; set; }
+
+        public string Currency { get; set; } = null!;
+
+        // Org payment/GST/signatory details — admin-editable (Settings → General → Invoice
+        // Details, "invoice.*" keys), same on every invoice. BillingService resolves these
+        // from AppSetting, falling back to a "Not configured" placeholder until an admin
+        // fills them in — never a hardcoded real value (see BillingService.InvoiceSettingKeys).
+        public string AccountNumber { get; set; } = null!;
+
+        public string IfscCode { get; set; } = null!;
+
+        public string BranchName { get; set; } = null!;
+
+        public string GstNumber { get; set; } = null!;
+
+        public string AccountName { get; set; } = null!;
+
+        public string ContactEmail { get; set; } = null!;
+
+        public string SignatoryName { get; set; } = null!;
+
+        public string SignatoryTitle { get; set; } = null!;
+    }
+
     public class CreateInvoiceRequest
     {
         [Required]
@@ -100,7 +152,7 @@ namespace iucs.readernest.application.Dto.Billing
 
         /// <summary>Routes the invoice to the department's payment account (dual-gateway requirement).</summary>
         [Required]
-        public Department Department { get; set; }
+        public Guid DepartmentId { get; set; }
 
         [Required]
         [Range(0.01, 9_999_999)]
@@ -127,6 +179,9 @@ namespace iucs.readernest.application.Dto.Billing
         public SubscriptionStatus Status { get; set; }
 
         public DateOnly StartDate { get; set; }
+
+        /// <summary>When this subscription's access lapses on its own, from the plan's ValidityDays; null for a plan with no set validity window.</summary>
+        public DateOnly? EndDate { get; set; }
 
         public DateTime? NextBillingAtUtc { get; set; }
 

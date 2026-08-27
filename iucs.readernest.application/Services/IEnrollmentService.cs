@@ -1,3 +1,4 @@
+using iucs.readernest.application.Dto.Common;
 using iucs.readernest.application.Dto.Enrollment;
 using iucs.readernest.domain.Enums;
 
@@ -30,5 +31,16 @@ namespace iucs.readernest.application.Services
 
         /// <summary>Relationship Manager's special enrolment notes on a child's profile.</summary>
         Task UpdateChildNotesAsync(Guid childId, string? notes, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Row-by-row: each Child is created directly as active (an admin-operated bulk data
+        /// path, so this deliberately skips the parent-submitted EnrollmentForm approval step —
+        /// see UsersController.BulkImportStudents). Columns: ParentEmail (must match an existing
+        /// Parent account — no parent is ever created here), StudentFullName, DateOfBirth
+        /// (YYYY-MM-DD, optional), AcademicLevel (optional).
+        /// </summary>
+        Task<BulkImportResult> BulkImportStudentsAsync(Stream file, string fileName, CancellationToken cancellationToken = default);
+
+        Task<string> ExportStudentsCsvAsync(CancellationToken cancellationToken = default);
     }
 }

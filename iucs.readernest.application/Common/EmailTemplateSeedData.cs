@@ -20,16 +20,26 @@ namespace iucs.readernest.application.Common
     {
         public static IReadOnlyList<EmailTemplateSeed> All { get; } = Build();
 
+        // {{OrgName}} is injected centrally for every template by EmailTemplateService.RenderAsync
+        // (from the "brand.name" setting) — no caller here has to pass it explicitly. Fixes the
+        // white-labeling gap docs/WHITE_LABEL_BRANDING.md flags under "Product naming": this
+        // wrapper used to hardcode "The Reader Nest" directly, so it showed up in every email
+        // regardless of which org actually deployed the app. Held in a constant and interpolated
+        // like `bodyHtml` below rather than written as literal "{{OrgName}}" text, because a
+        // single-`$` interpolated raw string can't disambiguate a literal double-brace from an
+        // interpolation trigger.
+        private const string OrgNameToken = "{{OrgName}}";
+
         private static string Wrap(string bodyHtml) => $"""
             <div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;">
               <div style="background:#4F46E5;padding:20px 28px;border-radius:8px 8px 0 0;">
-                <span style="color:#ffffff;font-size:18px;font-weight:700;">The Reader Nest</span>
+                <span style="color:#ffffff;font-size:18px;font-weight:700;">{OrgNameToken}</span>
               </div>
               <div style="padding:28px;border:1px solid #E5E7EB;border-top:none;border-radius:0 0 8px 8px;color:#1F2937;font-size:14px;line-height:1.6;">
                 {bodyHtml}
               </div>
               <p style="color:#9CA3AF;font-size:12px;text-align:center;margin-top:16px;">
-                The Reader Nest &middot; Read &middot; Write &middot; Speak
+                {OrgNameToken} &middot; Read &middot; Write &middot; Speak
               </p>
             </div>
             """;
@@ -45,10 +55,10 @@ namespace iucs.readernest.application.Common
             [
                 New("welcome-credentials", "Welcome & Login Credentials",
                     "Sent when an account is created, and whenever an admin resends login credentials.",
-                    NotificationType.General, "Your Reader Nest account is ready",
+                    NotificationType.General, "Your {{OrgName}} account is ready",
                     """
                     <p>Hello {{FirstName}},</p>
-                    <p>Your Reader Nest account is ready.</p>
+                    <p>Your {{OrgName}} account is ready.</p>
                     <table style="width:100%;background:#F9FAFB;border-radius:6px;margin:16px 0;">
                       <tr><td style="padding:12px 16px;color:#6B7280;">Login</td><td style="padding:12px 16px;font-weight:600;">{{Email}}</td></tr>
                       <tr><td style="padding:12px 16px;color:#6B7280;">PIN</td><td style="padding:12px 16px;font-weight:600;">{{TemporaryPin}}</td></tr>
@@ -59,10 +69,10 @@ namespace iucs.readernest.application.Common
 
                 New("pin-reset", "Self-Service PIN Reset",
                     "Sent when someone requests a PIN reset from the login page's \"Forgot your PIN\" link.",
-                    NotificationType.General, "Reset your Reader Nest PIN",
+                    NotificationType.General, "Reset your {{OrgName}} PIN",
                     """
                     <p>Hello {{FirstName}},</p>
-                    <p>We received a request to reset the PIN for your Reader Nest account ({{Email}}).</p>
+                    <p>We received a request to reset the PIN for your {{OrgName}} account ({{Email}}).</p>
                     <p><a href="{{ResetUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">Set a new PIN</a></p>
                     <p style="font-size:12px;color:#6b7280;">This link expires in {{ExpiryMinutes}} minutes and can only be used once. If you didn't request this, you can ignore this email — your PIN stays unchanged.</p>
                     """,
@@ -88,6 +98,30 @@ namespace iucs.readernest.application.Common
                     <p style="font-size:12px;color:#6b7280;">This button becomes active 10 minutes before the session starts. You'll also get a reminder email closer to the time.</p>
                     """,
                     "ChildName", "WhenLocal", "JoinUrl"),
+
+                // Caught live: overriding a demo's assigned teacher (e.g. the original one calls
+                // in sick) had no notification path at all -- the newly-assigned teacher would
+                // only find out by checking their dashboard, and the displaced teacher would keep
+                // preparing for a demo that was no longer theirs.
+                New("demo-teacher-assigned", "Demo Teacher Assigned (Override)",
+                    "Sent to the teacher when they are manually assigned to a demo, replacing whoever was assigned before.",
+                    NotificationType.BookingConfirmation, "You've been assigned a demo class",
+                    """
+                    <p>You've been assigned to a demo class for <strong>{{ChildName}}</strong>:</p>
+                    <p style="font-weight:600;">{{StartAtLocal}} &ndash; {{EndAtLocal}}</p>
+                    <p>{{Reason}}</p>
+                    """,
+                    "ChildName", "StartAtLocal", "EndAtLocal", "Reason"),
+
+                New("demo-teacher-unassigned", "Demo Teacher Unassigned (Override)",
+                    "Sent to the teacher when they are manually removed from a demo they were assigned to.",
+                    NotificationType.BookingConfirmation, "You've been unassigned from a demo class",
+                    """
+                    <p>You've been removed from the demo class for <strong>{{ChildName}}</strong> previously scheduled for:</p>
+                    <p style="font-weight:600;">{{StartAtLocal}} &ndash; {{EndAtLocal}}</p>
+                    <p>No action is needed from you for this session.</p>
+                    """,
+                    "ChildName", "StartAtLocal", "EndAtLocal"),
 
                 New("session-reminder-teacher", "Class Reminder (Teacher)",
                     "Sent to the teacher one hour before their class starts.",
@@ -281,11 +315,84 @@ namespace iucs.readernest.application.Common
                     """,
                     "Amount", "Currency", "InvoiceNumber", "ReceiptNumber"),
 
+                // Caught live: NotificationType.FeeSuspension exists in the enum -- clearly
+                // intended for exactly this -- but had zero templates using it anywhere. A
+                // parent's access to sessions/content gets cut off by BillingBackgroundService's
+                // auto-suspend sweep with no warning or explanation at all; they'd only find out
+                // by trying to access something and being blocked. The auto-lift-on-payment case
+                // (ApplyPaymentToInvoiceAsync) deliberately isn't given its own email here -- the
+                // payment confirmation the parent already gets from that same event covers "you're
+                // square now" without a redundant second email; a manual admin lift (a goodwill
+                // gesture, possibly with no payment involved) still needs its own notification.
+                New("fee-suspended-parent", "Fee Suspension Applied (Parent)",
+                    "Sent to the parent when their account is automatically suspended for an overdue invoice.",
+                    NotificationType.FeeSuspension, "Your account has been suspended — invoice {{InvoiceNumber}}",
+                    """
+                    <p>Your account has been suspended because invoice {{InvoiceNumber}} is overdue.</p>
+                    <p>Sessions and content are paused until the outstanding balance is settled. Pay now to restore access immediately.</p>
+                    """,
+                    "InvoiceNumber"),
+
+                New("fee-suspension-lifted-parent", "Fee Suspension Lifted (Parent)",
+                    "Sent to the parent when an admin manually lifts their fee suspension.",
+                    NotificationType.FeeSuspension, "Your account access has been restored",
+                    """
+                    <p>Your account suspension has been lifted. Sessions and content are accessible again.</p>
+                    """),
+
+                // Caught live: the entire refund lifecycle (request -> approve/reject -> process)
+                // had zero communication at all -- neither billing staff learning a refund needs
+                // review, nor the parent ever learning whether theirs was rejected or actually
+                // paid out. No dedicated NotificationType exists for refunds; PaymentReceived is
+                // reused since a refund is the same category of money-movement event.
+                New("refund-requested-billing-staff", "Refund Requested (Billing Staff)",
+                    "Sent to Admin/Admission Team when a refund is requested against a payment.",
+                    NotificationType.PaymentReceived, "Refund requested — invoice {{InvoiceNumber}}",
+                    """
+                    <p>A refund of <strong>{{Amount}} {{Currency}}</strong> was requested against invoice {{InvoiceNumber}}.</p>
+                    <p>Reason given: {{Reason}}</p>
+                    <p>Review it in Billing &amp; Finance → Refunds.</p>
+                    """,
+                    "Amount", "Currency", "InvoiceNumber", "Reason"),
+
+                New("refund-rejected-parent", "Refund Rejected (Parent)",
+                    "Sent to the parent when their refund request is rejected.",
+                    NotificationType.PaymentReceived, "Your refund request was not approved — invoice {{InvoiceNumber}}",
+                    """
+                    <p>Your refund request of <strong>{{Amount}} {{Currency}}</strong> for invoice {{InvoiceNumber}} was not approved.</p>
+                    <p>Contact the centre if you have questions about this decision.</p>
+                    """,
+                    "Amount", "Currency", "InvoiceNumber"),
+
+                New("refund-processed-parent", "Refund Processed (Parent)",
+                    "Sent to the parent once their approved refund is actually paid out.",
+                    NotificationType.PaymentReceived, "Your refund has been processed — invoice {{InvoiceNumber}}",
+                    """
+                    <p>Your refund of <strong>{{Amount}} {{Currency}}</strong> for invoice {{InvoiceNumber}} has been processed.</p>
+                    <p>It may take a few business days to reflect in your original payment method.</p>
+                    """,
+                    "Amount", "Currency", "InvoiceNumber"),
+
+                // Caught live: SettleGatewayTransactionAsync (the real Razorpay/Cashfree webhook
+                // path -- what actually fires when a parent pays online) only ever notified
+                // Admins (payment-received-admin), never the parent themselves. A parent paying
+                // by cash got a confirmation email the moment staff confirmed it; a parent paying
+                // online got nothing from the platform at all, only whatever receipt the gateway
+                // itself happens to send under its own name.
+                New("gateway-payment-confirmed-parent", "Online Payment Confirmed (Parent)",
+                    "Sent to the parent once their online payment (Razorpay/Cashfree) settles.",
+                    NotificationType.PaymentReceived, "Payment received — invoice {{InvoiceNumber}}",
+                    """
+                    <p>We have received your payment of <strong>{{Amount}} {{Currency}}</strong> for invoice {{InvoiceNumber}}.</p>
+                    <p>Thank you.</p>
+                    """,
+                    "Amount", "Currency", "InvoiceNumber"),
+
                 New("weekly-kpi-digest", "Weekly KPI Digest (Admin)",
                     "Sent to Admins every Monday with the week's headline KPI numbers.",
                     NotificationType.General, "Weekly KPI digest",
                     """
-                    <p>Weekly Reader Nest KPI digest:</p>
+                    <p>Weekly {{OrgName}} KPI digest:</p>
                     <table style="width:100%;background:#F9FAFB;border-radius:6px;margin:16px 0;">
                       <tr><td style="padding:10px 16px;color:#6B7280;">Students</td><td style="padding:10px 16px;font-weight:600;">{{TotalStudents}} total / {{ActiveStudents}} active</td></tr>
                       <tr><td style="padding:10px 16px;color:#6B7280;">Revenue</td><td style="padding:10px 16px;font-weight:600;">{{RevenueCollected}} collected, {{RevenuePending}} pending</td></tr>
@@ -297,6 +404,26 @@ namespace iucs.readernest.application.Common
                     """,
                     "TotalStudents", "ActiveStudents", "RevenueCollected", "RevenuePending", "TotalEnrollments",
                     "ActiveBatches", "DormantBatches", "OccupancyPercent", "ConversionRate", "RefundRate", "Utilization"),
+
+                New("access-request-submitted-admin-alert", "Access Request Submitted (Admin)",
+                    "Sent to Admins when a Relationship Manager requests additional module access.",
+                    NotificationType.General, "Access request: {{RequesterName}}",
+                    """
+                    <p><strong>{{RequesterName}}</strong> ({{RequesterEmail}}) requested access to modules they don't currently hold:</p>
+                    <p style="font-weight:600;">{{RequestedModules}}</p>
+                    <p>Review it from Roles &amp; Permissions &rarr; Access Requests.</p>
+                    """,
+                    "RequesterName", "RequesterEmail", "RequestedModules"),
+
+                New("access-request-reviewed", "Access Request Reviewed (Relationship Manager)",
+                    "Sent to the Relationship Manager once an Admin approves or rejects their access request.",
+                    NotificationType.General, "Your access request was {{Status}}",
+                    """
+                    <p>Hi {{RequesterFirstName}},</p>
+                    <p>Your request for access to <strong>{{RequestedModules}}</strong> was <strong>{{Status}}</strong>.</p>
+                    <p>{{ReviewNote}}</p>
+                    """,
+                    "RequesterFirstName", "RequestedModules", "Status", "ReviewNote"),
             ];
         }
     }

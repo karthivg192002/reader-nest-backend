@@ -1,6 +1,6 @@
 using System.ComponentModel.DataAnnotations;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Common;
-using iucs.readernest.domain.Enums;
 using Microsoft.EntityFrameworkCore;
 
 namespace iucs.readernest.domain.Entities.Users
@@ -19,6 +19,8 @@ namespace iucs.readernest.domain.Entities.Users
         public string? Specialization { get; set; }
 
         /// <summary>Primary department; null when the teacher works across departments.</summary>
+        public Guid? DepartmentId { get; set; }
+
         public Department? Department { get; set; }
     }
 }

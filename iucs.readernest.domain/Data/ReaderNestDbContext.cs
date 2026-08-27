@@ -9,6 +9,7 @@ using iucs.readernest.domain.Entities.Integrations;
 using iucs.readernest.domain.Entities.Navigation;
 using iucs.readernest.domain.Entities.Notes;
 using iucs.readernest.domain.Entities.Payouts;
+using iucs.readernest.domain.Entities.Quizzes;
 using iucs.readernest.domain.Entities.Resources;
 using iucs.readernest.domain.Entities.Settings;
 using iucs.readernest.domain.Entities.Sessions;
@@ -35,8 +36,10 @@ namespace iucs.readernest.domain.Data
         public DbSet<RoleDefinition> RoleDefinitions => Set<RoleDefinition>();
         public DbSet<RolePermission> RolePermissions => Set<RolePermission>();
         public DbSet<PinResetToken> PinResetTokens => Set<PinResetToken>();
+        public DbSet<AccessRequest> AccessRequests => Set<AccessRequest>();
 
         // Academics
+        public DbSet<Department> Departments => Set<Department>();
         public DbSet<CourseCategory> CourseCategories => Set<CourseCategory>();
         public DbSet<Course> Courses => Set<Course>();
         public DbSet<Batch> Batches => Set<Batch>();
@@ -51,6 +54,10 @@ namespace iucs.readernest.domain.Data
         public DbSet<SessionRecording> SessionRecordings => Set<SessionRecording>();
         public DbSet<EngagementEvent> EngagementEvents => Set<EngagementEvent>();
         public DbSet<StudentAward> StudentAwards => Set<StudentAward>();
+
+        // Quizzes
+        public DbSet<QuizQuestion> QuizQuestions => Set<QuizQuestion>();
+        public DbSet<QuizQuestionOption> QuizQuestionOptions => Set<QuizQuestionOption>();
 
         // Admission
         public DbSet<DemoBooking> DemoBookings => Set<DemoBooking>();
@@ -82,6 +89,11 @@ namespace iucs.readernest.domain.Data
         public DbSet<EmailTemplate> EmailTemplates => Set<EmailTemplate>();
         public DbSet<ProgressReport> ProgressReports => Set<ProgressReport>();
         public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
+
+        // "Ask a Doubt" chatbot
+        public DbSet<ChatFaq> ChatFaqs => Set<ChatFaq>();
+        public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
+        public DbSet<ChatEscalation> ChatEscalations => Set<ChatEscalation>();
 
         // Notes
         public DbSet<FloatingNote> FloatingNotes => Set<FloatingNote>();
@@ -151,7 +163,7 @@ namespace iucs.readernest.domain.Data
             var mapper = new NpgsqlSnakeCaseNameTranslator();
             foreach (var entity in modelBuilder.Model.GetEntityTypes())
             {
-                entity.SetTableName(mapper.TranslateMemberName(entity.GetTableName()));
+                entity.SetTableName(mapper.TranslateMemberName(entity.GetTableName()!));
 
                 foreach (var property in entity.GetProperties())
                 {
@@ -160,17 +172,17 @@ namespace iucs.readernest.domain.Data
 
                 foreach (var key in entity.GetKeys())
                 {
-                    key.SetName(mapper.TranslateMemberName(key.GetName()));
+                    key.SetName(mapper.TranslateMemberName(key.GetName()!));
                 }
 
                 foreach (var fk in entity.GetForeignKeys())
                 {
-                    fk.SetConstraintName(mapper.TranslateMemberName(fk.GetConstraintName()));
+                    fk.SetConstraintName(mapper.TranslateMemberName(fk.GetConstraintName()!));
                 }
 
                 foreach (var index in entity.GetIndexes())
                 {
-                    index.SetDatabaseName(mapper.TranslateMemberName(index.GetDatabaseName()));
+                    index.SetDatabaseName(mapper.TranslateMemberName(index.GetDatabaseName()!));
                 }
             }
         }

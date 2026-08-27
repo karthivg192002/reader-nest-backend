@@ -212,6 +212,19 @@ namespace iucs.readernest.api.Services.Payments
             return new GatewayPaymentStatus { State = GatewayPaymentState.Unknown };
         }
 
+        public async Task<bool> IsMethodConfiguredAsync(string integrationKey, CancellationToken cancellationToken = default)
+        {
+            // "cash" has no adapter and nothing to configure — always a real option.
+            var adapter = ResolveAdapter(integrationKey);
+            if (adapter is null)
+            {
+                return string.Equals(integrationKey, "cash", StringComparison.OrdinalIgnoreCase);
+            }
+
+            var (live, _) = await ResolveLiveConfigAsync(adapter, cancellationToken);
+            return live;
+        }
+
         /// <summary>GatewayTransactionId becomes "linkRef|paymentId" once a webhook settles it (see BillingService.SettleGatewayTransactionAsync); null before that.</summary>
         private static string? ExtractSettledPaymentId(string? gatewayTransactionId)
         {

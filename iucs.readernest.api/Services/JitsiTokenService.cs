@@ -1,4 +1,5 @@
 using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using iucs.readernest.application.Common.Interfaces;
@@ -55,6 +56,41 @@ namespace iucs.readernest.api.Services
                 SecurityAlgorithms.HmacSha256);
             var token = new JwtSecurityToken(new JwtHeader(credentials), payload);
             return new JwtSecurityTokenHandler().WriteToken(token);
+        }
+
+        public bool ValidateFinalizeToken(string? bearerToken, string? jitsiConfigJson, string expectedRoom)
+        {
+            var (appId, appSecret) = ReadCredentials(jitsiConfigJson);
+            if (string.IsNullOrWhiteSpace(appId) || string.IsNullOrWhiteSpace(appSecret) || string.IsNullOrWhiteSpace(bearerToken))
+            {
+                return false;
+            }
+
+            var handler = new JwtSecurityTokenHandler();
+            ClaimsPrincipal principal;
+            try
+            {
+                principal = handler.ValidateToken(bearerToken, new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidIssuer = appId,
+                    ValidateAudience = true,
+                    ValidAudience = appId,
+                    ValidateLifetime = true,
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(appSecret)),
+                    ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
+                    ClockSkew = TimeSpan.FromSeconds(30),
+                }, out _);
+            }
+            catch (SecurityTokenException)
+            {
+                return false;
+            }
+
+            var purpose = principal.FindFirst("purpose")?.Value;
+            var room = principal.FindFirst("room")?.Value;
+            return purpose == "recording-finalize" && room == expectedRoom;
         }
 
         private static (string? AppId, string? AppSecret) ReadCredentials(string? configJson)

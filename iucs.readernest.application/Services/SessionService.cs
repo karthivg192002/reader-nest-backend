@@ -5,6 +5,7 @@ using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Common;
 using iucs.readernest.domain.Entities.Academics;
+using iucs.readernest.domain.Entities.Admission;
 using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Integrations;
 using iucs.readernest.domain.Entities.Sessions;
@@ -233,6 +234,14 @@ namespace iucs.readernest.application.Services
             {
                 session.Summary = request.Summary.Trim();
             }
+            else
+            {
+                // PDF's "Session Summary Generated" (p.19) is an unconditional step — a teacher
+                // who completes a class without typing notes still gets a real summary, built
+                // from the same engagement data GetEngagementSummaryAsync already computes.
+                var engagement = await GetEngagementSummaryAsync(session.Id, cancellationToken);
+                session.Summary = BuildAutoSummary(engagement);
+            }
 
             if (session.BatchId.HasValue)
             {
@@ -299,12 +308,42 @@ namespace iucs.readernest.application.Services
             // attack on a colleague, so the caller must own this session (or be an Admin).
             await EnsureSessionParticipantAsync(session, cancellationToken);
 
+            return await MarkNoShowCoreAsync(session, request.Party, request.Note, cancellationToken);
+        }
+
+        /// <summary>
+        /// System-initiated equivalent of <see cref="MarkNoShowAsync"/> — identical carry-forward
+        /// and payout behaviour, but skips <see cref="EnsureSessionParticipantAsync"/> since there
+        /// is no signed-in caller to check: this exists solely for
+        /// <c>NoShowDetectionBackgroundService</c>, which flags a session once its grace period
+        /// has elapsed with one side never having joined. Not exposed on any controller — nothing
+        /// but the background job may call this, or any authenticated user could no-show any
+        /// class and trigger its payout/carry-forward side effects for free.
+        /// </summary>
+        public async Task<ClassSessionDto> MarkNoShowSystemAsync(
+            Guid id,
+            NoShowParty party,
+            string note,
+            CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(id, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), id);
+
+            return await MarkNoShowCoreAsync(session, party, note, cancellationToken);
+        }
+
+        private async Task<ClassSessionDto> MarkNoShowCoreAsync(
+            ClassSession session,
+            NoShowParty party,
+            string? note,
+            CancellationToken cancellationToken)
+        {
             if (TerminalStatuses.Contains(session.Status))
             {
                 throw new DomainValidationException($"A session in status '{session.Status}' cannot be marked as a no-show.");
             }
 
-            session.Status = request.Party == NoShowParty.Teacher
+            session.Status = party == NoShowParty.Teacher
                 ? SessionStatus.TeacherNoShow
                 : SessionStatus.StudentNoShow;
 
@@ -338,23 +377,23 @@ namespace iucs.readernest.application.Services
             };
             await _unitOfWork.Repository<ClassSession>().AddAsync(carriedForward, cancellationToken);
 
-            if (request.Party == NoShowParty.Student)
+            if (party == NoShowParty.Student)
             {
                 // Teacher waited for the student: the waiting amount still accrues
                 await _payoutService.AccrueForSessionAsync(
                     session, PayoutItemType.StudentNoShowWaiting,
-                    request.Note ?? "Student no-show waiting amount", cancellationToken);
+                    note ?? "Student no-show waiting amount", cancellationToken);
             }
             else
             {
                 await _payoutService.AccrueForSessionAsync(
                     session, PayoutItemType.TeacherNoShowDeduction,
-                    request.Note ?? "Teacher no-show deduction", cancellationToken);
+                    note ?? "Teacher no-show deduction", cancellationToken);
                 await NotifyAdminsOfTeacherNoShowAsync(session, cancellationToken);
             }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
-                changesJson: "{\"noShow\":\"" + request.Party + "\",\"carriedForwardTo\":\"" + carriedForward.Id + "\""
+                changesJson: "{\"noShow\":\"" + party + "\",\"carriedForwardTo\":\"" + carriedForward.Id + "\""
                     + (carriedForwardHasConflict ? ",\"carriedForwardScheduleConflict\":true" : "") + "}",
                 cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
@@ -407,6 +446,51 @@ namespace iucs.readernest.application.Services
                 StorageUrl = request.StorageUrl,
                 DurationSeconds = request.DurationSeconds,
                 // Parent access is view-only for 15 days; the expiry job hides it afterwards
+                ExpiresAtUtc = DateTime.UtcNow.AddDays(15),
+            };
+            await _unitOfWork.Repository<SessionRecording>().AddAsync(recording, cancellationToken);
+            await _auditLog.StageAsync(AuditAction.Create, nameof(SessionRecording), recording.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return ToRecordingDto(recording);
+        }
+
+        public async Task<SessionRecordingDto?> FinalizeJibriRecordingAsync(
+            string roomName,
+            string? bearerToken,
+            string storageUrl,
+            int? durationSeconds,
+            CancellationToken cancellationToken = default)
+        {
+            var jitsiConfigJson = await _unitOfWork.Repository<Integration>().Query()
+                .Where(i => i.Key == "jitsi")
+                .Select(i => i.ConfigJson)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (!_jitsiTokenService.ValidateFinalizeToken(bearerToken, jitsiConfigJson, roomName))
+            {
+                throw new UnauthorizedException("Invalid or missing recording-finalize token.");
+            }
+
+            // Not every room maps to a ClassSession (personal rooms, demo bookings) — Jibri
+            // records those the same as any other room, but there's no session row here to
+            // attach the recording to, so this is a no-op rather than a NotFoundException: the
+            // finalize script has no session id to have gotten wrong, only a room name that's
+            // legitimately outside this feature's scope.
+            var session = await _unitOfWork.Repository<ClassSession>().Query()
+                .FirstOrDefaultAsync(s => s.MeetingRoomId == roomName, cancellationToken);
+            if (session is null)
+            {
+                return null;
+            }
+
+            var recording = new SessionRecording
+            {
+                ClassSessionId = session.Id,
+                StorageUrl = storageUrl,
+                DurationSeconds = durationSeconds,
+                // Same 15-day parent visibility window as AddRecordingAsync (the teacher-facing
+                // manual-upload path) — one policy regardless of how the recording got attached.
                 ExpiresAtUtc = DateTime.UtcNow.AddDays(15),
             };
             await _unitOfWork.Repository<SessionRecording>().AddAsync(recording, cancellationToken);
@@ -704,11 +788,29 @@ namespace iucs.readernest.application.Services
 
             if (user.Role == UserRole.Parent && session.BatchId.HasValue)
             {
+                // Active only: a withdrawn/completed enrollment must not keep live-room
+                // access — mirrors AcademicOpsService.CaptureJoinAttendanceAsync's own filter,
+                // which this check used to be looser than (attendance wasn't captured for a
+                // non-active enrollment even though the room let them in).
                 return await _unitOfWork.Repository<BatchEnrollment>().Query()
-                    .Where(e => e.BatchId == session.BatchId.Value)
+                    .Where(e => e.BatchId == session.BatchId.Value && e.Status == EnrollmentStatus.Active)
                     .Join(_unitOfWork.Repository<Child>().Query(), e => e.ChildId, c => c.Id, (e, c) => c.ParentProfileId)
                     .Join(_unitOfWork.Repository<ParentProfile>().Query(), parentProfileId => parentProfileId, p => p.Id, (parentProfileId, p) => p.UserId)
                     .AnyAsync(u => u == userId, cancellationToken);
+            }
+
+            // A demo session has no batch — the lead is a DemoBooking (parent may not have
+            // an account yet), so a registered parent joining their own demo is matched by
+            // email instead of a BatchEnrollment. Covers both the primary contact and any
+            // additional invited parent/guardian on the booking (DemoParticipant.Email).
+            if (user.Role == UserRole.Parent && session.BatchId is null && !string.IsNullOrWhiteSpace(user.Email))
+            {
+                return await _unitOfWork.Repository<DemoBooking>().Query()
+                    .Where(b => b.ClassSessionId == session.Id)
+                    .AnyAsync(
+                        b => b.ParentEmail.ToLower() == user.Email.ToLower()
+                            || b.Participants.Any(p => p.Email != null && p.Email.ToLower() == user.Email.ToLower()),
+                        cancellationToken);
             }
 
             // Coordinator (and anyone else with the same scheduling-edit grant): "the
@@ -861,6 +963,36 @@ namespace iucs.readernest.application.Services
                 .ToList();
         }
 
+        /// <summary>Builds the auto-generated fallback used by CompleteAsync when the teacher left the summary blank.</summary>
+        private static string BuildAutoSummary(IReadOnlyList<EngagementSummaryDto> engagement)
+        {
+            if (engagement.Count == 0)
+            {
+                return "Class completed. No interactive engagement was recorded for this session.";
+            }
+
+            var avgScore = (int)Math.Round(engagement.Average(e => e.EngagementScore));
+            var onTrack = engagement.Count(e => e.LearningOutcome == "on-track");
+            var needsEncouragement = engagement.Count(e => e.LearningOutcome == "needs-encouragement");
+            var needsAttention = engagement.Count(e => e.LearningOutcome == "needs-attention");
+
+            var outcomeParts = new List<string>();
+            if (onTrack > 0) outcomeParts.Add($"{onTrack} on track");
+            if (needsEncouragement > 0) outcomeParts.Add($"{needsEncouragement} could use encouragement");
+            if (needsAttention > 0) outcomeParts.Add($"{needsAttention} need{(needsAttention == 1 ? "s" : "")} attention");
+
+            var summary = $"Class completed with {engagement.Count} participant{(engagement.Count == 1 ? "" : "s")} — " +
+                $"average engagement score {avgScore}/100 ({string.Join(", ", outcomeParts)}).";
+
+            var quizAttempts = engagement.Sum(e => e.QuizAttempts);
+            if (quizAttempts > 0)
+            {
+                summary += $" {engagement.Sum(e => e.QuizCorrect)}/{quizAttempts} quiz answers correct.";
+            }
+
+            return summary;
+        }
+
         private async Task NotifyAdminsOfTeacherNoShowAsync(ClassSession session, CancellationToken cancellationToken)
         {
             var admins = await _unitOfWork.Repository<User>().Query()
@@ -924,7 +1056,14 @@ namespace iucs.readernest.application.Services
         /// <summary>Business rule: no class is ever scheduled — or rescheduled — onto a holiday.</summary>
         private async Task EnsureNotHolidayAsync(DateTime startUtc, CancellationToken cancellationToken)
         {
-            var sessionDate = DateOnly.FromDateTime(startUtc);
+            // Holiday.Date is an org-wide calendar date meant in local (DefaultTimeZoneId,
+            // Asia/Kolkata) terms, not UTC — DateOnly.FromDateTime(startUtc) truncated the raw
+            // UTC instant instead, which is off by a full calendar day for any session starting
+            // in the 00:00-05:29 IST window (18:30-23:59 UTC the PRIOR day): a session actually
+            // on the holiday would compute the day before it and slip past this check entirely.
+            // Mirrors StoreService.ListAvailableDemoSlotsAsync's own correct conversion.
+            var zone = TimeZoneInfo.FindSystemTimeZoneById(DateTimeDisplay.DefaultTimeZoneId);
+            var sessionDate = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(startUtc, zone));
             var holiday = await _unitOfWork.Repository<Holiday>()
                 .FirstOrDefaultAsync(h => h.Date == sessionDate, cancellationToken);
             if (holiday is not null)

@@ -28,7 +28,7 @@ namespace iucs.readernest.application.Dto.Users
         public string? TimeZoneId { get; set; }
 
         /// <summary>Primary department for teachers; ignored for other roles.</summary>
-        public Department? Department { get; set; }
+        public Guid? DepartmentId { get; set; }
 
         /// <summary>Named role (preset) to assign immediately; only valid when Role is Sub Admin.</summary>
         public Guid? RoleDefinitionId { get; set; }

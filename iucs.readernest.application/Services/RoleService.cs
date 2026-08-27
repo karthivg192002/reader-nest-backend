@@ -164,18 +164,6 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
-        public async Task<IReadOnlyList<PermissionDto>?> ResolvePermissionsAsync(
-            string name,
-            CancellationToken cancellationToken = default)
-        {
-            var key = name.Trim().ToLowerInvariant();
-            var role = await _unitOfWork.Repository<RoleDefinition>().Query()
-                .Include(r => r.Permissions)
-                .FirstOrDefaultAsync(r => r.Name == key, cancellationToken);
-
-            return role?.Permissions.Select(ToPermissionDto).ToList();
-        }
-
         public async Task<RoleDto?> FindByNameAsync(string name, CancellationToken cancellationToken = default)
         {
             var key = name.Trim().ToLowerInvariant();

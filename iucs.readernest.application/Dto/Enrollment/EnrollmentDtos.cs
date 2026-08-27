@@ -53,6 +53,14 @@ namespace iucs.readernest.application.Dto.Enrollment
         /// without billing (a plan can still be assigned later from Packages).
         /// </summary>
         public Guid? PackagePlanId { get; set; }
+
+        /// <summary>
+        /// Batch to place the child in the moment the approval lands, so the new student
+        /// already has a roster/schedule instead of sitting unplaced until someone visits
+        /// Batches separately. Null approves without a batch (one can still be assigned
+        /// later from Batches &gt; Assign Students).
+        /// </summary>
+        public Guid? BatchId { get; set; }
     }
 
     public class ChildDto

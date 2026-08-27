@@ -16,6 +16,13 @@ namespace iucs.readernest.application.Services
         // How long a self-service PIN reset link stays valid after it's emailed.
         private const int ResetTokenExpiryMinutes = 30;
 
+        // Per-account lockout, on top of the login endpoint's per-IP rate limit (Program.cs) —
+        // that one alone doesn't stop an attacker who knows one target's email and spreads
+        // attempts across several source IPs from brute-forcing a 4-digit PIN's 10,000-value
+        // keyspace against that one account.
+        private const int MaxFailedLoginAttempts = 5;
+        private const int LockoutMinutes = 15;
+
         private readonly IUnitOfWork _unitOfWork;
         private readonly IPasswordHasher _passwordHasher;
         private readonly ITokenService _tokenService;
@@ -45,8 +52,24 @@ namespace iucs.readernest.application.Services
             var user = await _unitOfWork.Repository<User>()
                 .FirstOrDefaultAsync(u => u.Email == email, cancellationToken);
 
+            if (user is not null && user.LockoutEndUtc is { } lockoutEnd && lockoutEnd > DateTime.UtcNow)
+            {
+                var minutesLeft = Math.Max(1, (int)Math.Ceiling((lockoutEnd - DateTime.UtcNow).TotalMinutes));
+                throw new UnauthorizedException($"Too many failed attempts. Try again in {minutesLeft} minute(s).");
+            }
+
             if (user is null || !_passwordHasher.Verify(request.Pin, user.PinHash))
             {
+                if (user is not null)
+                {
+                    user.FailedLoginAttempts++;
+                    if (user.FailedLoginAttempts >= MaxFailedLoginAttempts)
+                    {
+                        user.LockoutEndUtc = DateTime.UtcNow.AddMinutes(LockoutMinutes);
+                    }
+                    await _unitOfWork.SaveChangesAsync(cancellationToken);
+                }
+
                 throw new UnauthorizedException("Invalid email or PIN.");
             }
 
@@ -61,6 +84,8 @@ namespace iucs.readernest.application.Services
             var token = _tokenService.CreateToken(user, permissions);
 
             user.LastLoginAtUtc = DateTime.UtcNow;
+            user.FailedLoginAttempts = 0;
+            user.LockoutEndUtc = null;
             await _auditLog.StageAsync(AuditAction.Login, nameof(User), user.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 

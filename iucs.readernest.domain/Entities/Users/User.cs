@@ -10,6 +10,11 @@ namespace iucs.readernest.domain.Entities.Users
     /// 1:1 profile; students never log in directly (they join via the parent account).
     /// </summary>
     [Index(nameof(Email), IsUnique = true)]
+    // Role (alone) and Role+Status together are the two shapes actually filtered on —
+    // the Users list, teacher/parent lookups, permission backfill, and reminder/digest
+    // background services all query one or both. Leading column Role also serves any
+    // Role-only filter without needing a second single-column index.
+    [Index(nameof(Role), nameof(Status))]
     public class User : AuditEntity
     {
         [MaxLength(256)]
@@ -50,6 +55,18 @@ namespace iucs.readernest.domain.Entities.Users
         public string? PersonalMeetingRoomId { get; set; }
 
         public DateTime? LastLoginAtUtc { get; set; }
+
+        /// <summary>
+        /// Consecutive failed login attempts since the last success. The login endpoint's
+        /// rate limit (see Program.cs's "login" policy) partitions by IP only — with a 4-digit
+        /// PIN's 10,000-value keyspace, an attacker who knows one target's email can spread
+        /// attempts across a modest number of source IPs and brute-force that one account with
+        /// no server-side signal it's under attack. This adds a per-account lockout on top.
+        /// </summary>
+        public int FailedLoginAttempts { get; set; }
+
+        /// <summary>Set once FailedLoginAttempts crosses AuthService's threshold; null once cleared by a successful login.</summary>
+        public DateTime? LockoutEndUtc { get; set; }
 
         /// <summary>
         /// Named role (preset) currently assigned; drives the post-login default

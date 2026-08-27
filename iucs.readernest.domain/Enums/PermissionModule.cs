@@ -15,6 +15,7 @@ namespace iucs.readernest.domain.Enums
         Admission,
         LeaveManagement,
         Communication,
-        Settings
+        Settings,
+        SystemMonitoring
     }
 }

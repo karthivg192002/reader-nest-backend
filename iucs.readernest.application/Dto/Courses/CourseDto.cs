@@ -22,7 +22,9 @@ namespace iucs.readernest.application.Dto.Courses
 
         public int TotalSessions { get; set; }
 
-        public Department Department { get; set; }
+        public Guid DepartmentId { get; set; }
+
+        public string DepartmentName { get; set; } = null!;
 
         public bool IsActive { get; set; }
 

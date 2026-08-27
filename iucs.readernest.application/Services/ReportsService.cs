@@ -29,6 +29,7 @@ namespace iucs.readernest.application.Services
         {
             var teachers = await _unitOfWork.Repository<TeacherProfile>().Query()
                 .Include(t => t.User)
+                .Include(t => t.Department)
                 .Where(t => t.User.Status == UserStatus.Active)
                 .ToListAsync(cancellationToken);
 
@@ -67,7 +68,7 @@ namespace iucs.readernest.application.Services
                 {
                     TeacherProfileId = teacher.Id,
                     TeacherName = $"{teacher.User.FirstName} {teacher.User.LastName}",
-                    Department = teacher.Department?.ToString(),
+                    Department = teacher.Department?.Name,
                     SessionsCompleted = teacherCompletedIds.Count,
                     TeacherNoShows = teacherSessions.Count(s => s.Status == SessionStatus.TeacherNoShow),
                     UpcomingSessions = teacherSessions.Count(s => s.Status == SessionStatus.Scheduled && s.ScheduledStartAtUtc > now),
@@ -180,7 +181,7 @@ namespace iucs.readernest.application.Services
                 .CountAsync(e => e.Status == EnrollmentStatus.Active, cancellationToken);
 
             var invoices = await _unitOfWork.Repository<Invoice>().Query()
-                .Select(i => new { i.Department, i.Amount, i.AmountPaid, i.Status, i.CourseId, CourseName = i.Course != null ? i.Course.Name : null })
+                .Select(i => new { DepartmentName = i.Department.Name, i.Amount, i.AmountPaid, i.Status, i.CourseId, CourseName = i.Course != null ? i.Course.Name : null })
                 .ToListAsync(cancellationToken);
             var revenueCollected = invoices.Sum(i => i.AmountPaid);
             var revenuePending = invoices
@@ -240,8 +241,8 @@ namespace iucs.readernest.application.Services
                 .CountAsync(t => t.User.Status == UserStatus.Active, cancellationToken);
 
             var revenueByDepartment = invoices
-                .GroupBy(i => i.Department)
-                .Select(g => new CourseRevenueDto { Name = g.Key.ToString(), Revenue = g.Sum(i => i.AmountPaid) })
+                .GroupBy(i => i.DepartmentName)
+                .Select(g => new CourseRevenueDto { Name = g.Key, Revenue = g.Sum(i => i.AmountPaid) })
                 .OrderByDescending(r => r.Revenue)
                 .ToList();
 
@@ -456,6 +457,7 @@ namespace iucs.readernest.application.Services
         private async Task<string> RevenueCsvAsync(CancellationToken cancellationToken)
         {
             var invoices = await _unitOfWork.Repository<Invoice>().Query()
+                .Include(i => i.Department)
                 .OrderBy(i => i.IssuedAtUtc)
                 .ToListAsync(cancellationToken);
 
@@ -463,7 +465,7 @@ namespace iucs.readernest.application.Services
             foreach (var i in invoices)
             {
                 csv.AppendLine(string.Join(',',
-                    i.InvoiceNumber, i.Department, i.Amount, i.AmountPaid, i.Status,
+                    i.InvoiceNumber, i.Department.Name, i.Amount, i.AmountPaid, i.Status,
                     Escape($"{i.IssuedAtUtc:u}"), i.DueDate.ToString("yyyy-MM-dd"), Escape($"{i.PaidAtUtc:u}")));
             }
 
@@ -508,6 +510,7 @@ namespace iucs.readernest.application.Services
         private async Task<string> ConversionCsvAsync(CancellationToken cancellationToken)
         {
             var bookings = await _unitOfWork.Repository<DemoBooking>().Query()
+                .Include(b => b.Department)
                 .OrderBy(b => b.CreatedAtUtc)
                 .ToListAsync(cancellationToken);
 
@@ -516,7 +519,7 @@ namespace iucs.readernest.application.Services
             {
                 csv.AppendLine(string.Join(',',
                     Escape(b.ChildName), Escape(b.ParentName), Escape(b.ParentEmail),
-                    b.Department, b.ConversionStatus, Escape($"{b.CreatedAtUtc:u}")));
+                    b.Department?.Name, b.ConversionStatus, Escape($"{b.CreatedAtUtc:u}")));
             }
 
             return csv.ToString();

@@ -10,7 +10,9 @@ namespace iucs.readernest.application.Dto.Billing
 
         public string Name { get; set; } = null!;
 
-        public Department Department { get; set; }
+        public Guid DepartmentId { get; set; }
+
+        public string DepartmentName { get; set; } = null!;
 
         public string GatewayProvider { get; set; } = null!;
 
@@ -58,6 +60,15 @@ namespace iucs.readernest.application.Dto.Billing
         public string GatewayAccountRef { get; set; } = null!;
 
         public bool IsActive { get; set; } = true;
+
+        /// <summary>
+        /// Most orgs here run one real gateway account for the whole business, not a distinct
+        /// one per department — defaults true so the easy path is "organization-wide," with
+        /// per-department divergence as the opt-out for a genuine dual-gateway need. When true,
+        /// every other department's account also gets this same GatewayProvider/GatewayAccountRef/
+        /// IsActive (never its own Name — that stays department-specific for the card labels).
+        /// </summary>
+        public bool ApplyToAllDepartments { get; set; } = true;
     }
 
     public class SavePaymentMappingRequest

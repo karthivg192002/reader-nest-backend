@@ -12,6 +12,8 @@ namespace iucs.readernest.domain.Entities.Billing
     // traction — leaving the date to be checked row by row. Leading on Status keeps every
     // status-only query (subscription list filters) covered by the same index.
     [Index(nameof(Status), nameof(NextBillingAtUtc))]
+    // Same reasoning as the index above, for the expiry sweep's own "Active AND EndDate <= today" query.
+    [Index(nameof(Status), nameof(EndDate))]
     public class Subscription : AuditEntity
     {
         public Guid ParentProfileId { get; set; }
@@ -29,6 +31,9 @@ namespace iucs.readernest.domain.Entities.Billing
         public SubscriptionStatus Status { get; set; } = SubscriptionStatus.Active;
 
         public DateOnly StartDate { get; set; }
+
+        /// <summary>StartDate + PackagePlan.ValidityDays at creation time; null when the plan has no set validity window.</summary>
+        public DateOnly? EndDate { get; set; }
 
         /// <summary>Next auto-billing run; null for non-recurring plans.</summary>
         public DateTime? NextBillingAtUtc { get; set; }

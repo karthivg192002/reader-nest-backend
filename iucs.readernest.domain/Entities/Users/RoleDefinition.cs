@@ -34,4 +34,20 @@ namespace iucs.readernest.domain.Entities.Users
 
         public ICollection<RolePermission> Permissions { get; set; } = new List<RolePermission>();
     }
+
+    /// <summary>
+    /// System role names that mirror a fixed-portal UserRole (Admin/Teacher/Parent/
+    /// AdmissionTeam) or exist purely to back a non-staff feature (Student, seeded only
+    /// for the Parent's own "Student View" preview) — never a valid preset for a Sub
+    /// Admin account. Stamping one of these onto a Sub Admin's RoleDefinitionId would
+    /// make MenuService/AuthService's DefaultRoute lookup land — and let RequireAuth
+    /// admit — that Sub Admin straight into the wrong portal, or grant a real staff
+    /// account the zero-permission Student preset by mistake (as happened once via
+    /// CreateAsync before this set was enforced there too).
+    /// </summary>
+    public static class NonSubAdminPresetNames
+    {
+        public static readonly IReadOnlySet<string> Names =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "admin", "teacher", "parent", "admission", "student" };
+    }
 }

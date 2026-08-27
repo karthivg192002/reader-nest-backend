@@ -44,6 +44,15 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _billingService.ListInvoicesAsync(status, parentProfileId, page, pageSize, cancellationToken));
         }
 
+        /// <summary>Downloadable "Bill of Supply" PDF for this invoice, matching the org's own template.</summary>
+        [HttpGet("{id:guid}/pdf")]
+        [HasPermission(PermissionModule.BillingFinance, PermissionAction.View)]
+        public async Task<IActionResult> DownloadPdf(Guid id, CancellationToken cancellationToken)
+        {
+            var (content, fileName) = await _billingService.GenerateInvoicePdfAsync(id, cancellationToken);
+            return File(content, "application/pdf", fileName);
+        }
+
         [HttpPost]
         [HasPermission(PermissionModule.BillingFinance, PermissionAction.Create)]
         public async Task<ActionResult<InvoiceDto>> Create(CreateInvoiceRequest request, CancellationToken cancellationToken)
