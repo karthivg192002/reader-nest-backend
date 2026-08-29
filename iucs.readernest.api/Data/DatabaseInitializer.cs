@@ -45,8 +45,6 @@ namespace iucs.readernest.api.Data
             await EnsurePackagesAndStudentViewMenusAsync(context);
             await EnsureAdminDepartmentsMenuAsync(context);
             await EnsureAdminQuizBankMenuAsync(context);
-            await EnsureAdminLeaveManagementMenuAsync(context);
-            await EnsureAdminTeacherAvailabilityMenuAsync(context);
             await EnsureAdminServerMonitoringMenuAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
@@ -479,8 +477,6 @@ namespace iucs.readernest.api.Data
             ("admin", "People", "Roles & Permissions", "/admin/permissions", "ShieldCheck", PermissionModule.UserManagement),
             ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck", PermissionModule.Admission),
             ("admin", "People", "Store Inquiries", "/admin/store-inquiries", "ShoppingBag", PermissionModule.Admission),
-            ("admin", "People", "Leave Management", "/admin/leave", "CalendarOff", PermissionModule.LeaveManagement),
-            ("admin", "People", "Teacher Availability", "/admin/availability", "CalendarRange", PermissionModule.SessionCalendarManagement),
             ("admin", "Content", "Content & Resources", "/admin/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
             ("admin", "Finance", "Billing & Finance", "/admin/billing", "Receipt", PermissionModule.BillingFinance),
             ("admin", "Finance", "Packages & Subscriptions", "/admin/packages", "CreditCard", PermissionModule.BillingFinance),
@@ -734,107 +730,6 @@ namespace iucs.readernest.api.Data
                 SortOrder = last.SortOrder + 1,
                 IsActive = true,
                 RequiredModule = PermissionModule.CourseBatchManagement,
-            });
-        }
-
-        /// <summary>
-        /// Inserts the Admin "Leave Management" menu item into a database that was seeded
-        /// before Admin got its own leave-review screen (SeedMenusAsync only ever creates
-        /// rows once). Admin has always held LeaveManagement view+approve via
-        /// AllModulesFull() — this only adds the menu entry that actually surfaces it;
-        /// nothing about the permission grant itself needs backfilling. Appended after
-        /// whatever the People section's last item currently is, same idiom as
-        /// EnsureAdminQuizBankMenuAsync.
-        /// </summary>
-        private static async Task EnsureAdminLeaveManagementMenuAsync(ReaderNestDbContext context)
-        {
-            const string path = "/admin/leave";
-            if (context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == path) ||
-                await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == path))
-            {
-                return;
-            }
-
-            // Concat in Local: EnsureAdminTeacherAvailabilityMenuAsync appends to this same
-            // section right after this method runs, in the same InitializeAsync pass —
-            // SaveChangesAsync only happens once at the very end, so a plain DB query here
-            // wouldn't see a same-run sibling insert and both could compute the same "last"
-            // SortOrder, colliding. Local carries exactly that kind of pending-but-unsaved row.
-            var peopleItems = (await context.MenuItems
-                .Where(m => m.Portal == "admin" && m.Section == "People")
-                .ToListAsync())
-                .Concat(context.MenuItems.Local.Where(m => m.Portal == "admin" && m.Section == "People"))
-                .Distinct()
-                .ToList();
-            if (peopleItems.Count == 0)
-            {
-                return; // no People section at all (unexpected) — nothing sensible to append after
-            }
-
-            var last = peopleItems.OrderByDescending(m => m.SortOrder).First();
-
-            context.MenuItems.Add(new MenuItem
-            {
-                Portal = "admin",
-                Section = "People",
-                SectionOrder = last.SectionOrder,
-                Label = "Leave Management",
-                Path = path,
-                Icon = "CalendarOff",
-                SortOrder = last.SortOrder + 1,
-                IsActive = true,
-                RequiredModule = PermissionModule.LeaveManagement,
-            });
-        }
-
-        /// <summary>
-        /// Inserts the Admin "Teacher Availability" menu item into a database that was seeded
-        /// before Admin got its own availability screen (SeedMenusAsync only ever creates rows
-        /// once). Admin has always held SessionCalendarManagement view via AllModulesFull() —
-        /// this only adds the menu entry; the permission grant needs no backfill. Appended
-        /// after whatever the People section's last item currently is (by now that's Leave
-        /// Management, added by EnsureAdminLeaveManagementMenuAsync just above in this same
-        /// run — see the Local concat below for why that matters), same idiom as
-        /// EnsureAdminQuizBankMenuAsync.
-        /// </summary>
-        private static async Task EnsureAdminTeacherAvailabilityMenuAsync(ReaderNestDbContext context)
-        {
-            const string path = "/admin/availability";
-            if (context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == path) ||
-                await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == path))
-            {
-                return;
-            }
-
-            // Concat in Local: on a database old enough to need this backfill, it's also old
-            // enough to need EnsureAdminLeaveManagementMenuAsync, which just added its own row
-            // to this same section earlier in this same InitializeAsync pass — SaveChangesAsync
-            // hasn't run yet, so a plain DB query wouldn't see it and both would compute the
-            // same "last" SortOrder, colliding.
-            var peopleItems = (await context.MenuItems
-                .Where(m => m.Portal == "admin" && m.Section == "People")
-                .ToListAsync())
-                .Concat(context.MenuItems.Local.Where(m => m.Portal == "admin" && m.Section == "People"))
-                .Distinct()
-                .ToList();
-            if (peopleItems.Count == 0)
-            {
-                return; // no People section at all (unexpected) — nothing sensible to append after
-            }
-
-            var last = peopleItems.OrderByDescending(m => m.SortOrder).First();
-
-            context.MenuItems.Add(new MenuItem
-            {
-                Portal = "admin",
-                Section = "People",
-                SectionOrder = last.SectionOrder,
-                Label = "Teacher Availability",
-                Path = path,
-                Icon = "CalendarRange",
-                SortOrder = last.SortOrder + 1,
-                IsActive = true,
-                RequiredModule = PermissionModule.SessionCalendarManagement,
             });
         }
 
