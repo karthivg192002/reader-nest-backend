@@ -36,7 +36,7 @@ namespace iucs.readernest.application.Services
             string body,
             CancellationToken cancellationToken = default)
         {
-            await SendRenderedEmailAsync(recipientUserId, recipientEmail, type, subject, body, cancellationToken);
+            await SendRenderedEmailAsync(recipientUserId, recipientEmail, type, subject, body, null, cancellationToken);
         }
 
         public async Task SendTemplatedEmailAsync(
@@ -48,7 +48,7 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default)
         {
             var (subject, body) = await _emailTemplateService.RenderAsync(templateKey, tokens, cancellationToken);
-            await SendRenderedEmailAsync(recipientUserId, recipientEmail, type, subject, body, cancellationToken);
+            await SendRenderedEmailAsync(recipientUserId, recipientEmail, type, subject, body, templateKey, cancellationToken);
         }
 
         private async Task SendRenderedEmailAsync(
@@ -57,12 +57,14 @@ namespace iucs.readernest.application.Services
             NotificationType type,
             string subject,
             string body,
+            string? templateKey,
             CancellationToken cancellationToken)
         {
             var notification = new Notification
             {
                 RecipientUserId = recipientUserId,
                 Type = type,
+                TemplateKey = templateKey,
                 Channel = NotificationChannel.Email,
                 Subject = subject,
                 // The in-app bell feed shows this Body directly as text, but every templated
@@ -112,6 +114,7 @@ namespace iucs.readernest.application.Services
                 {
                     Id = n.Id,
                     Type = n.Type,
+                    TemplateKey = n.TemplateKey,
                     Channel = n.Channel,
                     Subject = n.Subject,
                     Body = n.Body,
