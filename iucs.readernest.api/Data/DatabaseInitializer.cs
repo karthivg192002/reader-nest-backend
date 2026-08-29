@@ -45,6 +45,7 @@ namespace iucs.readernest.api.Data
             await EnsurePackagesAndStudentViewMenusAsync(context);
             await EnsureAdminDepartmentsMenuAsync(context);
             await EnsureAdminQuizBankMenuAsync(context);
+            await EnsureAdminLeaveManagementMenuAsync(context);
             await EnsureAdminServerMonitoringMenuAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
@@ -477,6 +478,7 @@ namespace iucs.readernest.api.Data
             ("admin", "People", "Roles & Permissions", "/admin/permissions", "ShieldCheck", PermissionModule.UserManagement),
             ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck", PermissionModule.Admission),
             ("admin", "People", "Store Inquiries", "/admin/store-inquiries", "ShoppingBag", PermissionModule.Admission),
+            ("admin", "People", "Leave Management", "/admin/leave", "CalendarOff", PermissionModule.LeaveManagement),
             ("admin", "Content", "Content & Resources", "/admin/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
             ("admin", "Finance", "Billing & Finance", "/admin/billing", "Receipt", PermissionModule.BillingFinance),
             ("admin", "Finance", "Packages & Subscriptions", "/admin/packages", "CreditCard", PermissionModule.BillingFinance),
@@ -730,6 +732,48 @@ namespace iucs.readernest.api.Data
                 SortOrder = last.SortOrder + 1,
                 IsActive = true,
                 RequiredModule = PermissionModule.CourseBatchManagement,
+            });
+        }
+
+        /// <summary>
+        /// Inserts the Admin "Leave Management" menu item into a database that was seeded
+        /// before Admin got its own leave-review screen (SeedMenusAsync only ever creates
+        /// rows once). Admin has always held LeaveManagement view+approve via
+        /// AllModulesFull() — this only adds the menu entry that actually surfaces it;
+        /// nothing about the permission grant itself needs backfilling. Appended after
+        /// whatever the People section's last item currently is, same idiom as
+        /// EnsureAdminQuizBankMenuAsync.
+        /// </summary>
+        private static async Task EnsureAdminLeaveManagementMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/admin/leave";
+            if (context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == path))
+            {
+                return;
+            }
+
+            var peopleItems = await context.MenuItems
+                .Where(m => m.Portal == "admin" && m.Section == "People")
+                .ToListAsync();
+            if (peopleItems.Count == 0)
+            {
+                return; // no People section at all (unexpected) — nothing sensible to append after
+            }
+
+            var last = peopleItems.OrderByDescending(m => m.SortOrder).First();
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "admin",
+                Section = "People",
+                SectionOrder = last.SectionOrder,
+                Label = "Leave Management",
+                Path = path,
+                Icon = "CalendarOff",
+                SortOrder = last.SortOrder + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.LeaveManagement,
             });
         }
 
