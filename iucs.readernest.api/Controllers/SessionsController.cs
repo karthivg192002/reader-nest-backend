@@ -186,6 +186,18 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _sessionService.ListRecordingsAsync(id, cancellationToken));
         }
 
+        /// <summary>Deletes a registered recording. Admin only — unregisters the row; the underlying file in storage is left untouched.</summary>
+        [HttpDelete("{id:guid}/recordings/{recordingId:guid}")]
+        [Authorize(Roles = nameof(UserRole.Admin))]
+        public async Task<IActionResult> DeleteRecording(
+            Guid id,
+            Guid recordingId,
+            CancellationToken cancellationToken)
+        {
+            await _sessionService.DeleteRecordingAsync(id, recordingId, cancellationToken);
+            return NoContent();
+        }
+
         /// <summary>Engagement signals from the live classroom (quiz, activity, whiteboard, attention).</summary>
         [HttpPost("{id:guid}/engagement")]
         [Authorize]
