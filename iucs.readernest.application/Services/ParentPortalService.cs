@@ -1,3 +1,4 @@
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Billing;
 using iucs.readernest.application.Dto.Portal;
@@ -175,12 +176,17 @@ namespace iucs.readernest.application.Services
             // Demo bookings track the lead by email (the parent may not have had an
             // enrolled child/batch yet when the demo was scheduled), so their session
             // is not reachable via BatchEnrollment and must be unioned in separately.
-            var demoSessionIds = parentEmail is null
-                ? new List<Guid>()
+            // DemoBooking has no Child FK -- only this free-text name -- so it's carried
+            // through to the DTO too, letting the portal at least label whose demo this is
+            // when a family has more than one child (ChildIds itself always stays empty for
+            // these, same as before).
+            var demoChildNameBySession = parentEmail is null
+                ? new Dictionary<Guid, string>()
                 : await _unitOfWork.Repository<DemoBooking>().Query()
                     .Where(d => d.ClassSessionId != null && d.ParentEmail == parentEmail)
-                    .Select(d => d.ClassSessionId!.Value)
-                    .ToListAsync(cancellationToken);
+                    .Select(d => new { SessionId = d.ClassSessionId!.Value, d.ChildName })
+                    .ToDictionaryAsync(d => d.SessionId, d => d.ChildName, cancellationToken);
+            var demoSessionIds = demoChildNameBySession.Keys.ToList();
 
             var sessions = await _unitOfWork.Repository<ClassSession>().Query()
                 .Include(s => s.Batch)
@@ -190,10 +196,16 @@ namespace iucs.readernest.application.Services
                 .OrderBy(s => s.ScheduledStartAtUtc)
                 .ToListAsync(cancellationToken);
 
+            var activeRecordings = await SessionRecordingLookup.ActiveRecordingsBySessionAsync(
+                _unitOfWork, sessions.Select(s => s.Id), cancellationToken);
+
             return sessions
                 .Select(s =>
                 {
-                    var dto = s.ToDto();
+                    var dto = s.ToDto(
+                        activeRecordings.GetValueOrDefault(s.Id),
+                        activeRecordings.ContainsKey(s.Id),
+                        demoChildNameBySession.GetValueOrDefault(s.Id));
                     if (s.BatchId is { } batchId && childIdsByBatch.TryGetValue(batchId, out var childIds))
                     {
                         dto.ChildIds = childIds;

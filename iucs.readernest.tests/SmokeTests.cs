@@ -1097,6 +1097,49 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task ListAsync_MarksHasRecording_WhenAnActiveRecordingExists()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var sessionService = CreateSessionService();
+            await sessionService.AddRecordingAsync(session.Id, new RegisterRecordingRequest
+            {
+                StorageUrl = "https://cdn.test/rec.mp4",
+                DurationSeconds = 2700,
+            });
+
+            var listed = await sessionService.ListAsync(
+                session.ScheduledStartAtUtc.AddDays(-1), session.ScheduledStartAtUtc.AddDays(1), null, null);
+            var dto = Assert.Single(listed, d => d.Id == session.Id);
+
+            Assert.True(dto.HasRecording);
+            Assert.NotNull(dto.RecordingExpiresAtUtc);
+
+            var single = await sessionService.GetAsync(session.Id);
+            Assert.True(single.HasRecording);
+            Assert.NotNull(single.RecordingExpiresAtUtc);
+        }
+
+        [Fact]
+        public async Task ListAsync_DoesNotMarkHasRecording_WhenOnlyExpiredRecordingsExist()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            _db.Context.SessionRecordings.Add(new SessionRecording
+            {
+                ClassSessionId = session.Id,
+                StorageUrl = "https://cdn.test/old.mp4",
+                ExpiresAtUtc = DateTime.UtcNow.AddDays(-1),
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var listed = await CreateSessionService().ListAsync(
+                session.ScheduledStartAtUtc.AddDays(-1), session.ScheduledStartAtUtc.AddDays(1), null, null);
+            var dto = Assert.Single(listed, d => d.Id == session.Id);
+
+            Assert.False(dto.HasRecording);
+            Assert.Null(dto.RecordingExpiresAtUtc);
+        }
+
+        [Fact]
         public async Task GenerateInvoicePdf_UsesNotConfiguredPlaceholder_WhenNoInvoiceSettingsConfigured()
         {
             var (billing, invoice) = await SeedInvoiceAsync(amount: 1000);
@@ -2824,6 +2867,11 @@ namespace iucs.readernest.tests
             var found = Assert.Single(schedule);
             Assert.Equal(demoSession.Id, found.Id);
             Assert.Equal(SessionType.Demo, found.Type);
+            // DemoBooking has no Child FK to populate ChildIds from (still empty here, by
+            // design), but its own free-text ChildName should carry through so the portal
+            // can at least label whose demo this is.
+            Assert.Empty(found.ChildIds);
+            Assert.Equal("Prospective Kid", found.DemoChildName);
         }
 
         [Fact]
@@ -6911,6 +6959,50 @@ namespace iucs.readernest.tests
                 Assert.Equal(5, await context.Notifications.CountAsync(n => n.Channel == NotificationChannel.Email
                     && (n.Subject == "Class update" || n.Subject == "Newsletter")));
             }
+        }
+
+        [Fact]
+        public async Task TeacherPerformance_IncludesLatestPayoutSummary_StatusAndTotalOnly()
+        {
+            // Management's Teacher Snapshot report reads this (ReportsAnalytics:View, which is
+            // all the Management preset actually grants -- GET /api/payouts itself stays
+            // Admin-only). A still-Pending payout (accruing this month, not yet finalized) must
+            // show here too -- the whole point is visibility into what's owed even before it's
+            // locked/paid, not just a finalized/paid history.
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            await CreatePayoutService().SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = session.TeacherProfileId, RatePerMinute = 10,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1)),
+            });
+            await SeedFullTeacherAttendanceAsync(session);
+            await CreateSessionService().CompleteAsync(session.Id);
+
+            var payout = await _db.Context.Payouts.AsNoTracking().SingleAsync(p => p.TeacherProfileId == session.TeacherProfileId);
+            Assert.Equal(PayoutStatus.Pending, payout.Status); // sanity: not finalized/paid yet
+
+            var reports = new ReportsService(_db.UnitOfWork, _notifications);
+            var row = (await reports.GetTeacherPerformanceAsync())
+                .Single(t => t.TeacherProfileId == session.TeacherProfileId);
+
+            Assert.Equal(payout.PeriodYear, row.LatestPayoutPeriodYear);
+            Assert.Equal(payout.PeriodMonth, row.LatestPayoutPeriodMonth);
+            Assert.Equal(PayoutStatus.Pending, row.LatestPayoutStatus);
+            Assert.Equal(payout.TotalAmount, row.LatestPayoutAmount);
+        }
+
+        [Fact]
+        public async Task TeacherPerformance_LeavesLatestPayoutNull_ForATeacherWithNoPayoutOnRecord()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var reports = new ReportsService(_db.UnitOfWork, _notifications);
+
+            var row = (await reports.GetTeacherPerformanceAsync())
+                .Single(t => t.TeacherProfileId == batch.TeacherProfileId);
+
+            Assert.Null(row.LatestPayoutPeriodYear);
+            Assert.Null(row.LatestPayoutStatus);
+            Assert.Null(row.LatestPayoutAmount);
         }
 
         private async Task<(ParentProfile Parent, User User)> SeedInvoiceOwnerAsync()

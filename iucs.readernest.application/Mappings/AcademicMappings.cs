@@ -71,7 +71,11 @@ namespace iucs.readernest.application.Mappings
             };
         }
 
-        public static ClassSessionDto ToDto(this ClassSession session)
+        public static ClassSessionDto ToDto(
+            this ClassSession session,
+            DateTime? activeRecordingExpiresAtUtc = null,
+            bool hasRecording = false,
+            string? demoChildName = null)
         {
             return new ClassSessionDto
             {
@@ -88,6 +92,9 @@ namespace iucs.readernest.application.Mappings
                 RescheduledFromSessionId = session.RescheduledFromSessionId,
                 CancellationReason = session.CancellationReason,
                 Summary = session.Summary,
+                HasRecording = hasRecording,
+                RecordingExpiresAtUtc = activeRecordingExpiresAtUtc,
+                DemoChildName = demoChildName,
             };
         }
     }

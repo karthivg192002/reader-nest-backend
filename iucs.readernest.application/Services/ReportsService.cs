@@ -50,6 +50,18 @@ namespace iucs.readernest.application.Services
             var sessionsByTeacher = sessions.ToLookup(s => s.TeacherProfileId);
             var attendanceBySession = attendanceRows.ToLookup(a => a.ClassSessionId);
 
+            // Status + total only, not the itemized items collection — see LatestPayoutMonth's
+            // own doc comment on why this stays a summary and GET /api/payouts (Admin-only)
+            // remains the only place to see line items.
+            var latestPayoutByTeacher = (await _unitOfWork.Repository<Payout>().Query()
+                .Where(p => teacherIds.Contains(p.TeacherProfileId))
+                .Select(p => new { p.TeacherProfileId, p.PeriodYear, p.PeriodMonth, p.Status, p.TotalAmount })
+                .ToListAsync(cancellationToken))
+                .GroupBy(p => p.TeacherProfileId)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.OrderByDescending(p => p.PeriodYear).ThenByDescending(p => p.PeriodMonth).First());
+
             var now = DateTime.UtcNow;
             var result = new List<TeacherPerformanceDto>(teachers.Count);
             foreach (var teacher in teachers)
@@ -63,6 +75,7 @@ namespace iucs.readernest.application.Services
                     .SelectMany(id => attendanceBySession[id])
                     .Select(a => a.Status)
                     .ToList();
+                var latestPayout = latestPayoutByTeacher.GetValueOrDefault(teacher.Id);
 
                 result.Add(new TeacherPerformanceDto
                 {
@@ -76,6 +89,10 @@ namespace iucs.readernest.application.Services
                         ? 100
                         : Math.Round(100.0 * teacherAttendance.Count(a => a != AttendanceStatus.Absent) / teacherAttendance.Count, 1),
                     SummariesWritten = teacherSessions.Count(s => s.HasSummary),
+                    LatestPayoutPeriodYear = latestPayout?.PeriodYear,
+                    LatestPayoutPeriodMonth = latestPayout?.PeriodMonth,
+                    LatestPayoutStatus = latestPayout?.Status,
+                    LatestPayoutAmount = latestPayout?.TotalAmount,
                 });
             }
 
