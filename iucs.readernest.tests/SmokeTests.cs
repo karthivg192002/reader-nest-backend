@@ -107,6 +107,8 @@ namespace iucs.readernest.tests
 
         private QuizQuestionService CreateQuizQuestionService() => new(_db.UnitOfWork, _auditLog, CreateSessionService(), _bulkFileReader);
 
+        private AccessRequestService CreateAccessRequestService() => new(_db.UnitOfWork, _auditLog, _notifications);
+
         // ---- WBS business-rule coverage (Reader_Nest_LMS.pdf pp.28–32) ----
 
         [Fact]
@@ -2494,6 +2496,72 @@ namespace iucs.readernest.tests
             var user = await _db.Context.Users.SingleAsync(u => u.Email == email);
             Assert.Equal(0, user.FailedLoginAttempts);
             Assert.Null(user.LockoutEndUtc);
+        }
+
+        [Fact]
+        public async Task ApproveAccessRequest_ActuallyGrantsTheRequestedModules_NotJustAStatusFlip()
+        {
+            // Regression: ReviewAsync used to only flip the request's Status to Approved and
+            // email the requester — nothing ever touched SubAdminPermission, so an approved
+            // request left the Sub Admin exactly as access-less as before, "No access" on
+            // every module they'd asked for.
+            var subAdmin = await _db.SeedUserAsync($"rm-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+            var admin = await _db.SeedUserAsync($"admin-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            var access = CreateAccessRequestService();
+
+            var submitted = await access.SubmitAsync(subAdmin.Id, new SubmitAccessRequestRequest
+            {
+                RequestedModules = [PermissionModule.CourseBatchManagement, PermissionModule.SessionCalendarManagement],
+            });
+
+            await access.ReviewAsync(submitted.Id, admin.Id, new ReviewAccessRequestRequest { Approve = true });
+
+            var grants = await _db.Context.SubAdminPermissions.AsNoTracking()
+                .Where(p => p.UserId == subAdmin.Id)
+                .ToDictionaryAsync(p => p.Module);
+            Assert.True(grants[PermissionModule.CourseBatchManagement].CanView);
+            Assert.True(grants[PermissionModule.SessionCalendarManagement].CanView);
+        }
+
+        [Fact]
+        public async Task ApproveAccessRequest_NeverDowngradesAModuleAlreadyHeldAtAHigherLevel()
+        {
+            var subAdmin = await _db.SeedUserAsync($"rm-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+            var admin = await _db.SeedUserAsync($"admin-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            _db.Context.SubAdminPermissions.Add(new SubAdminPermission
+            {
+                UserId = subAdmin.Id, Module = PermissionModule.CourseBatchManagement,
+                CanView = true, CanCreate = true, CanEdit = true,
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var access = CreateAccessRequestService();
+            var submitted = await access.SubmitAsync(subAdmin.Id, new SubmitAccessRequestRequest
+            {
+                RequestedModules = [PermissionModule.CourseBatchManagement],
+            });
+            await access.ReviewAsync(submitted.Id, admin.Id, new ReviewAccessRequestRequest { Approve = true });
+
+            var grant = await _db.Context.SubAdminPermissions.AsNoTracking()
+                .SingleAsync(p => p.UserId == subAdmin.Id && p.Module == PermissionModule.CourseBatchManagement);
+            Assert.True(grant.CanCreate); // untouched, not reset to View-only
+            Assert.True(grant.CanEdit);
+        }
+
+        [Fact]
+        public async Task RejectAccessRequest_GrantsNoPermissions()
+        {
+            var subAdmin = await _db.SeedUserAsync($"rm-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+            var admin = await _db.SeedUserAsync($"admin-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            var access = CreateAccessRequestService();
+
+            var submitted = await access.SubmitAsync(subAdmin.Id, new SubmitAccessRequestRequest
+            {
+                RequestedModules = [PermissionModule.CourseBatchManagement],
+            });
+            await access.ReviewAsync(submitted.Id, admin.Id, new ReviewAccessRequestRequest { Approve = false });
+
+            Assert.Empty(await _db.Context.SubAdminPermissions.Where(p => p.UserId == subAdmin.Id).ToListAsync());
         }
 
         [Fact]
