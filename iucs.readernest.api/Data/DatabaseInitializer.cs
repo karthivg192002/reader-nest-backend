@@ -45,6 +45,7 @@ namespace iucs.readernest.api.Data
             await EnsurePackagesAndStudentViewMenusAsync(context);
             await EnsureAdminDepartmentsMenuAsync(context);
             await EnsureAdminQuizBankMenuAsync(context);
+            await EnsureAdminActivityBankMenuAsync(context);
             await EnsureAdminServerMonitoringMenuAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
@@ -727,6 +728,45 @@ namespace iucs.readernest.api.Data
                 Label = "Quiz Bank",
                 Path = path,
                 Icon = "Sparkles",
+                SortOrder = last.SortOrder + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.CourseBatchManagement,
+            });
+        }
+
+        /// <summary>
+        /// Inserts the Admin "Activity Bank" menu item into a database that was seeded before
+        /// the admin-authored whiteboard activity bank existed (SeedMenusAsync only ever
+        /// creates rows once). Appended after whatever the Academics section's last item
+        /// currently is, same placement rule as EnsureAdminQuizBankMenuAsync right above.
+        /// </summary>
+        private static async Task EnsureAdminActivityBankMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/admin/activity-bank";
+            if (context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == path))
+            {
+                return;
+            }
+
+            var academicsItems = await context.MenuItems
+                .Where(m => m.Portal == "admin" && m.Section == "Academics")
+                .ToListAsync();
+            if (academicsItems.Count == 0)
+            {
+                return; // no Academics section at all (unexpected) — nothing sensible to append after
+            }
+
+            var last = academicsItems.OrderByDescending(m => m.SortOrder).First();
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "admin",
+                Section = "Academics",
+                SectionOrder = last.SectionOrder,
+                Label = "Activity Bank",
+                Path = path,
+                Icon = "PencilRuler",
                 SortOrder = last.SortOrder + 1,
                 IsActive = true,
                 RequiredModule = PermissionModule.CourseBatchManagement,
