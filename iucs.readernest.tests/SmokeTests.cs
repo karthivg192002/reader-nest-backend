@@ -1111,6 +1111,146 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task GenerateInvoicePdf_PopulatesSessionsAndFee_FromTheDirectlyLinkedCourse()
+        {
+            // The PDF's SESSIONS/FEE columns used to always render blank -- InvoicePdfData had
+            // no fields for them at all. A course-linked invoice with no subscription at all
+            // (no plan to prefer) should price them off that course.
+            var (_, course, _) = await SeedBatchWithSessionAsync(totalSessions: 36, includeSession: false);
+            var parentUser = await _db.SeedUserAsync($"inv-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            _db.Context.AddRange(parentProfile,
+                new PaymentAccount { Name = "P", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "t", GatewayAccountRef = "p" });
+            await _db.Context.SaveChangesAsync();
+
+            var billing = CreateBillingService();
+            var invoiceDto = await billing.CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = parentProfile.Id, DepartmentId = WellKnownDepartments.Phonics, CourseId = course.Id,
+                Amount = 6500, DueDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)),
+            });
+
+            await billing.GenerateInvoicePdfAsync(invoiceDto.Id);
+
+            var request = _invoicePdfGenerator.LastRequest;
+            Assert.NotNull(request);
+            Assert.Equal(36, request!.Sessions);
+            Assert.Equal(course.Price, request.Fee); // the course's own listed fee, not the invoice's Amount
+            Assert.Equal(6500m, request.Amount); // Amount is what's actually charged -- can legitimately differ from Fee
+        }
+
+        [Fact]
+        public async Task GenerateInvoicePdf_PopulatesSessionsAndFee_FromTheSubscriptionsPackagePlan_WhenNoCourseIsDirectlyLinked()
+        {
+            // Simplest subscription case: no CourseId at all on the invoice, so there's nothing
+            // to prefer over -- SESSIONS/FEE come from the subscription's package plan,
+            // SessionsIncluded and Price, not the plan's underlying course's own TotalSessions/
+            // Price (a plan can legitimately include fewer sessions than the full course, e.g. a
+            // trial or partial package). The more realistic "both linked" shape is covered next.
+            var parentUser = await _db.SeedUserAsync($"inv-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var child = new Child { ParentProfile = parentProfile, FirstName = "Kid", LastName = "One" };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Course", Type = CourseType.Group,
+                DurationMinutes = 45, Price = 7500, TotalSessions = 36, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            var plan = new PackagePlan
+            {
+                Name = "Trial Pack", Course = course, BillingType = BillingType.Subscription,
+                BillingCycle = BillingCycle.Monthly, Price = 2000, SessionsIncluded = 8,
+            };
+            var subscription = new Subscription
+            {
+                ParentProfile = parentProfile, Child = child, PackagePlan = plan,
+                StartDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            };
+            _db.Context.AddRange(parentProfile, child, category, course, plan, subscription,
+                new PaymentAccount { Name = "P", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "t", GatewayAccountRef = "p" });
+            await _db.Context.SaveChangesAsync();
+
+            var billing = CreateBillingService();
+            var invoiceDto = await billing.CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = parentProfile.Id, DepartmentId = WellKnownDepartments.Phonics, SubscriptionId = subscription.Id,
+                Amount = 2000, DueDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)),
+            });
+
+            await billing.GenerateInvoicePdfAsync(invoiceDto.Id);
+
+            var request = _invoicePdfGenerator.LastRequest;
+            Assert.NotNull(request);
+            Assert.Equal(8, request!.Sessions); // the plan's own SessionsIncluded, not the course's TotalSessions (36)
+            Assert.Equal(2000m, request.Fee); // the plan's own Price, not the course's Price (7500)
+        }
+
+        [Fact]
+        public async Task GenerateInvoicePdf_PrefersTheSubscriptionsPlanOverTheCourse_WhenBothAreLinkedOnTheSameInvoice()
+        {
+            // The realistic shape, not just the "no course at all" fallback above: per
+            // Invoice.CourseId's own doc comment, a subscription-driven invoice typically has
+            // CourseId ALSO set (copied from the plan's course at creation time) -- so this is
+            // what actually happens on a real subscription invoice, and is the case a
+            // Course-first precedence would get wrong: that student's own plan (a discounted
+            // or trial package, priced differently from the course's generic list price) must
+            // still win over the course's own Price/TotalSessions.
+            var parentUser = await _db.SeedUserAsync($"inv-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var child = new Child { ParentProfile = parentProfile, FirstName = "Kid", LastName = "One" };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Course", Type = CourseType.Group,
+                DurationMinutes = 45, Price = 7500, TotalSessions = 36, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            var plan = new PackagePlan
+            {
+                Name = "Discounted Pack", Course = course, BillingType = BillingType.Subscription,
+                BillingCycle = BillingCycle.Monthly, Price = 6500, SessionsIncluded = 30,
+            };
+            var subscription = new Subscription
+            {
+                ParentProfile = parentProfile, Child = child, PackagePlan = plan,
+                StartDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            };
+            _db.Context.AddRange(parentProfile, child, category, course, plan, subscription,
+                new PaymentAccount { Name = "P", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "t", GatewayAccountRef = "p" });
+            await _db.Context.SaveChangesAsync();
+
+            var billing = CreateBillingService();
+            var invoiceDto = await billing.CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = parentProfile.Id, DepartmentId = WellKnownDepartments.Phonics,
+                SubscriptionId = subscription.Id, CourseId = course.Id, // both linked, as a real subscription invoice would be
+                Amount = 6500, DueDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)),
+            });
+
+            await billing.GenerateInvoicePdfAsync(invoiceDto.Id);
+
+            var request = _invoicePdfGenerator.LastRequest;
+            Assert.NotNull(request);
+            Assert.Equal(30, request!.Sessions); // this parent's own plan (30), not the course's full total (36)
+            Assert.Equal(6500m, request.Fee); // this parent's own plan price (6500), not the course's list price (7500)
+        }
+
+        [Fact]
+        public async Task GenerateInvoicePdf_LeavesSessionsAndFeeBlank_WhenNeitherCourseNorSubscriptionIsLinked()
+        {
+            // A manually-created admin invoice with no course/plan link at all -- Sessions/Fee
+            // must stay null (rendered as blank cells) rather than defaulting to 0, which would
+            // read as "this course has zero sessions" on the printed PDF.
+            var (billing, invoice) = await SeedInvoiceAsync(amount: 1000);
+
+            await billing.GenerateInvoicePdfAsync(invoice.Id);
+
+            var request = _invoicePdfGenerator.LastRequest;
+            Assert.NotNull(request);
+            Assert.Null(request!.Sessions);
+            Assert.Null(request.Fee);
+        }
+
+        [Fact]
         public async Task GenerateInvoicePdf_UsesConfiguredSettings_WhenPresent()
         {
             var (billing, invoice) = await SeedInvoiceAsync(amount: 1000);
@@ -5149,7 +5289,7 @@ namespace iucs.readernest.tests
             Assert.Single(await portal.GetInvoicesAsync(parentAUserId));
 
             // And every id-keyed read/write on someone else's invoice is refused, not served.
-            await Assert.ThrowsAsync<NotFoundException>(() => billingA.GetParentInvoiceAsync(intruderUser.Id, invoiceA.Id));
+            await Assert.ThrowsAsync<NotFoundException>(() => billingA.GenerateParentInvoicePdfAsync(intruderUser.Id, invoiceA.Id));
             await Assert.ThrowsAsync<NotFoundException>(() =>
                 billingA.InitiateParentPaymentAsync(intruderUser.Id, invoiceA.Id, new InitiateParentPaymentRequest { MethodKey = "cash" }));
             await Assert.ThrowsAsync<NotFoundException>(() =>

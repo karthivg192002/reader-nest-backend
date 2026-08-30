@@ -65,9 +65,7 @@ namespace iucs.readernest.api.Services
 
                         col.Item().PaddingTop(20).Row(row =>
                         {
-                            // Fixed width sized to "Bill To:"'s actually-short content (name + phone), not
-                            // a 50/50 split — Payment Info was stranding itself out near page-center with a
-                            // dead gap in between whenever Bill To's two short lines didn't need half the page.
+                            // Fixed width sized to "Bill To:"'s actually-short content (name + phone).
                             row.ConstantItem(180).Column(c =>
                             {
                                 c.Item().Text("Bill To:").Bold();
@@ -77,6 +75,10 @@ namespace iucs.readernest.api.Services
                                     c.Item().Text(data.ParentPhone);
                                 }
                             });
+                            // Empty spacer pushes Payment Info over to the right side of the page
+                            // (matching the org's own template) instead of it starting immediately
+                            // after Bill To with only a small gap.
+                            row.ConstantItem(90);
                             row.RelativeItem().Column(c =>
                             {
                                 c.Item().Text("Payment Info").Bold();
@@ -107,8 +109,8 @@ namespace iucs.readernest.api.Services
                             });
 
                             table.Cell().Border(1).BorderColor(LineColor).Padding(6).Text(data.Description);
-                            table.Cell().Border(1).BorderColor(LineColor).Padding(6).Text("");
-                            table.Cell().Border(1).BorderColor(LineColor).Padding(6).Text("");
+                            table.Cell().Border(1).BorderColor(LineColor).Padding(6).AlignCenter().Text(data.Sessions?.ToString() ?? "");
+                            table.Cell().Border(1).BorderColor(LineColor).Padding(6).AlignCenter().Text(data.Fee is { } fee ? $"{data.Currency} {fee:0.##}" : "");
                             table.Cell().Border(1).BorderColor(LineColor).Padding(6).AlignCenter().Text($"{data.Currency} {data.Amount:0.##}");
 
                             // Blank rows so the table reads the same as the org's own template

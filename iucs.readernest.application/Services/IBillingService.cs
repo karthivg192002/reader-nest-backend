@@ -55,6 +55,15 @@ namespace iucs.readernest.application.Services
         Task<(byte[] Content, string FileName)> GenerateInvoicePdfAsync(Guid id, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Ownership-checked equivalent of <see cref="GenerateInvoicePdfAsync"/> for the parent
+        /// portal's own invoice download — the same "Bill of Supply" PDF, not a separate document.
+        /// </summary>
+        Task<(byte[] Content, string FileName)> GenerateParentInvoicePdfAsync(
+            Guid parentUserId,
+            Guid invoiceId,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Records a successful payment against an invoice (manual entry now;
         /// gateway webhooks call the same path once accounts are provisioned)
         /// and generates the receipt.
@@ -66,15 +75,6 @@ namespace iucs.readernest.application.Services
         /// routed through the invoice's department payment account.
         /// </summary>
         Task<PaymentLinkDto> CreatePaymentLinkAsync(Guid invoiceId, CancellationToken cancellationToken = default);
-
-        /// <summary>
-        /// Ownership-checked invoice fetch for the parent portal download; returns the
-        /// invoice with the billed parent's display name resolved.
-        /// </summary>
-        Task<(InvoiceDto Invoice, string ParentName)> GetParentInvoiceAsync(
-            Guid parentUserId,
-            Guid invoiceId,
-            CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Parent Pay-Now: for "cash", records a pending cash intent for admin confirmation;

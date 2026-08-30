@@ -467,6 +467,41 @@ namespace iucs.readernest.application.Services
                 .FirstOrDefaultAsync(i => i.Id == id, cancellationToken)
                 ?? throw new NotFoundException(nameof(Invoice), id);
 
+            var data = await BuildInvoicePdfDataAsync(invoice, cancellationToken);
+            var content = _invoicePdfGenerator.Generate(data);
+            return (content, $"{invoice.InvoiceNumber}.pdf");
+        }
+
+        /// <summary>
+        /// Ownership-checked equivalent of <see cref="GenerateInvoicePdfAsync"/> for the parent
+        /// portal's own invoice download — same "Bill of Supply" PDF admin gets, not a separate,
+        /// unbranded document. A parent can only download their own invoice.
+        /// </summary>
+        public async Task<(byte[] Content, string FileName)> GenerateParentInvoicePdfAsync(
+            Guid parentUserId,
+            Guid invoiceId,
+            CancellationToken cancellationToken = default)
+        {
+            var parent = await _unitOfWork.Repository<ParentProfile>()
+                .FirstOrDefaultAsync(p => p.UserId == parentUserId, cancellationToken)
+                ?? throw new NotFoundException("No parent profile is linked to the current account.");
+
+            var invoice = await WithDtoIncludes(_unitOfWork.Repository<Invoice>().Query())
+                .FirstOrDefaultAsync(i => i.Id == invoiceId && i.ParentProfileId == parent.Id, cancellationToken)
+                ?? throw new NotFoundException(nameof(Invoice), invoiceId);
+
+            var data = await BuildInvoicePdfDataAsync(invoice, cancellationToken);
+            var content = _invoicePdfGenerator.Generate(data);
+            return (content, $"{invoice.InvoiceNumber}.pdf");
+        }
+
+        /// <summary>Shared by GenerateInvoicePdfAsync and GenerateParentInvoicePdfAsync — both put
+        /// the same "Bill of Supply" PDF in front of the caller, just with different ownership
+        /// rules on which invoice they're allowed to reach. <paramref name="invoice"/> must come
+        /// from a query built on <see cref="WithDtoIncludes"/> (Course, ParentProfile.User,
+        /// Subscription.PackagePlan.Course) or the navigation properties below will be null.</summary>
+        private async Task<InvoicePdfData> BuildInvoicePdfDataAsync(Invoice invoice, CancellationToken cancellationToken)
+        {
             var settings = await _unitOfWork.Repository<AppSetting>().Query()
                 .Where(s => InvoiceSettingKeys.Contains(s.Key))
                 .ToDictionaryAsync(s => s.Key, s => s.Value, cancellationToken);
@@ -476,7 +511,7 @@ namespace iucs.readernest.application.Services
                     ? value
                     : InvoiceSettingNotConfigured;
 
-            var data = new InvoicePdfData
+            return new InvoicePdfData
             {
                 InvoiceNumber = invoice.InvoiceNumber,
                 IssuedAtUtc = invoice.IssuedAtUtc,
@@ -485,6 +520,16 @@ namespace iucs.readernest.application.Services
                     : $"{invoice.ParentProfile.User.FirstName} {invoice.ParentProfile.User.LastName}".Trim(),
                 ParentPhone = invoice.ParentProfile?.User?.Phone,
                 Description = invoice.Course?.Name ?? invoice.Subscription?.PackagePlan?.Course?.Name ?? "Course Fee",
+                // Subscription's own plan wins over the course, the OPPOSITE precedence from
+                // Description above. Invoice.CourseId is typically set on a subscription-driven
+                // invoice too (copied from the plan's course — see Invoice.CourseId's own doc
+                // comment), so a Course-first order here would almost always pick the course's
+                // generic list price/session count instead of what this specific parent's
+                // subscription actually includes (a course can have several plans at different
+                // prices/session counts — a trial vs. a full package, say). Only a pure one-time
+                // course invoice with no subscription at all falls back to the course's own values.
+                Sessions = invoice.Subscription?.PackagePlan?.SessionsIncluded ?? invoice.Course?.TotalSessions,
+                Fee = invoice.Subscription?.PackagePlan?.Price ?? invoice.Course?.Price,
                 Amount = invoice.Amount,
                 Currency = invoice.Currency,
                 AccountNumber = Setting("invoice.accountNumber"),
@@ -496,9 +541,6 @@ namespace iucs.readernest.application.Services
                 SignatoryName = Setting("invoice.signatoryName"),
                 SignatoryTitle = Setting("invoice.signatoryTitle"),
             };
-
-            var content = _invoicePdfGenerator.Generate(data);
-            return (content, $"{invoice.InvoiceNumber}.pdf");
         }
 
         public async Task<InvoiceDto> CreateInvoiceAsync(
@@ -814,24 +856,6 @@ namespace iucs.readernest.application.Services
             }
         }
 
-        public async Task<(InvoiceDto Invoice, string ParentName)> GetParentInvoiceAsync(
-            Guid parentUserId,
-            Guid invoiceId,
-            CancellationToken cancellationToken = default)
-        {
-            var parent = await _unitOfWork.Repository<ParentProfile>().Query()
-                .Include(p => p.User)
-                .FirstOrDefaultAsync(p => p.UserId == parentUserId, cancellationToken)
-                ?? throw new NotFoundException("No parent profile is linked to the current account.");
-
-            var invoice = await _unitOfWork.Repository<Invoice>().Query()
-                .Include(i => i.Child)
-                .Include(i => i.Subscription).ThenInclude(s => s!.PackagePlan).ThenInclude(p => p.Course)
-                .FirstOrDefaultAsync(i => i.Id == invoiceId && i.ParentProfileId == parent.Id, cancellationToken)
-                ?? throw new NotFoundException(nameof(Invoice), invoiceId);
-
-            return (invoice.ToDto(), $"{parent.User.FirstName} {parent.User.LastName}".Trim());
-        }
 
         public async Task<ParentPaymentResultDto> InitiateParentPaymentAsync(
             Guid parentUserId,

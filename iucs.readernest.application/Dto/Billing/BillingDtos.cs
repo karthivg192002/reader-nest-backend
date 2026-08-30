@@ -113,6 +113,22 @@ namespace iucs.readernest.application.Dto.Billing
         /// <summary>Line description — the invoiced course's name, or a generic fallback when none is linked.</summary>
         public string Description { get; set; } = null!;
 
+        /// <summary>
+        /// The invoiced course's total session count — from the directly-linked Course when
+        /// there is one, else the subscription's package plan (Course.TotalSessions or
+        /// PackagePlan.SessionsIncluded respectively). Null (and left blank on the PDF) when
+        /// neither is known, e.g. a manually-created admin invoice with no course/plan link.
+        /// </summary>
+        public int? Sessions { get; set; }
+
+        /// <summary>
+        /// The invoiced course's/plan's listed fee (Course.Price or PackagePlan.Price) — shown
+        /// alongside Amount, which is what's actually being charged on this specific invoice and
+        /// can legitimately differ (a discount, partial payment, or negotiated rate). Null (and
+        /// left blank on the PDF) when neither source is known.
+        /// </summary>
+        public decimal? Fee { get; set; }
+
         public decimal Amount { get; set; }
 
         public string Currency { get; set; } = null!;
