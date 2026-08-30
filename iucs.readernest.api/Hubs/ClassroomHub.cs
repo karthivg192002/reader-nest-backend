@@ -22,6 +22,12 @@ namespace iucs.readernest.api.Hubs
         private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, int>> Scores = new();
         // Keyed "{sessionId}:{connectionId}:{questionIndex}" — see AnswerQuiz for why this exists.
         private static readonly ConcurrentDictionary<string, byte> AnsweredQuestions = new();
+        // Non-teacher connections SetBoardAccess has granted, per session. SendBoard enforces
+        // this server-side -- without it, SetBoardAccess was only ever a one-way "you're now
+        // allowed" notification the client could act on or ignore; nothing stopped any joined
+        // participant from calling SendBoard directly (visible and callable from the browser's
+        // own dev tools) regardless of whether they'd actually been granted access.
+        private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> BoardAccessGrants = new();
 
         private readonly ISessionService _sessionService;
         private readonly IGamificationService _gamificationService;
@@ -157,6 +163,15 @@ namespace iucs.readernest.api.Hubs
         public async Task SendBoard(string sessionId, string opJson)
         {
             if (!IsJoined(sessionId))
+            {
+                return;
+            }
+
+            // The teacher always has access; anyone else needs an explicit grant recorded by
+            // SetBoardAccess below — this is the actual enforcement, not just a UI hint.
+            var hasAccess = IsTeacherInRoom(sessionId)
+                || (BoardAccessGrants.TryGetValue(sessionId, out var grants) && grants.ContainsKey(Context.ConnectionId));
+            if (!hasAccess)
             {
                 return;
             }
@@ -313,6 +328,16 @@ namespace iucs.readernest.api.Hubs
                 return;
             }
 
+            var grants = BoardAccessGrants.GetOrAdd(sessionId, _ => new ConcurrentDictionary<string, byte>());
+            if (allowed)
+            {
+                grants[connectionId] = 0;
+            }
+            else
+            {
+                grants.TryRemove(connectionId, out _);
+            }
+
             await Clients.Client(connectionId).SendAsync("BoardAccess", allowed);
         }
 
@@ -325,6 +350,10 @@ namespace iucs.readernest.api.Hubs
             if (Rooms.TryGetValue(sessionId, out var room))
             {
                 room.TryRemove(Context.ConnectionId, out var removedState);
+                if (BoardAccessGrants.TryGetValue(sessionId, out var grants))
+                {
+                    grants.TryRemove(Context.ConnectionId, out _);
+                }
 
                 // Real departure time, for payout accuracy (see CaptureLeaveAttendanceAsync's own
                 // doc comment) — without this, nothing ever recorded when a teacher actually left
@@ -345,6 +374,7 @@ namespace iucs.readernest.api.Hubs
                 {
                     Rooms.TryRemove(sessionId, out _);
                     Scores.TryRemove(sessionId, out _); // class over — scoreboard resets
+                    BoardAccessGrants.TryRemove(sessionId, out _);
                     foreach (var key in AnsweredQuestions.Keys.Where(k => k.StartsWith($"{sessionId}:", StringComparison.Ordinal)))
                     {
                         AnsweredQuestions.TryRemove(key, out _);
