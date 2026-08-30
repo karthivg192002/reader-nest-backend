@@ -485,6 +485,11 @@ namespace iucs.readernest.application.Services
                     : $"{invoice.ParentProfile.User.FirstName} {invoice.ParentProfile.User.LastName}".Trim(),
                 ParentPhone = invoice.ParentProfile?.User?.Phone,
                 Description = invoice.Course?.Name ?? invoice.Subscription?.PackagePlan?.Course?.Name ?? "Course Fee",
+                // Same "direct course wins, else the subscription's plan" precedence as
+                // Description above — a course-linked invoice prices off the course itself,
+                // a subscription-linked one off its package plan.
+                Sessions = invoice.Course?.TotalSessions ?? invoice.Subscription?.PackagePlan?.SessionsIncluded,
+                Fee = invoice.Course?.Price ?? invoice.Subscription?.PackagePlan?.Price,
                 Amount = invoice.Amount,
                 Currency = invoice.Currency,
                 AccountNumber = Setting("invoice.accountNumber"),
