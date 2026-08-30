@@ -1,3 +1,4 @@
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Sessions;
@@ -71,7 +72,11 @@ namespace iucs.readernest.application.Services
             }
 
             var sessions = await query.OrderBy(s => s.ScheduledStartAtUtc).ToListAsync(cancellationToken);
-            return sessions.Select(s => s.ToDto()).ToList();
+            var activeRecordings = await SessionRecordingLookup.ActiveRecordingsBySessionAsync(
+                _unitOfWork, sessions.Select(s => s.Id), cancellationToken);
+            return sessions
+                .Select(s => s.ToDto(activeRecordings.GetValueOrDefault(s.Id), activeRecordings.ContainsKey(s.Id)))
+                .ToList();
         }
 
         public async Task<IReadOnlyList<ClassSessionDto>> ListForTeacherUserAsync(
@@ -92,7 +97,8 @@ namespace iucs.readernest.application.Services
             var session = await BaseQuery().FirstOrDefaultAsync(s => s.Id == id, cancellationToken)
                 ?? throw new NotFoundException(nameof(ClassSession), id);
 
-            return session.ToDto();
+            var activeRecordings = await SessionRecordingLookup.ActiveRecordingsBySessionAsync(_unitOfWork, [id], cancellationToken);
+            return session.ToDto(activeRecordings.GetValueOrDefault(id), activeRecordings.ContainsKey(id));
         }
 
         public async Task<ClassSessionDto> ScheduleAsync(ScheduleSessionRequest request, CancellationToken cancellationToken = default)
