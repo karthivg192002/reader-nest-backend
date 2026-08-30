@@ -21,6 +21,7 @@ namespace iucs.readernest.application.Services
     public class DemoBookingService : IDemoBookingService
     {
         private const string ReassignmentAuditEntityName = "DemoBookingTeacherReassignment";
+        private const string FollowUpAuditEntityName = "DemoBookingFollowUp";
 
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
@@ -332,9 +333,23 @@ namespace iucs.readernest.application.Services
                 && booking.ConversionStatus != ConversionStatus.ReadyForEnrollment;
 
             booking.ConversionStatus = request.ConversionStatus;
-            if (request.FollowUpNotes is not null)
+            if (!string.IsNullOrWhiteSpace(request.Note))
             {
-                booking.FollowUpNotes = request.FollowUpNotes;
+                // Full history (who logged it, exactly when) lives in the audit trail — see
+                // GetFollowUpNotesAsync — rather than concatenated into one string, which used
+                // to collapse every note ever logged into a single fabricated date/author on
+                // reload. This field stays as a quick "most recent note" snapshot only.
+                booking.FollowUpNotes = request.Note;
+                await _auditLog.StageAsync(
+                    AuditAction.Create,
+                    FollowUpAuditEntityName,
+                    booking.Id.ToString(),
+                    JsonSerializer.Serialize(new { request.Note, request.NextFollowUpOn }),
+                    cancellationToken);
+            }
+            if (request.NextFollowUpOn.HasValue)
+            {
+                booking.NextFollowUpOn = request.NextFollowUpOn;
             }
 
             if (enteringReadyForEnrollment)
@@ -816,6 +831,60 @@ namespace iucs.readernest.application.Services
 
         private sealed record ReassignmentAuditPayload(
             Guid? OldTeacherProfileId, string? OldTeacherName, Guid NewTeacherProfileId, string NewTeacherName, string? Reason);
+
+        public async Task<IReadOnlyList<DemoBookingFollowUpDto>> GetFollowUpNotesAsync(
+            Guid bookingId,
+            CancellationToken cancellationToken = default)
+        {
+            var exists = await _unitOfWork.Repository<DemoBooking>().ExistsAsync(b => b.Id == bookingId, cancellationToken);
+            if (!exists)
+            {
+                throw new NotFoundException(nameof(DemoBooking), bookingId);
+            }
+
+            var logs = await _unitOfWork.Repository<AuditLog>().Query()
+                .Where(a => a.EntityName == FollowUpAuditEntityName && a.EntityId == bookingId.ToString())
+                .OrderByDescending(a => a.CreatedAtUtc)
+                .ToListAsync(cancellationToken);
+
+            if (logs.Count == 0)
+            {
+                return [];
+            }
+
+            var actorIds = logs.Where(l => l.ActorUserId.HasValue).Select(l => l.ActorUserId!.Value).Distinct().ToList();
+            var actorNames = await _unitOfWork.Repository<User>().Query()
+                .Where(u => actorIds.Contains(u.Id))
+                .Select(u => new { u.Id, Name = u.FirstName + " " + u.LastName })
+                .ToDictionaryAsync(u => u.Id, u => u.Name, cancellationToken);
+
+            return logs.Select(log =>
+            {
+                FollowUpAuditPayload? payload = null;
+                if (!string.IsNullOrWhiteSpace(log.ChangesJson))
+                {
+                    try
+                    {
+                        payload = JsonSerializer.Deserialize<FollowUpAuditPayload>(log.ChangesJson);
+                    }
+                    catch (JsonException)
+                    {
+                        _logger.LogWarning("Unparseable follow-up-note audit payload on log {LogId} for booking {BookingId}", log.Id, bookingId);
+                    }
+                }
+
+                return new DemoBookingFollowUpDto
+                {
+                    Id = log.Id,
+                    AtUtc = log.CreatedAtUtc,
+                    LoggedByName = log.ActorUserId.HasValue && actorNames.TryGetValue(log.ActorUserId.Value, out var name) ? name : null,
+                    Note = payload?.Note ?? "—",
+                    NextFollowUpOn = payload?.NextFollowUpOn,
+                };
+            }).ToList();
+        }
+
+        private sealed record FollowUpAuditPayload(string? Note, DateOnly? NextFollowUpOn);
 
         private IQueryable<DemoBooking> BaseQuery()
         {
