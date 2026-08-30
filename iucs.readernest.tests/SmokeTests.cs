@@ -5407,6 +5407,216 @@ namespace iucs.readernest.tests
             Assert.Equal(750m, longItem.Amount); // 15/min * 50 min
         }
 
+        [Fact]
+        public async Task PayoutRate_HistoricalVersioning_PricesEachSessionAtTheRateEffectiveOnItsOwnDate()
+        {
+            // "The rate effective on the session date" (AccrueForSessionAsync's own comment) is a
+            // real invariant with no direct test anywhere before this: a rate change must only
+            // affect sessions from its effective date forward -- never retroactively repricing a
+            // session that already happened under the old rate.
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Course", Type = CourseType.Group,
+                DurationMinutes = 30, Price = 100, TotalSessions = 2, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            var batch = new Batch { Course = course, TeacherProfile = teacher, Name = "Batch", Capacity = 5 };
+            var oldSession = new ClassSession
+            {
+                Batch = batch, TeacherProfile = teacher,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-10), ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-10).AddMinutes(30),
+            };
+            var newSession = new ClassSession
+            {
+                Batch = batch, TeacherProfile = teacher,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(1), ScheduledEndAtUtc = DateTime.UtcNow.AddDays(1).AddMinutes(30),
+            };
+            _db.Context.AddRange(teacher, category, course, batch, oldSession, newSession);
+            await _db.Context.SaveChangesAsync();
+            _db.CurrentUser.UserId = teacherUser.Id;
+
+            var payouts = CreatePayoutService();
+            // Original rate, effective well in the past -- covers oldSession.
+            await payouts.SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = teacher.Id, RatePerMinute = 10,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
+            });
+            // A raise, effective from today -- must NOT retroactively touch oldSession, dated 10 days ago.
+            await payouts.SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = teacher.Id, RatePerMinute = 20,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow),
+            });
+
+            await SeedFullTeacherAttendanceAsync(oldSession);
+            await SeedFullTeacherAttendanceAsync(newSession);
+            await CreateSessionService().CompleteAsync(oldSession.Id);
+            await CreateSessionService().CompleteAsync(newSession.Id);
+
+            var oldItem = await _db.Context.PayoutItems.AsNoTracking().FirstAsync(i => i.ClassSessionId == oldSession.Id);
+            var newItem = await _db.Context.PayoutItems.AsNoTracking().FirstAsync(i => i.ClassSessionId == newSession.Id);
+            Assert.Equal(300m, oldItem.Amount); // 10/min * 30 min -- the rate in force 10 days ago
+            Assert.Equal(600m, newItem.Amount); // 20/min * 30 min -- the raise now in force
+        }
+
+        [Fact]
+        public async Task PayoutRate_FutureDatedRate_DoesNotApplyToASessionCompletedBeforeItsEffectiveDate()
+        {
+            // The reverse of the versioning test above: a rate scheduled to take effect NEXT
+            // month must not retroactively price a session completing today. "Effective on the
+            // session date" cuts both ways -- old rates still apply to old sessions, and a
+            // future rate doesn't apply early just because a row for it already exists.
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1); // 45-minute session
+            await CreatePayoutService().SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = session.TeacherProfileId, RatePerMinute = 50,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(30)),
+            });
+            await SeedFullTeacherAttendanceAsync(session);
+
+            await CreateSessionService().CompleteAsync(session.Id);
+
+            var item = await _db.Context.PayoutItems.AsNoTracking().FirstAsync(i => i.ClassSessionId == session.Id);
+            Assert.Equal(0m, item.Amount); // no rate is actually in force yet
+            Assert.Contains("No payout rate configured", item.Note);
+        }
+
+        [Fact]
+        public async Task Complete_DoesNotFlag_WhenAttendedExactlyAtTheReviewThreshold()
+        {
+            // The review check is strictly "<" the threshold (AccrueForSessionAsync), so
+            // attendance landing exactly on the boundary must NOT flag -- only falling short of
+            // it should. The closest existing coverage (Complete_UsesConfiguredMinAttendancePercent...)
+            // sits one point below its threshold, never exactly on one.
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1); // 45-minute session
+            await CreatePayoutService().SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = session.TeacherProfileId, RatePerMinute = 10,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1)),
+            });
+            var joinedAt = DateTime.UtcNow.AddMinutes(-22.5);
+            _db.Context.SessionAttendances.Add(new SessionAttendance
+            {
+                ClassSessionId = session.Id,
+                ParticipantType = ParticipantType.Teacher,
+                TeacherProfileId = session.TeacherProfileId,
+                Status = AttendanceStatus.Present,
+                JoinedAtUtc = joinedAt,
+                LeftAtUtc = joinedAt.AddMinutes(22.5), // exactly 50% of the 45-minute session
+            });
+            await _db.Context.SaveChangesAsync();
+
+            await CreateSessionService().CompleteAsync(session.Id);
+
+            var item = Assert.Single(_db.Context.PayoutItems.ToList());
+            Assert.False(item.RequiresReview);
+        }
+
+        [Fact]
+        public async Task AccrueForSession_RoundsAFractionalScheduledDurationToTheNearestMinute()
+        {
+            // Session lengths aren't always a clean whole number of minutes once custom
+            // durations are involved -- pins the actual rounding behaviour (Math.Round's default
+            // MidpointRounding.ToEven, i.e. banker's rounding) so a future change to it is caught
+            // rather than silently shifting every affected teacher's pay by a few paise. Worth a
+            // second look if session lengths should instead round in the teacher's favour
+            // (AwayFromZero) rather than to the nearest even minute.
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Course", Type = CourseType.Group,
+                DurationMinutes = 30, Price = 100, TotalSessions = 1, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            var batch = new Batch { Course = course, TeacherProfile = teacher, Name = "Batch", Capacity = 5 };
+            var start = DateTime.UtcNow.AddDays(1);
+            var session = new ClassSession
+            {
+                Batch = batch, TeacherProfile = teacher,
+                ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddSeconds(30 * 60 + 30), // 30 min 30 sec
+            };
+            _db.Context.AddRange(teacher, category, course, batch, session);
+            await _db.Context.SaveChangesAsync();
+            _db.CurrentUser.UserId = teacherUser.Id;
+
+            await CreatePayoutService().SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = teacher.Id, RatePerMinute = 10,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1)),
+            });
+            await SeedFullTeacherAttendanceAsync(session);
+
+            await CreateSessionService().CompleteAsync(session.Id);
+
+            var item = await _db.Context.PayoutItems.AsNoTracking().FirstAsync(i => i.ClassSessionId == session.Id);
+            Assert.Equal(300m, item.Amount); // 10/min * 30 min -- 30.5 rounds DOWN to the even number
+        }
+
+        [Fact]
+        public async Task CaptureJoinAttendance_MultipleReconnects_KeepsOriginalJoinAcrossThreeDropCycles()
+        {
+            // The single-reconnect regression test (TeacherRejoinAfterDrop...) only proves one
+            // drop/reconnect cycle. A genuinely shaky connection drops and reconnects several
+            // times over one class -- this must still never bump JoinedAtUtc forward, and must
+            // never leave a stale LeftAtUtc behind after the final reconnect.
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var teacherProfile = await _db.Context.TeacherProfiles.FindAsync(session.TeacherProfileId);
+            var ops = CreateAcademicOpsService();
+
+            await ops.CaptureJoinAttendanceAsync(session.Id, teacherProfile!.UserId);
+            var originalJoin = _db.Context.SessionAttendances.AsNoTracking().Single(a => a.ClassSessionId == session.Id).JoinedAtUtc;
+
+            for (var i = 0; i < 3; i++)
+            {
+                await ops.CaptureLeaveAttendanceAsync(session.Id, teacherProfile.UserId);
+                Assert.NotNull(_db.Context.SessionAttendances.AsNoTracking().Single(a => a.ClassSessionId == session.Id).LeftAtUtc);
+                await ops.CaptureJoinAttendanceAsync(session.Id, teacherProfile.UserId);
+            }
+
+            var row = _db.Context.SessionAttendances.AsNoTracking().Single(a => a.ClassSessionId == session.Id);
+            Assert.Equal(originalJoin, row.JoinedAtUtc);
+            Assert.Null(row.LeftAtUtc);
+        }
+
+        [Fact]
+        public async Task AdjustItemAsync_ClearsReviewFlag_WhenConfirmingTheSameAmount()
+        {
+            // AdjustItemAsync's own comment: it clears RequiresReview whether or not the amount
+            // actually changes, so "reviewed, full amount stands" is a real recorded admin
+            // decision -- not something FinalizeAsync's guard could otherwise be worked around by
+            // leaving the flagged item untouched. The only existing coverage always changes the
+            // amount; this is the "confirm as-is" path.
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1); // 45-minute session
+            var payouts = CreatePayoutService();
+            await payouts.SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = session.TeacherProfileId, RatePerMinute = 1000,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1)),
+            });
+            // No attendance at all recorded -- flags for review per AccrueForSessionAsync.
+            await CreateSessionService().CompleteAsync(session.Id);
+
+            var payout = await _db.Context.Payouts.AsNoTracking().FirstAsync();
+            var flaggedItem = Assert.Single(_db.Context.PayoutItems.ToList());
+            Assert.True(flaggedItem.RequiresReview);
+
+            var confirmed = await payouts.AdjustItemAsync(payout.Id, flaggedItem.Id, new AdjustPayoutItemRequest
+            {
+                NewAmount = flaggedItem.Amount, // admin verified it; the full scheduled amount stands
+                Reason = "Verified with the teacher directly; class did run as scheduled.",
+            });
+            var confirmedItem = Assert.Single(confirmed.Items);
+            Assert.False(confirmedItem.RequiresReview);
+            Assert.Equal(flaggedItem.Amount, confirmedItem.Amount);
+
+            var finalized = await payouts.FinalizeAsync(payout.Id);
+            Assert.Equal(flaggedItem.Amount, finalized.TotalAmount);
+        }
+
         private static RecordEngagementRequest EngagementRequest() => new()
         {
             Events = [new EngagementEntryDto { ParticipantName = "Tester", Type = EngagementEventType.HandRaise }],
