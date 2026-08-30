@@ -64,6 +64,17 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Removes a recording's record (Admin only — see <see cref="Common.Exceptions.ForbiddenException"/>).
+        /// Only unregisters it here; the underlying file in storage is left untouched, since
+        /// <c>IFileStorage</c> has no delete operation and recordings may live in storage the
+        /// Jibri pipeline writes to directly rather than through this app's own upload path.
+        /// </summary>
+        Task DeleteRecordingAsync(
+            Guid sessionId,
+            Guid recordingId,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Machine-to-machine equivalent of <see cref="AddRecordingAsync"/> for the Jibri
         /// finalize-recording hook: no signed-in caller, so <paramref name="bearerToken"/> (a
         /// short-lived JWT signed with the same appId/appSecret as room-join tokens) is the

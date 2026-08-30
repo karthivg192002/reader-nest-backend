@@ -520,6 +520,25 @@ namespace iucs.readernest.application.Services
             return recordings.Select(ToRecordingDto).ToList();
         }
 
+        public async Task DeleteRecordingAsync(
+            Guid sessionId,
+            Guid recordingId,
+            CancellationToken cancellationToken = default)
+        {
+            // Admin-only is enforced by the controller's [Authorize(Roles)] — this just has to
+            // exist and belong to the session named in the route.
+            var recording = await _unitOfWork.Repository<SessionRecording>().TrackedQuery()
+                .FirstOrDefaultAsync(r => r.Id == recordingId && r.ClassSessionId == sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(SessionRecording), recordingId);
+
+            // Only unregisters the DB row — IFileStorage has no delete operation, and a
+            // recording may live in storage the Jibri pipeline wrote to directly rather than
+            // through this app's own upload path, so there's nothing safe to reach in and purge.
+            _unitOfWork.Repository<SessionRecording>().Remove(recording);
+            await _auditLog.StageAsync(AuditAction.Delete, nameof(SessionRecording), recording.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
         public async Task<IReadOnlyList<ClassSessionDto>> GenerateScheduleAsync(
             Guid batchId,
             GenerateScheduleRequest request,
