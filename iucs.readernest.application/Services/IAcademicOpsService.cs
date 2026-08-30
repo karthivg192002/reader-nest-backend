@@ -25,6 +25,9 @@ namespace iucs.readernest.application.Services
 
         Task<LeaveRequestDto> ReviewLeaveAsync(Guid id, ReviewLeaveRequest request, CancellationToken cancellationToken = default);
 
+        /// <summary>Teacher withdraws their own still-Pending leave request.</summary>
+        Task CancelLeaveAsync(Guid teacherUserId, Guid leaveId, CancellationToken cancellationToken = default);
+
         // Attendance capture
         Task<IReadOnlyList<SessionAttendanceDto>> CaptureAttendanceAsync(
             Guid sessionId,

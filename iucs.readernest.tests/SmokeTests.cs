@@ -641,6 +641,147 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task SubmitLeave_OverlappingExistingPendingOrApproved_IsRejected()
+        {
+            var (_, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync();
+            var ops = CreateAcademicOpsService();
+
+            var start = DateTime.UtcNow.AddDays(10);
+            var first = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = start,
+                EndAtUtc = start.AddHours(2),
+                Reason = "First",
+            });
+            Assert.Equal(LeaveStatus.Pending, first.Status);
+
+            // Overlaps only partially (starts an hour into the first request's window) --
+            // still a conflict, not just an exact-match duplicate.
+            var ex = await Assert.ThrowsAsync<ConflictException>(() =>
+                ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+                {
+                    StartAtUtc = start.AddHours(1),
+                    EndAtUtc = start.AddHours(3),
+                    Reason = "Second, overlapping",
+                }));
+            Assert.Contains("already have a pending leave request", ex.Message);
+
+            // Approve the first -- still blocks a new overlapping request the same way.
+            _db.Context.ChangeTracker.Clear();
+            await ops.ReviewLeaveAsync(first.Id, new ReviewLeaveRequest { Approve = true });
+            _db.Context.ChangeTracker.Clear();
+            await Assert.ThrowsAsync<ConflictException>(() =>
+                ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+                {
+                    StartAtUtc = start.AddHours(1),
+                    EndAtUtc = start.AddHours(3),
+                    Reason = "Third, overlapping the now-approved one",
+                }));
+        }
+
+        [Fact]
+        public async Task SubmitLeave_SameWindowAsRejectedOrCancelled_Succeeds()
+        {
+            var (_, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync();
+            var ops = CreateAcademicOpsService();
+            var start = DateTime.UtcNow.AddDays(10);
+
+            var rejected = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = start,
+                EndAtUtc = start.AddHours(2),
+                Reason = "First",
+            });
+            _db.Context.ChangeTracker.Clear();
+            await ops.ReviewLeaveAsync(rejected.Id, new ReviewLeaveRequest { Approve = false, ReviewNote = "No" });
+
+            // Rejected no longer "holds" the window -- the same time can be re-requested.
+            _db.Context.ChangeTracker.Clear();
+            var resubmitted = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = start,
+                EndAtUtc = start.AddHours(2),
+                Reason = "Trying again",
+            });
+            Assert.Equal(LeaveStatus.Pending, resubmitted.Status);
+
+            // Cancel that one too -- also no longer holds the window.
+            _db.Context.ChangeTracker.Clear();
+            await ops.CancelLeaveAsync(teacher.UserId, resubmitted.Id);
+            _db.Context.ChangeTracker.Clear();
+            var thirdTry = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = start,
+                EndAtUtc = start.AddHours(2),
+                Reason = "Third time's the charm",
+            });
+            Assert.Equal(LeaveStatus.Pending, thirdTry.Status);
+        }
+
+        [Fact]
+        public async Task CancelLeave_OwnPendingRequest_Succeeds()
+        {
+            var (_, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync();
+            var ops = CreateAcademicOpsService();
+            var leave = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = DateTime.UtcNow.AddDays(10),
+                EndAtUtc = DateTime.UtcNow.AddDays(10).AddHours(2),
+                Reason = "Changed my mind later",
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            await ops.CancelLeaveAsync(teacher.UserId, leave.Id);
+
+            var stored = await _db.Context.LeaveRequests.FindAsync(leave.Id);
+            Assert.Equal(LeaveStatus.Cancelled, stored!.Status);
+        }
+
+        [Fact]
+        public async Task CancelLeave_AlreadyReviewed_Throws()
+        {
+            var (_, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync();
+            var ops = CreateAcademicOpsService();
+            var leave = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = DateTime.UtcNow.AddDays(10),
+                EndAtUtc = DateTime.UtcNow.AddDays(10).AddHours(2),
+                Reason = "x",
+            });
+            _db.Context.ChangeTracker.Clear();
+            await ops.ReviewLeaveAsync(leave.Id, new ReviewLeaveRequest { Approve = true });
+
+            _db.Context.ChangeTracker.Clear();
+            await Assert.ThrowsAsync<DomainValidationException>(() => ops.CancelLeaveAsync(teacher.UserId, leave.Id));
+        }
+
+        [Fact]
+        public async Task CancelLeave_AnotherTeachersRequest_ThrowsNotFound()
+        {
+            var (_, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var owner = await _db.Context.TeacherProfiles.FirstAsync();
+            var ops = CreateAcademicOpsService();
+            var leave = await ops.SubmitLeaveAsync(owner.UserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = DateTime.UtcNow.AddDays(10),
+                EndAtUtc = DateTime.UtcNow.AddDays(10).AddHours(2),
+                Reason = "x",
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            var otherTeacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            _db.Context.TeacherProfiles.Add(new TeacherProfile { UserId = otherTeacherUser.Id });
+            await _db.Context.SaveChangesAsync();
+
+            _db.Context.ChangeTracker.Clear();
+            await Assert.ThrowsAsync<NotFoundException>(() => ops.CancelLeaveAsync(otherTeacherUser.Id, leave.Id));
+        }
+
+        [Fact]
         public async Task CaptureAttendance_Rejoin_UpdatesRow_NeverDuplicates()
         {
             var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);

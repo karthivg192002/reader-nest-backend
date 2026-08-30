@@ -367,6 +367,25 @@ namespace iucs.readernest.application.Services
                 .FirstOrDefaultAsync(t => t.UserId == teacherUserId, cancellationToken)
                 ?? throw new NotFoundException("No teacher profile is linked to the current account.");
 
+            // Nothing stopped a teacher from submitting the same window (or overlapping ones)
+            // more than once — each one independently counts as "affected sessions" for the
+            // admin notification and, worse, an admin approving two overlapping ones would
+            // cancel the same session(s) twice over with no indication anything was already
+            // handled. Pending and Approved both still "hold" the window; Rejected/Cancelled
+            // don't (the teacher is free to re-request the same time).
+            var duplicate = await _unitOfWork.Repository<LeaveRequest>().Query()
+                .Where(l => l.TeacherProfileId == teacher.Id
+                            && (l.Status == LeaveStatus.Pending || l.Status == LeaveStatus.Approved)
+                            && l.StartAtUtc < request.EndAtUtc && l.EndAtUtc > request.StartAtUtc)
+                .OrderBy(l => l.StartAtUtc)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (duplicate is not null)
+            {
+                throw new ConflictException(
+                    $"You already have a {duplicate.Status.ToString().ToLowerInvariant()} leave request covering this time " +
+                    $"({DateTimeDisplay.ToLocalRange(duplicate.StartAtUtc, duplicate.EndAtUtc)}).");
+            }
+
             var affectedSessions = await CountAffectedSessionsAsync(teacher.Id, request.StartAtUtc, request.EndAtUtc, cancellationToken);
 
             // 6-hour rule: leave covering a session that starts within the cutoff is auto-blocked
@@ -413,6 +432,40 @@ namespace iucs.readernest.application.Services
 
             leave.TeacherProfile = teacher;
             return await ToDtoAsync(leave, cancellationToken);
+        }
+
+        /// <summary>
+        /// Teacher withdraws their own leave request — the only way to get out of a mistaken or
+        /// no-longer-needed application before this, was to email an admin and have them Reject
+        /// it, which recorded it as rejected rather than what actually happened. Only the
+        /// request's own teacher can cancel it, and only while it's still Pending — once an
+        /// admin has acted (Approved/Rejected), that decision stands.
+        /// </summary>
+        public async Task CancelLeaveAsync(Guid teacherUserId, Guid leaveId, CancellationToken cancellationToken = default)
+        {
+            var teacher = await _unitOfWork.Repository<TeacherProfile>()
+                .FirstOrDefaultAsync(t => t.UserId == teacherUserId, cancellationToken)
+                ?? throw new NotFoundException("No teacher profile is linked to the current account.");
+
+            var leave = await _unitOfWork.Repository<LeaveRequest>()
+                .FirstOrDefaultAsync(l => l.Id == leaveId, cancellationToken)
+                ?? throw new NotFoundException(nameof(LeaveRequest), leaveId);
+
+            // Not this teacher's own request: NotFound rather than Forbidden, so this endpoint
+            // never confirms/denies that some other teacher's leave request even exists.
+            if (leave.TeacherProfileId != teacher.Id)
+            {
+                throw new NotFoundException(nameof(LeaveRequest), leaveId);
+            }
+
+            if (leave.Status != LeaveStatus.Pending)
+            {
+                throw new DomainValidationException($"This leave application is already {leave.Status} and can no longer be cancelled.");
+            }
+
+            leave.Status = LeaveStatus.Cancelled;
+            await _auditLog.StageAsync(AuditAction.Update, nameof(LeaveRequest), leave.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
         public async Task<IReadOnlyList<LeaveRequestDto>> ListLeaveAsync(

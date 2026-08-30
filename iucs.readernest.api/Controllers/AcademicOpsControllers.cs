@@ -70,6 +70,16 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _academicOps.ListLeaveForTeacherUserAsync(userId, cancellationToken));
         }
 
+        /// <summary>Teacher withdraws their own leave request while it's still Pending.</summary>
+        [HttpDelete("{id:guid}")]
+        [Authorize(Roles = nameof(UserRole.Teacher))]
+        public async Task<IActionResult> Cancel(Guid id, CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            await _academicOps.CancelLeaveAsync(userId, id, cancellationToken);
+            return NoContent();
+        }
+
         [HttpGet]
         [HasPermission(PermissionModule.LeaveManagement, PermissionAction.View)]
         public async Task<ActionResult<IReadOnlyList<LeaveRequestDto>>> List(
