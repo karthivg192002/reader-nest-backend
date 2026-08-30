@@ -129,5 +129,13 @@ namespace iucs.readernest.api.Controllers
         {
             return Ok(await _demoBookingService.GetReassignmentHistoryAsync(id, cancellationToken));
         }
+
+        /// <summary>Every follow-up note ever logged on this booking, newest first.</summary>
+        [HttpGet("{id:guid}/follow-up-notes")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<DemoBookingFollowUpDto>>> FollowUpNotes(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _demoBookingService.GetFollowUpNotesAsync(id, cancellationToken));
+        }
     }
 }

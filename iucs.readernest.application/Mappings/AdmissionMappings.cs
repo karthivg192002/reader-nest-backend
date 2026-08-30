@@ -26,6 +26,7 @@ namespace iucs.readernest.application.Mappings
                 DepartmentName = booking.Department?.Name,
                 ConversionStatus = booking.ConversionStatus,
                 FollowUpNotes = booking.FollowUpNotes,
+                NextFollowUpOn = booking.NextFollowUpOn,
                 ScheduledStartAtUtc = booking.ClassSession?.ScheduledStartAtUtc,
                 ScheduledEndAtUtc = booking.ClassSession?.ScheduledEndAtUtc,
                 MeetingRoomId = booking.ClassSession?.MeetingRoomId,
