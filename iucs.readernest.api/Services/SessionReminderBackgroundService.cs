@@ -158,7 +158,7 @@ namespace iucs.readernest.api.Services
                                 new Dictionary<string, string>
                                 {
                                     ["StartLocal"] = FormatLocal(session.ScheduledStartAtUtc, admin.TimeZoneId),
-                                    ["TeacherName"] = $"{session.TeacherProfile.User.FirstName} {session.TeacherProfile.User.LastName}",
+                                    ["TeacherName"] = $"{session.TeacherProfile.User.FirstName} {session.TeacherProfile.User.LastName}".Trim(),
                                 },
                                 cancellationToken);
                         }
@@ -251,7 +251,7 @@ namespace iucs.readernest.api.Services
                     new Dictionary<string, string>
                     {
                         ["StartLocal"] = FormatLocal(session.ScheduledStartAtUtc, parent.TimeZoneId),
-                        ["JoinUrl"] = JoinUrlFor($"{parent.FirstName} {parent.LastName}", parent.Email),
+                        ["JoinUrl"] = JoinUrlFor($"{parent.FirstName} {parent.LastName}".Trim(), parent.Email),
                     },
                     cancellationToken);
             }

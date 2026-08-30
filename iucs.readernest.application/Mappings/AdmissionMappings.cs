@@ -30,7 +30,7 @@ namespace iucs.readernest.application.Mappings
                 ScheduledEndAtUtc = booking.ClassSession?.ScheduledEndAtUtc,
                 MeetingRoomId = booking.ClassSession?.MeetingRoomId,
                 TeacherProfileId = booking.ClassSession?.TeacherProfileId,
-                TeacherName = teacher?.User is { } u ? $"{u.FirstName} {u.LastName}" : null,
+                TeacherName = teacher?.User is { } u ? $"{u.FirstName} {u.LastName}".Trim() : null,
                 PayableAmount = booking.ConversionStatus == ConversionStatus.Enrolled ? ConvertedDemoFee : NormalDemoFee,
                 ParentJoinedAtUtc = booking.ParentJoinedAtUtc,
                 Participants = booking.Participants

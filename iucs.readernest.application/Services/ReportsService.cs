@@ -67,7 +67,7 @@ namespace iucs.readernest.application.Services
                 result.Add(new TeacherPerformanceDto
                 {
                     TeacherProfileId = teacher.Id,
-                    TeacherName = $"{teacher.User.FirstName} {teacher.User.LastName}",
+                    TeacherName = $"{teacher.User.FirstName} {teacher.User.LastName}".Trim(),
                     Department = teacher.Department?.Name,
                     SessionsCompleted = teacherCompletedIds.Count,
                     TeacherNoShows = teacherSessions.Count(s => s.Status == SessionStatus.TeacherNoShow),
@@ -159,7 +159,7 @@ namespace iucs.readernest.application.Services
             return new StudentAnalyticsDto
             {
                 ChildId = child.Id,
-                ChildName = $"{child.FirstName} {child.LastName}",
+                ChildName = $"{child.FirstName} {child.LastName}".Trim(),
                 AttendancePercent = attendancePercent,
                 SessionsAttended = attended,
                 QuizAttempts = quizAttempts,
@@ -445,7 +445,7 @@ namespace iucs.readernest.application.Services
             var csv = new StringBuilder("SessionStartUtc,ParticipantType,Participant,Status,JoinedAtUtc,LeftAtUtc\n");
             foreach (var a in rows)
             {
-                var name = a.Child is null ? a.TeacherProfileId?.ToString() : $"{a.Child.FirstName} {a.Child.LastName}";
+                var name = a.Child is null ? a.TeacherProfileId?.ToString() : $"{a.Child.FirstName} {a.Child.LastName}".Trim();
                 csv.AppendLine(string.Join(',',
                     Escape($"{a.ClassSession.ScheduledStartAtUtc:u}"), a.ParticipantType, Escape(name),
                     a.Status, Escape($"{a.JoinedAtUtc:u}"), Escape($"{a.LeftAtUtc:u}")));
@@ -484,7 +484,7 @@ namespace iucs.readernest.application.Services
             foreach (var p in payouts)
             {
                 csv.AppendLine(string.Join(',',
-                    Escape($"{p.TeacherProfile.User.FirstName} {p.TeacherProfile.User.LastName}"),
+                    Escape($"{p.TeacherProfile.User.FirstName} {p.TeacherProfile.User.LastName}".Trim()),
                     $"{p.PeriodYear}-{p.PeriodMonth:D2}", p.Status,
                     p.Items.Count(i => i.Type == PayoutItemType.SessionEarning), p.TotalAmount));
             }

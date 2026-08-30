@@ -871,7 +871,7 @@ namespace iucs.readernest.application.Services
                 domain,
                 jitsiConfigJson,
                 session.MeetingRoomId,
-                $"{user.FirstName} {user.LastName}",
+                $"{user.FirstName} {user.LastName}".Trim(),
                 user.Email,
                 moderator,
                 // A couple of hours past the scheduled end covers overruns without leaving a

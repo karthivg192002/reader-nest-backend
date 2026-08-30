@@ -230,7 +230,7 @@ namespace iucs.readernest.application.Services
                     if (attendedMinutes < durationMinutes * minFraction)
                     {
                         requiresReview = true;
-                        var attendedNote = $"Teacher attended only {Math.Max(0, attendedMinutes):0} of {durationMinutes} scheduled minutes -- review before finalizing.";
+                        var attendedNote = $"Teacher attended only {Math.Max(0, attendedMinutes):0} of {durationMinutes} scheduled minutes — review before finalizing.";
                         note = string.IsNullOrEmpty(note) ? attendedNote : $"{note} ({attendedNote})";
                     }
                 }
@@ -243,7 +243,7 @@ namespace iucs.readernest.application.Services
                     // so this is at least as worth a human's attention as attendance that fell
                     // short -- arguably more, since here there is no attendance at all to weigh.
                     requiresReview = true;
-                    const string noAttendanceNote = "No attendance was ever recorded for the teacher on this session -- review before finalizing.";
+                    const string noAttendanceNote = "No attendance was ever recorded for the teacher on this session — review before finalizing.";
                     note = string.IsNullOrEmpty(note) ? noAttendanceNote : $"{note} ({noAttendanceNote})";
                 }
             }

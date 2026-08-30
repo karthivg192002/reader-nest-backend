@@ -460,7 +460,7 @@ namespace iucs.readernest.application.Services
                 ChildName = feedback.DemoBooking.ChildName,
                 ParentName = feedback.DemoBooking.ParentName,
                 TeacherProfileId = feedback.TeacherProfileId,
-                TeacherName = $"{feedback.TeacherProfile.User.FirstName} {feedback.TeacherProfile.User.LastName}",
+                TeacherName = $"{feedback.TeacherProfile.User.FirstName} {feedback.TeacherProfile.User.LastName}".Trim(),
                 AcademicLevel = feedback.AcademicLevel,
                 Strengths = feedback.Strengths,
                 ImprovementAreas = feedback.ImprovementAreas,
@@ -590,9 +590,9 @@ namespace iucs.readernest.application.Services
                     JsonSerializer.Serialize(new
                     {
                         OldTeacherProfileId = oldTeacher?.Id,
-                        OldTeacherName = oldTeacher is not null ? $"{oldTeacher.User.FirstName} {oldTeacher.User.LastName}" : null,
+                        OldTeacherName = oldTeacher is not null ? $"{oldTeacher.User.FirstName} {oldTeacher.User.LastName}".Trim() : null,
                         NewTeacherProfileId = newTeacher.Id,
-                        NewTeacherName = $"{newTeacher.User.FirstName} {newTeacher.User.LastName}",
+                        NewTeacherName = $"{newTeacher.User.FirstName} {newTeacher.User.LastName}".Trim(),
                         request.Reason,
                     }),
                     ct);

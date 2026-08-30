@@ -830,7 +830,7 @@ namespace iucs.readernest.application.Services
                 .FirstOrDefaultAsync(i => i.Id == invoiceId && i.ParentProfileId == parent.Id, cancellationToken)
                 ?? throw new NotFoundException(nameof(Invoice), invoiceId);
 
-            return (invoice.ToDto(), $"{parent.User.FirstName} {parent.User.LastName}");
+            return (invoice.ToDto(), $"{parent.User.FirstName} {parent.User.LastName}".Trim());
         }
 
         public async Task<ParentPaymentResultDto> InitiateParentPaymentAsync(
@@ -1296,7 +1296,7 @@ namespace iucs.readernest.application.Services
                 await _unitOfWork.SaveChangesAsync(cancellationToken);
             }
 
-            var parentName = parentUser is null ? "—" : $"{parentUser.FirstName} {parentUser.LastName}";
+            var parentName = parentUser is null ? "—" : $"{parentUser.FirstName} {parentUser.LastName}".Trim();
             transaction.Invoice = invoice;
             return ToCashIntentDto(transaction, parentName);
         }
@@ -1758,7 +1758,7 @@ namespace iucs.readernest.application.Services
             {
                 Id = suspension.Id,
                 ParentProfileId = suspension.ParentProfileId,
-                ParentName = $"{suspension.ParentProfile.User.FirstName} {suspension.ParentProfile.User.LastName}",
+                ParentName = $"{suspension.ParentProfile.User.FirstName} {suspension.ParentProfile.User.LastName}".Trim(),
                 InvoiceId = suspension.InvoiceId,
                 InvoiceNumber = suspension.Invoice?.InvoiceNumber,
                 Reason = suspension.Reason,
@@ -2062,7 +2062,7 @@ namespace iucs.readernest.application.Services
                 Id = subscription.Id,
                 ParentProfileId = subscription.ParentProfileId,
                 ChildId = subscription.ChildId,
-                ChildName = $"{subscription.Child.FirstName} {subscription.Child.LastName}",
+                ChildName = $"{subscription.Child.FirstName} {subscription.Child.LastName}".Trim(),
                 PackagePlanId = subscription.PackagePlanId,
                 PlanName = subscription.PackagePlan.Name,
                 Status = subscription.Status,
