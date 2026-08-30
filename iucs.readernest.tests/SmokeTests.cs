@@ -6913,6 +6913,50 @@ namespace iucs.readernest.tests
             }
         }
 
+        [Fact]
+        public async Task TeacherPerformance_IncludesLatestPayoutSummary_StatusAndTotalOnly()
+        {
+            // Management's Teacher Snapshot report reads this (ReportsAnalytics:View, which is
+            // all the Management preset actually grants -- GET /api/payouts itself stays
+            // Admin-only). A still-Pending payout (accruing this month, not yet finalized) must
+            // show here too -- the whole point is visibility into what's owed even before it's
+            // locked/paid, not just a finalized/paid history.
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            await CreatePayoutService().SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = session.TeacherProfileId, RatePerMinute = 10,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1)),
+            });
+            await SeedFullTeacherAttendanceAsync(session);
+            await CreateSessionService().CompleteAsync(session.Id);
+
+            var payout = await _db.Context.Payouts.AsNoTracking().SingleAsync(p => p.TeacherProfileId == session.TeacherProfileId);
+            Assert.Equal(PayoutStatus.Pending, payout.Status); // sanity: not finalized/paid yet
+
+            var reports = new ReportsService(_db.UnitOfWork, _notifications);
+            var row = (await reports.GetTeacherPerformanceAsync())
+                .Single(t => t.TeacherProfileId == session.TeacherProfileId);
+
+            Assert.Equal(payout.PeriodYear, row.LatestPayoutPeriodYear);
+            Assert.Equal(payout.PeriodMonth, row.LatestPayoutPeriodMonth);
+            Assert.Equal(PayoutStatus.Pending, row.LatestPayoutStatus);
+            Assert.Equal(payout.TotalAmount, row.LatestPayoutAmount);
+        }
+
+        [Fact]
+        public async Task TeacherPerformance_LeavesLatestPayoutNull_ForATeacherWithNoPayoutOnRecord()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var reports = new ReportsService(_db.UnitOfWork, _notifications);
+
+            var row = (await reports.GetTeacherPerformanceAsync())
+                .Single(t => t.TeacherProfileId == batch.TeacherProfileId);
+
+            Assert.Null(row.LatestPayoutPeriodYear);
+            Assert.Null(row.LatestPayoutStatus);
+            Assert.Null(row.LatestPayoutAmount);
+        }
+
         private async Task<(ParentProfile Parent, User User)> SeedInvoiceOwnerAsync()
         {
             var parentUser = await _db.SeedUserAsync($"inv-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
