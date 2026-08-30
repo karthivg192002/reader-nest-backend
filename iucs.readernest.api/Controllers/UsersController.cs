@@ -121,7 +121,7 @@ namespace iucs.readernest.api.Controllers
             var domain = application.Helper.JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
             // Always moderator: this is the member's own permanent room, nobody else's.
             var token = jitsiTokenService.CreateToken(
-                domain, jitsiConfigJson, user.PersonalMeetingRoomId, $"{user.FirstName} {user.LastName}",
+                domain, jitsiConfigJson, user.PersonalMeetingRoomId, $"{user.FirstName} {user.LastName}".Trim(),
                 user.Email, moderator: true, DateTime.UtcNow.AddHours(6));
 
             return Ok(new { roomId = user.PersonalMeetingRoomId, domain, token });

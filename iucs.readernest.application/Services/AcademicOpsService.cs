@@ -402,7 +402,7 @@ namespace iucs.readernest.application.Services
                 await NotifyAdminsAsync(
                     new Dictionary<string, string>
                     {
-                        ["TeacherName"] = $"{teacher.User.FirstName} {teacher.User.LastName}",
+                        ["TeacherName"] = $"{teacher.User.FirstName} {teacher.User.LastName}".Trim(),
                         ["StartAtLocal"] = DateTimeDisplay.ToLocal(request.StartAtUtc),
                         ["EndAtLocal"] = DateTimeDisplay.ToLocal(request.EndAtUtc),
                         ["AffectedSessions"] = affectedSessions.ToString(),
@@ -536,7 +536,7 @@ namespace iucs.readernest.application.Services
             // is in one of this teacher's batches gets notified (client requirement).
             if (leave.Status == LeaveStatus.Approved)
             {
-                var teacherName = $"{teacherUser.FirstName} {teacherUser.LastName}";
+                var teacherName = $"{teacherUser.FirstName} {teacherUser.LastName}".Trim();
                 var window = DateTimeDisplay.ToLocalRange(leave.StartAtUtc, leave.EndAtUtc);
 
                 var coreTeam = await _unitOfWork.Repository<User>().Query()
@@ -714,7 +714,7 @@ namespace iucs.readernest.application.Services
                 ClassSessionId = a.ClassSessionId,
                 ParticipantType = a.ParticipantType,
                 ChildId = a.ChildId,
-                ChildName = a.Child is null ? null : $"{a.Child.FirstName} {a.Child.LastName}",
+                ChildName = a.Child is null ? null : $"{a.Child.FirstName} {a.Child.LastName}".Trim(),
                 TeacherProfileId = a.TeacherProfileId,
                 Status = a.Status,
                 JoinedAtUtc = a.JoinedAtUtc,
@@ -755,7 +755,7 @@ namespace iucs.readernest.application.Services
             {
                 Id = leave.Id,
                 TeacherProfileId = leave.TeacherProfileId,
-                TeacherName = $"{leave.TeacherProfile.User.FirstName} {leave.TeacherProfile.User.LastName}",
+                TeacherName = $"{leave.TeacherProfile.User.FirstName} {leave.TeacherProfile.User.LastName}".Trim(),
                 StartAtUtc = leave.StartAtUtc,
                 EndAtUtc = leave.EndAtUtc,
                 Reason = leave.Reason,
