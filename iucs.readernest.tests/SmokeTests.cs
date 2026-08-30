@@ -103,7 +103,7 @@ namespace iucs.readernest.tests
         private ResourceService CreateResourceService() => new(_db.UnitOfWork, _auditLog);
 
         private DemoBookingService CreateDemoBookingService() =>
-            new(_db.UnitOfWork, _auditLog, _emailSender, _emailTemplates, new FakeCrmNotifier(), new FakeJitsiTokenService(), _notifications, NullLogger<DemoBookingService>.Instance);
+            new(_db.UnitOfWork, _auditLog, _emailSender, _emailTemplates, new FakeCrmNotifier(), new FakeJitsiTokenService(), _notifications, CreateUserService(), NullLogger<DemoBookingService>.Instance);
 
         private QuizQuestionService CreateQuizQuestionService() => new(_db.UnitOfWork, _auditLog, CreateSessionService(), _bulkFileReader);
 
@@ -2906,7 +2906,7 @@ namespace iucs.readernest.tests
 
             var service = new DemoBookingService(
                 _db.UnitOfWork, _auditLog, new ThrowingEmailSender(), _emailTemplates,
-                new FakeCrmNotifier(), new FakeJitsiTokenService(), _notifications, NullLogger<DemoBookingService>.Instance);
+                new FakeCrmNotifier(), new FakeJitsiTokenService(), _notifications, CreateUserService(), NullLogger<DemoBookingService>.Instance);
 
             // An SMTP failure (confirmed in production logs as an uncaught exception here) must
             // not turn an already-committed booking into a 500 — the booking is real by the time
@@ -3024,6 +3024,73 @@ namespace iucs.readernest.tests
 
             await Assert.ThrowsAsync<DomainValidationException>(() =>
                 demoBooking.ReassignTeacherAsync(booking.Id, new ReassignTeacherRequest { TeacherProfileId = newTeacher.Id }));
+        }
+
+        [Fact]
+        public async Task ReadyForEnrollment_CreatesTheParentsLoginAndEmailsCredentials()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var demoBooking = CreateDemoBookingService();
+            var booking = await demoBooking.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Rhea Kapoor", ParentEmail = $"rfe-{Guid.NewGuid():N}@test.com", ParentPhone = "9000000000",
+                ChildName = "Kid", TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(1),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(1).AddMinutes(30),
+            });
+            _emailSender.Sent.Clear(); // discard the booking-confirmation email; only the credentials email matters here
+
+            await demoBooking.UpdateConversionStatusAsync(
+                booking.Id, new UpdateConversionStatusRequest { ConversionStatus = ConversionStatus.ReadyForEnrollment });
+
+            var user = await _db.Context.Users.AsNoTracking().SingleAsync(u => u.Email == booking.ParentEmail.ToLowerInvariant());
+            Assert.Equal(UserRole.Parent, user.Role);
+            Assert.Equal("Rhea", user.FirstName);
+            Assert.Equal("Kapoor", user.LastName);
+            Assert.Single(_db.Context.ParentProfiles.Where(p => p.UserId == user.Id));
+
+            var email = Assert.Single(_emailSender.Sent);
+            Assert.Contains("PIN", email.Body);
+        }
+
+        [Fact]
+        public async Task ReadyForEnrollment_ReusesAnExistingAccount_InsteadOfCreatingADuplicateOrResendingCredentials()
+        {
+            // The sibling/repeat-lead case: this parent already has a login from an earlier
+            // demo (or was added directly through Users) -- moving a second demo to
+            // ReadyForEnrollment must not create a second account for the same email, and
+            // must not re-email credentials to someone who can already sign in.
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var parentEmail = $"existing-{Guid.NewGuid():N}@test.com";
+            await CreateUserService().CreateAsync(new CreateUserRequest
+            {
+                Email = parentEmail, FirstName = "Existing", LastName = "Parent", Role = UserRole.Parent,
+            });
+            _emailSender.Sent.Clear();
+
+            var demoBooking = CreateDemoBookingService();
+            var booking = await demoBooking.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Existing Parent", ParentEmail = parentEmail, TeacherProfileId = teacher.Id,
+                ChildName = "Second Kid",
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(1),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(1).AddMinutes(30),
+            });
+            _emailSender.Sent.Clear(); // discard the booking-confirmation email too
+
+            await demoBooking.UpdateConversionStatusAsync(
+                booking.Id, new UpdateConversionStatusRequest { ConversionStatus = ConversionStatus.ReadyForEnrollment });
+
+            Assert.Equal(1, await _db.Context.Users.CountAsync(u => u.Email == parentEmail));
+            Assert.Empty(_emailSender.Sent); // no re-sent credentials
         }
 
         [Fact]
@@ -4404,10 +4471,12 @@ namespace iucs.readernest.tests
             var auditLog2 = new AuditLogService(uow2, _db.CurrentUser);
             var emailTemplates2 = new EmailTemplateService(uow2, auditLog2, new MemoryCache(new MemoryCacheOptions()));
             var notifications2 = new NotificationService(uow2, _emailSender, emailTemplates2, NullLogger<NotificationService>.Instance);
+            var userService2 = new UserService(
+                uow2, _hasher, notifications2, emailTemplates2, auditLog2, _emailSender, _whatsAppSender, _smsSender, _bulkFileReader, NullLogger<UserService>.Instance);
             var service1 = CreateStoreService();
             var service2 = new StoreService(
                 uow2, auditLog2,
-                new DemoBookingService(uow2, auditLog2, _emailSender, emailTemplates2, new FakeCrmNotifier(), new FakeJitsiTokenService(), notifications2, NullLogger<DemoBookingService>.Instance));
+                new DemoBookingService(uow2, auditLog2, _emailSender, emailTemplates2, new FakeCrmNotifier(), new FakeJitsiTokenService(), notifications2, userService2, NullLogger<DemoBookingService>.Instance));
 
             var request1 = new CreateStoreDemoBookingRequest
             {

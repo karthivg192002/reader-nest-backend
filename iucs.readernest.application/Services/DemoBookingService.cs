@@ -2,6 +2,7 @@ using System.Text.Json;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Admission;
+using iucs.readernest.application.Dto.Users;
 using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Entities.Academics;
@@ -29,6 +30,7 @@ namespace iucs.readernest.application.Services
         private readonly IEmailTemplateService _emailTemplateService;
         private readonly IJitsiTokenService _jitsiTokenService;
         private readonly INotificationService _notificationService;
+        private readonly IUserService _userService;
         private readonly ILogger<DemoBookingService> _logger;
 
         public DemoBookingService(
@@ -39,6 +41,7 @@ namespace iucs.readernest.application.Services
             ICrmNotifier crmNotifier,
             IJitsiTokenService jitsiTokenService,
             INotificationService notificationService,
+            IUserService userService,
             ILogger<DemoBookingService> logger)
         {
             _unitOfWork = unitOfWork;
@@ -48,6 +51,7 @@ namespace iucs.readernest.application.Services
             _crmNotifier = crmNotifier;
             _jitsiTokenService = jitsiTokenService;
             _notificationService = notificationService;
+            _userService = userService;
             _logger = logger;
         }
 
@@ -321,6 +325,13 @@ namespace iucs.readernest.application.Services
             var booking = await _unitOfWork.Repository<DemoBooking>().GetByIdAsync(id, cancellationToken)
                 ?? throw new NotFoundException(nameof(DemoBooking), id);
 
+            // Fires the account creation on the transition INTO ReadyForEnrollment, not every
+            // save while the booking is already there -- editing FollowUpNotes on a booking
+            // that's already ReadyForEnrollment must never re-trigger it (and can't anyway,
+            // once EnsureParentAccountAsync's own existence check finds the account it just made).
+            var enteringReadyForEnrollment = request.ConversionStatus == ConversionStatus.ReadyForEnrollment
+                && booking.ConversionStatus != ConversionStatus.ReadyForEnrollment;
+
             booking.ConversionStatus = request.ConversionStatus;
             if (!string.IsNullOrWhiteSpace(request.Note))
             {
@@ -341,6 +352,11 @@ namespace iucs.readernest.application.Services
                 booking.NextFollowUpOn = request.NextFollowUpOn;
             }
 
+            if (enteringReadyForEnrollment)
+            {
+                await EnsureParentAccountAsync(booking, cancellationToken);
+            }
+
             await _auditLog.StageAsync(AuditAction.Update, nameof(DemoBooking), booking.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
@@ -354,6 +370,37 @@ namespace iucs.readernest.application.Services
             }, cancellationToken);
 
             return await GetAsync(booking.Id, cancellationToken);
+        }
+
+        /// <summary>
+        /// The account-creation half of ReadyForEnrollment (see the enum value's own doc
+        /// comment). Reuses UserService.CreateAsync wholesale -- temp PIN generation/hashing,
+        /// the ParentProfile row, and the same "welcome-credentials" email an admin manually
+        /// adding a parent through Users already sends -- rather than duplicating any of that
+        /// here. A no-op when an account for this email already exists (a sibling's earlier
+        /// demo, or a repeat lead): reuses it silently, no duplicate account and no re-sent
+        /// credentials for someone who can already log in.
+        /// </summary>
+        private async Task EnsureParentAccountAsync(DemoBooking booking, CancellationToken cancellationToken)
+        {
+            var email = booking.ParentEmail.Trim().ToLowerInvariant();
+            var alreadyHasAccount = await _unitOfWork.Repository<User>().ExistsAsync(u => u.Email == email, cancellationToken);
+            if (alreadyHasAccount)
+            {
+                return;
+            }
+
+            var nameParts = booking.ParentName.Trim().Split(' ', 2);
+            await _userService.CreateAsync(
+                new CreateUserRequest
+                {
+                    Email = email,
+                    FirstName = nameParts[0],
+                    LastName = nameParts.Length > 1 ? nameParts[1] : string.Empty,
+                    Phone = booking.ParentPhone,
+                    Role = UserRole.Parent,
+                },
+                cancellationToken);
         }
 
         public async Task<DemoFeedbackDto> SubmitFeedbackAsync(
