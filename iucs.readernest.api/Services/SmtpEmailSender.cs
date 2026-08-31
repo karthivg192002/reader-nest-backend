@@ -47,7 +47,7 @@ namespace iucs.readernest.api.Services
                 return;
             }
 
-            var fromAddress = Value(config, "fromAddress") ?? Value(config, "username") ?? "no-reply@thereadernest.com";
+            var fromAddress = Value(config, "fromAddress") ?? Value(config, "username") ?? "no-reply@meettomanage.cloud";
             var username = Value(config, "username");
             var password = Value(config, "password");
             var port = int.TryParse(Value(config, "smtpPort"), out var parsedPort) ? parsedPort : 587;

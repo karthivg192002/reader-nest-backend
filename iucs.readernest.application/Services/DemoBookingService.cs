@@ -2,6 +2,7 @@ using System.Text.Json;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Admission;
+using iucs.readernest.application.Dto.Users;
 using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Entities.Academics;
@@ -20,6 +21,7 @@ namespace iucs.readernest.application.Services
     public class DemoBookingService : IDemoBookingService
     {
         private const string ReassignmentAuditEntityName = "DemoBookingTeacherReassignment";
+        private const string FollowUpAuditEntityName = "DemoBookingFollowUp";
 
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
@@ -28,6 +30,7 @@ namespace iucs.readernest.application.Services
         private readonly IEmailTemplateService _emailTemplateService;
         private readonly IJitsiTokenService _jitsiTokenService;
         private readonly INotificationService _notificationService;
+        private readonly IUserService _userService;
         private readonly ILogger<DemoBookingService> _logger;
 
         public DemoBookingService(
@@ -38,6 +41,7 @@ namespace iucs.readernest.application.Services
             ICrmNotifier crmNotifier,
             IJitsiTokenService jitsiTokenService,
             INotificationService notificationService,
+            IUserService userService,
             ILogger<DemoBookingService> logger)
         {
             _unitOfWork = unitOfWork;
@@ -47,6 +51,7 @@ namespace iucs.readernest.application.Services
             _crmNotifier = crmNotifier;
             _jitsiTokenService = jitsiTokenService;
             _notificationService = notificationService;
+            _userService = userService;
             _logger = logger;
         }
 
@@ -320,10 +325,36 @@ namespace iucs.readernest.application.Services
             var booking = await _unitOfWork.Repository<DemoBooking>().GetByIdAsync(id, cancellationToken)
                 ?? throw new NotFoundException(nameof(DemoBooking), id);
 
+            // Fires the account creation on the transition INTO ReadyForEnrollment, not every
+            // save while the booking is already there -- editing FollowUpNotes on a booking
+            // that's already ReadyForEnrollment must never re-trigger it (and can't anyway,
+            // once EnsureParentAccountAsync's own existence check finds the account it just made).
+            var enteringReadyForEnrollment = request.ConversionStatus == ConversionStatus.ReadyForEnrollment
+                && booking.ConversionStatus != ConversionStatus.ReadyForEnrollment;
+
             booking.ConversionStatus = request.ConversionStatus;
-            if (request.FollowUpNotes is not null)
+            if (!string.IsNullOrWhiteSpace(request.Note))
             {
-                booking.FollowUpNotes = request.FollowUpNotes;
+                // Full history (who logged it, exactly when) lives in the audit trail — see
+                // GetFollowUpNotesAsync — rather than concatenated into one string, which used
+                // to collapse every note ever logged into a single fabricated date/author on
+                // reload. This field stays as a quick "most recent note" snapshot only.
+                booking.FollowUpNotes = request.Note;
+                await _auditLog.StageAsync(
+                    AuditAction.Create,
+                    FollowUpAuditEntityName,
+                    booking.Id.ToString(),
+                    JsonSerializer.Serialize(new { request.Note, request.NextFollowUpOn }),
+                    cancellationToken);
+            }
+            if (request.NextFollowUpOn.HasValue)
+            {
+                booking.NextFollowUpOn = request.NextFollowUpOn;
+            }
+
+            if (enteringReadyForEnrollment)
+            {
+                await EnsureParentAccountAsync(booking, cancellationToken);
             }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(DemoBooking), booking.Id.ToString(), cancellationToken: cancellationToken);
@@ -339,6 +370,37 @@ namespace iucs.readernest.application.Services
             }, cancellationToken);
 
             return await GetAsync(booking.Id, cancellationToken);
+        }
+
+        /// <summary>
+        /// The account-creation half of ReadyForEnrollment (see the enum value's own doc
+        /// comment). Reuses UserService.CreateAsync wholesale -- temp PIN generation/hashing,
+        /// the ParentProfile row, and the same "welcome-credentials" email an admin manually
+        /// adding a parent through Users already sends -- rather than duplicating any of that
+        /// here. A no-op when an account for this email already exists (a sibling's earlier
+        /// demo, or a repeat lead): reuses it silently, no duplicate account and no re-sent
+        /// credentials for someone who can already log in.
+        /// </summary>
+        private async Task EnsureParentAccountAsync(DemoBooking booking, CancellationToken cancellationToken)
+        {
+            var email = booking.ParentEmail.Trim().ToLowerInvariant();
+            var alreadyHasAccount = await _unitOfWork.Repository<User>().ExistsAsync(u => u.Email == email, cancellationToken);
+            if (alreadyHasAccount)
+            {
+                return;
+            }
+
+            var nameParts = booking.ParentName.Trim().Split(' ', 2);
+            await _userService.CreateAsync(
+                new CreateUserRequest
+                {
+                    Email = email,
+                    FirstName = nameParts[0],
+                    LastName = nameParts.Length > 1 ? nameParts[1] : string.Empty,
+                    Phone = booking.ParentPhone,
+                    Role = UserRole.Parent,
+                },
+                cancellationToken);
         }
 
         public async Task<DemoFeedbackDto> SubmitFeedbackAsync(
@@ -460,7 +522,7 @@ namespace iucs.readernest.application.Services
                 ChildName = feedback.DemoBooking.ChildName,
                 ParentName = feedback.DemoBooking.ParentName,
                 TeacherProfileId = feedback.TeacherProfileId,
-                TeacherName = $"{feedback.TeacherProfile.User.FirstName} {feedback.TeacherProfile.User.LastName}",
+                TeacherName = $"{feedback.TeacherProfile.User.FirstName} {feedback.TeacherProfile.User.LastName}".Trim(),
                 AcademicLevel = feedback.AcademicLevel,
                 Strengths = feedback.Strengths,
                 ImprovementAreas = feedback.ImprovementAreas,
@@ -590,9 +652,9 @@ namespace iucs.readernest.application.Services
                     JsonSerializer.Serialize(new
                     {
                         OldTeacherProfileId = oldTeacher?.Id,
-                        OldTeacherName = oldTeacher is not null ? $"{oldTeacher.User.FirstName} {oldTeacher.User.LastName}" : null,
+                        OldTeacherName = oldTeacher is not null ? $"{oldTeacher.User.FirstName} {oldTeacher.User.LastName}".Trim() : null,
                         NewTeacherProfileId = newTeacher.Id,
-                        NewTeacherName = $"{newTeacher.User.FirstName} {newTeacher.User.LastName}",
+                        NewTeacherName = $"{newTeacher.User.FirstName} {newTeacher.User.LastName}".Trim(),
                         request.Reason,
                     }),
                     ct);
@@ -769,6 +831,60 @@ namespace iucs.readernest.application.Services
 
         private sealed record ReassignmentAuditPayload(
             Guid? OldTeacherProfileId, string? OldTeacherName, Guid NewTeacherProfileId, string NewTeacherName, string? Reason);
+
+        public async Task<IReadOnlyList<DemoBookingFollowUpDto>> GetFollowUpNotesAsync(
+            Guid bookingId,
+            CancellationToken cancellationToken = default)
+        {
+            var exists = await _unitOfWork.Repository<DemoBooking>().ExistsAsync(b => b.Id == bookingId, cancellationToken);
+            if (!exists)
+            {
+                throw new NotFoundException(nameof(DemoBooking), bookingId);
+            }
+
+            var logs = await _unitOfWork.Repository<AuditLog>().Query()
+                .Where(a => a.EntityName == FollowUpAuditEntityName && a.EntityId == bookingId.ToString())
+                .OrderByDescending(a => a.CreatedAtUtc)
+                .ToListAsync(cancellationToken);
+
+            if (logs.Count == 0)
+            {
+                return [];
+            }
+
+            var actorIds = logs.Where(l => l.ActorUserId.HasValue).Select(l => l.ActorUserId!.Value).Distinct().ToList();
+            var actorNames = await _unitOfWork.Repository<User>().Query()
+                .Where(u => actorIds.Contains(u.Id))
+                .Select(u => new { u.Id, Name = u.FirstName + " " + u.LastName })
+                .ToDictionaryAsync(u => u.Id, u => u.Name, cancellationToken);
+
+            return logs.Select(log =>
+            {
+                FollowUpAuditPayload? payload = null;
+                if (!string.IsNullOrWhiteSpace(log.ChangesJson))
+                {
+                    try
+                    {
+                        payload = JsonSerializer.Deserialize<FollowUpAuditPayload>(log.ChangesJson);
+                    }
+                    catch (JsonException)
+                    {
+                        _logger.LogWarning("Unparseable follow-up-note audit payload on log {LogId} for booking {BookingId}", log.Id, bookingId);
+                    }
+                }
+
+                return new DemoBookingFollowUpDto
+                {
+                    Id = log.Id,
+                    AtUtc = log.CreatedAtUtc,
+                    LoggedByName = log.ActorUserId.HasValue && actorNames.TryGetValue(log.ActorUserId.Value, out var name) ? name : null,
+                    Note = payload?.Note ?? "—",
+                    NextFollowUpOn = payload?.NextFollowUpOn,
+                };
+            }).ToList();
+        }
+
+        private sealed record FollowUpAuditPayload(string? Note, DateOnly? NextFollowUpOn);
 
         private IQueryable<DemoBooking> BaseQuery()
         {

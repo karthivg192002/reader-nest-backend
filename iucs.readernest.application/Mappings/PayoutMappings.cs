@@ -27,7 +27,7 @@ namespace iucs.readernest.application.Mappings
             {
                 Id = payout.Id,
                 TeacherProfileId = payout.TeacherProfileId,
-                TeacherName = $"{payout.TeacherProfile.User.FirstName} {payout.TeacherProfile.User.LastName}",
+                TeacherName = $"{payout.TeacherProfile.User.FirstName} {payout.TeacherProfile.User.LastName}".Trim(),
                 PeriodYear = payout.PeriodYear,
                 PeriodMonth = payout.PeriodMonth,
                 Status = payout.Status,

@@ -56,5 +56,9 @@ namespace iucs.readernest.application.Services
 
         /// <summary>Every manual teacher reassignment ever made on this booking, newest first.</summary>
         Task<IReadOnlyList<DemoReassignmentHistoryDto>> GetReassignmentHistoryAsync(Guid bookingId, CancellationToken cancellationToken = default);
+
+        /// <summary>Every follow-up note ever logged on this booking, newest first, with the
+        /// actual logging user and timestamp attached — see <see cref="UpdateConversionStatusAsync"/>.</summary>
+        Task<IReadOnlyList<DemoBookingFollowUpDto>> GetFollowUpNotesAsync(Guid bookingId, CancellationToken cancellationToken = default);
     }
 }

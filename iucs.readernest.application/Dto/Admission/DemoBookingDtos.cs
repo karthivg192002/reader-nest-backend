@@ -65,8 +65,16 @@ namespace iucs.readernest.application.Dto.Admission
         [Required]
         public ConversionStatus ConversionStatus { get; set; }
 
+        /// <summary>New follow-up note text to log now (optional — a stage move alone needs none).
+        /// Stored in the audit trail with the acting user and timestamp attached server-side,
+        /// not trusted from the client, so history stays accurate across multiple staff logging
+        /// notes on the same lead.</summary>
         [MaxLength(2000)]
-        public string? FollowUpNotes { get; set; }
+        public string? Note { get; set; }
+
+        /// <summary>When to follow up next — set alongside a note, or left null to leave the
+        /// booking's current reminder date untouched.</summary>
+        public DateOnly? NextFollowUpOn { get; set; }
     }
 
     public class DemoBookingDto
@@ -92,6 +100,8 @@ namespace iucs.readernest.application.Dto.Admission
         public ConversionStatus ConversionStatus { get; set; }
 
         public string? FollowUpNotes { get; set; }
+
+        public DateOnly? NextFollowUpOn { get; set; }
 
         public DateTime? ScheduledStartAtUtc { get; set; }
 
@@ -157,6 +167,20 @@ namespace iucs.readernest.application.Dto.Admission
         public string NewTeacherName { get; set; } = null!;
 
         public string? Reason { get; set; }
+    }
+
+    /// <summary>One follow-up note logged on a demo booking, for the Leads page's history panel.</summary>
+    public class DemoBookingFollowUpDto
+    {
+        public Guid Id { get; set; }
+
+        public DateTime AtUtc { get; set; }
+
+        public string? LoggedByName { get; set; }
+
+        public string Note { get; set; } = null!;
+
+        public DateOnly? NextFollowUpOn { get; set; }
     }
 
     /// <summary>Per-parent demo record: every demo this parent has ever taken, with totals.</summary>

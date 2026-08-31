@@ -43,6 +43,7 @@ namespace iucs.readernest.application
             services.AddScoped<IFloatingNoteService, FloatingNoteService>();
             services.AddScoped<IAccessRequestService, AccessRequestService>();
             services.AddScoped<IQuizQuestionService, QuizQuestionService>();
+            services.AddScoped<IWhiteboardActivityService, WhiteboardActivityService>();
             services.AddScoped<IChatbotService, ChatbotService>();
             return services;
         }

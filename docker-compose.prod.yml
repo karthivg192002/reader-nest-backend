@@ -37,7 +37,7 @@ services:
       Jwt__SigningKey: ${JWT_SIGNING_KEY:?set in .env}
       Seed__AdminEmail: ${SEED_ADMIN_EMAIL:?set in .env}
       Seed__AdminPin: ${SEED_ADMIN_PIN:-1234}
-      Seed__AdminFirstName: Reader Nest
+      Seed__AdminFirstName: Meet to Manage
       Seed__AdminLastName: Admin
       Cors__AllowedOrigins__0: ${PORTAL_ORIGIN:?set in .env}
       Payments__PayNowBaseUrl: ${PORTAL_ORIGIN}

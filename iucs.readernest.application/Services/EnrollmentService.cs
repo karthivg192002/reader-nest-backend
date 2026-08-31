@@ -567,7 +567,7 @@ namespace iucs.readernest.application.Services
             {
                 Id = form.Id,
                 ParentProfileId = form.ParentProfileId,
-                ParentName = $"{parentUser.FirstName} {parentUser.LastName}",
+                ParentName = $"{parentUser.FirstName} {parentUser.LastName}".Trim(),
                 ParentEmail = parentUser.Email,
                 ChildId = form.ChildId,
                 FormDataJson = form.FormDataJson,

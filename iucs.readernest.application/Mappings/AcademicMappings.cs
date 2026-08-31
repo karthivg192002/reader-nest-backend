@@ -48,7 +48,7 @@ namespace iucs.readernest.application.Mappings
                 CourseName = batch.Course?.Name ?? string.Empty,
                 CourseDurationMinutes = batch.Course?.DurationMinutes ?? 0,
                 TeacherProfileId = batch.TeacherProfileId,
-                TeacherName = batch.TeacherProfile?.User is { } u ? $"{u.FirstName} {u.LastName}" : string.Empty,
+                TeacherName = batch.TeacherProfile?.User is { } u ? $"{u.FirstName} {u.LastName}".Trim() : string.Empty,
                 Name = batch.Name,
                 Capacity = batch.Capacity,
                 EnrolledCount = enrolledCount,
@@ -71,7 +71,11 @@ namespace iucs.readernest.application.Mappings
             };
         }
 
-        public static ClassSessionDto ToDto(this ClassSession session)
+        public static ClassSessionDto ToDto(
+            this ClassSession session,
+            DateTime? activeRecordingExpiresAtUtc = null,
+            bool hasRecording = false,
+            string? demoChildName = null)
         {
             return new ClassSessionDto
             {
@@ -79,7 +83,7 @@ namespace iucs.readernest.application.Mappings
                 BatchId = session.BatchId,
                 BatchName = session.Batch?.Name,
                 TeacherProfileId = session.TeacherProfileId,
-                TeacherName = session.TeacherProfile?.User is { } u ? $"{u.FirstName} {u.LastName}" : string.Empty,
+                TeacherName = session.TeacherProfile?.User is { } u ? $"{u.FirstName} {u.LastName}".Trim() : string.Empty,
                 Type = session.Type,
                 Status = session.Status,
                 ScheduledStartAtUtc = session.ScheduledStartAtUtc,
@@ -88,6 +92,9 @@ namespace iucs.readernest.application.Mappings
                 RescheduledFromSessionId = session.RescheduledFromSessionId,
                 CancellationReason = session.CancellationReason,
                 Summary = session.Summary,
+                HasRecording = hasRecording,
+                RecordingExpiresAtUtc = activeRecordingExpiresAtUtc,
+                DemoChildName = demoChildName,
             };
         }
     }

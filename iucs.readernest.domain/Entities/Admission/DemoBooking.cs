@@ -40,8 +40,15 @@ namespace iucs.readernest.domain.Entities.Admission
 
         public ConversionStatus ConversionStatus { get; set; } = ConversionStatus.DemoScheduled;
 
+        /// <summary>Most recently logged follow-up note's text — a quick-glance snapshot; the
+        /// full dated/attributed history lives in the audit trail (see DemoBookingService's
+        /// GetFollowUpNotesAsync/FollowUpAuditEntityName).</summary>
         [MaxLength(2000)]
         public string? FollowUpNotes { get; set; }
+
+        /// <summary>Next time this lead should be followed up with, as set on the most recent
+        /// follow-up note — powers the Leads table's "Next: …" column and reminders.</summary>
+        public DateOnly? NextFollowUpOn { get; set; }
 
         /// <summary>Payment link shared with the parent; payment status is read from the linked invoice.</summary>
         [MaxLength(1000)]

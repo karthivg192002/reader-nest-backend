@@ -9,6 +9,7 @@ using iucs.readernest.domain.Entities.Integrations;
 using iucs.readernest.domain.Entities.Navigation;
 using iucs.readernest.domain.Entities.Notes;
 using iucs.readernest.domain.Entities.Payouts;
+using iucs.readernest.domain.Entities.Activities;
 using iucs.readernest.domain.Entities.Quizzes;
 using iucs.readernest.domain.Entities.Resources;
 using iucs.readernest.domain.Entities.Settings;
@@ -58,6 +59,10 @@ namespace iucs.readernest.domain.Data
         // Quizzes
         public DbSet<QuizQuestion> QuizQuestions => Set<QuizQuestion>();
         public DbSet<QuizQuestionOption> QuizQuestionOptions => Set<QuizQuestionOption>();
+
+        // Whiteboard Activities
+        public DbSet<WhiteboardActivityTemplate> WhiteboardActivityTemplates => Set<WhiteboardActivityTemplate>();
+        public DbSet<WhiteboardActivityItem> WhiteboardActivityItems => Set<WhiteboardActivityItem>();
 
         // Admission
         public DbSet<DemoBooking> DemoBookings => Set<DemoBooking>();

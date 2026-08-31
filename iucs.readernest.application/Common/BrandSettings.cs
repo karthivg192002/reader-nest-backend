@@ -13,7 +13,7 @@ namespace iucs.readernest.application.Common
     public static class BrandSettings
     {
         public const string NameKey = "brand.name";
-        public const string DefaultName = "The Reader Nest";
+        public const string DefaultName = "Meet to Manage";
 
         public static async Task<string> GetNameAsync(IUnitOfWork unitOfWork, CancellationToken cancellationToken = default)
         {

@@ -155,6 +155,25 @@ namespace iucs.readernest.application.Dto.Reports
         public double StudentAttendancePercent { get; set; }
 
         public int SummariesWritten { get; set; }
+
+        /// <summary>
+        /// Status + total only — deliberately not the itemized breakdown GET /api/payouts
+        /// returns (line items, notes, review flags, bank/rate details), which stays
+        /// Admin-only ("payout/salary details are Super-Admin only"). This is the narrow
+        /// "visibility, not administration" slice the Management report is meant to show:
+        /// this teacher's most recent payout period, whatever its status — including a
+        /// still-Pending one, so an amount actively accruing this month isn't invisible
+        /// just because it hasn't been finalized/paid yet. Null when the teacher has no
+        /// payout on record at all. Year/month (not a pre-formatted string) to match
+        /// ApiPayout's own shape, so the frontend can reuse the same month-name formatting.
+        /// </summary>
+        public int? LatestPayoutPeriodYear { get; set; }
+
+        public int? LatestPayoutPeriodMonth { get; set; }
+
+        public PayoutStatus? LatestPayoutStatus { get; set; }
+
+        public decimal? LatestPayoutAmount { get; set; }
     }
 
     /// <summary>Per-child analytics with generated progress insights.</summary>

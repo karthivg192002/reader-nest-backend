@@ -1,3 +1,4 @@
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Sessions;
@@ -71,7 +72,11 @@ namespace iucs.readernest.application.Services
             }
 
             var sessions = await query.OrderBy(s => s.ScheduledStartAtUtc).ToListAsync(cancellationToken);
-            return sessions.Select(s => s.ToDto()).ToList();
+            var activeRecordings = await SessionRecordingLookup.ActiveRecordingsBySessionAsync(
+                _unitOfWork, sessions.Select(s => s.Id), cancellationToken);
+            return sessions
+                .Select(s => s.ToDto(activeRecordings.GetValueOrDefault(s.Id), activeRecordings.ContainsKey(s.Id)))
+                .ToList();
         }
 
         public async Task<IReadOnlyList<ClassSessionDto>> ListForTeacherUserAsync(
@@ -92,7 +97,8 @@ namespace iucs.readernest.application.Services
             var session = await BaseQuery().FirstOrDefaultAsync(s => s.Id == id, cancellationToken)
                 ?? throw new NotFoundException(nameof(ClassSession), id);
 
-            return session.ToDto();
+            var activeRecordings = await SessionRecordingLookup.ActiveRecordingsBySessionAsync(_unitOfWork, [id], cancellationToken);
+            return session.ToDto(activeRecordings.GetValueOrDefault(id), activeRecordings.ContainsKey(id));
         }
 
         public async Task<ClassSessionDto> ScheduleAsync(ScheduleSessionRequest request, CancellationToken cancellationToken = default)
@@ -520,6 +526,25 @@ namespace iucs.readernest.application.Services
             return recordings.Select(ToRecordingDto).ToList();
         }
 
+        public async Task DeleteRecordingAsync(
+            Guid sessionId,
+            Guid recordingId,
+            CancellationToken cancellationToken = default)
+        {
+            // Admin-only is enforced by the controller's [Authorize(Roles)] — this just has to
+            // exist and belong to the session named in the route.
+            var recording = await _unitOfWork.Repository<SessionRecording>().TrackedQuery()
+                .FirstOrDefaultAsync(r => r.Id == recordingId && r.ClassSessionId == sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(SessionRecording), recordingId);
+
+            // Only unregisters the DB row — IFileStorage has no delete operation, and a
+            // recording may live in storage the Jibri pipeline wrote to directly rather than
+            // through this app's own upload path, so there's nothing safe to reach in and purge.
+            _unitOfWork.Repository<SessionRecording>().Remove(recording);
+            await _auditLog.StageAsync(AuditAction.Delete, nameof(SessionRecording), recording.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
         public async Task<IReadOnlyList<ClassSessionDto>> GenerateScheduleAsync(
             Guid batchId,
             GenerateScheduleRequest request,
@@ -871,7 +896,7 @@ namespace iucs.readernest.application.Services
                 domain,
                 jitsiConfigJson,
                 session.MeetingRoomId,
-                $"{user.FirstName} {user.LastName}",
+                $"{user.FirstName} {user.LastName}".Trim(),
                 user.Email,
                 moderator,
                 // A couple of hours past the scheduled end covers overruns without leaving a

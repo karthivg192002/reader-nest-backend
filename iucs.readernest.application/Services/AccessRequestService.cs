@@ -129,6 +129,11 @@ namespace iucs.readernest.application.Services
             accessRequest.ReviewedAtUtc = DateTime.UtcNow;
             accessRequest.ReviewNote = request.ReviewNote?.Trim();
 
+            if (request.Approve)
+            {
+                await GrantRequestedModulesAsync(accessRequest, cancellationToken);
+            }
+
             await _auditLog.StageAsync(AuditAction.Update, nameof(AccessRequest), accessRequest.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
@@ -145,6 +150,42 @@ namespace iucs.readernest.application.Services
                 cancellationToken);
 
             return ToDto(accessRequest, $"{reviewer.FirstName} {reviewer.LastName}".Trim());
+        }
+
+        /// <summary>
+        /// Approving a request must actually grant the access, not just flip its status label
+        /// — previously it did only the latter, so a Sub Admin whose request was approved
+        /// still saw "No access" on every module they'd asked for; nothing here ever touched
+        /// SubAdminPermission. Grants read-only (CanView) on each requested module — a request
+        /// only ever names a module, never a specific action level, so View is the safe floor
+        /// an Admin clearly intended by approving; handing over more (Create/Edit/Delete/
+        /// Approve) is still a deliberate separate step through Roles &amp; Permissions. Never
+        /// downgrades a module the Sub Admin already holds at a higher level.
+        /// </summary>
+        private async Task GrantRequestedModulesAsync(AccessRequest accessRequest, CancellationToken cancellationToken)
+        {
+            var modules = ParseModules(accessRequest.RequestedModules);
+            var existing = await _unitOfWork.Repository<SubAdminPermission>().TrackedQuery()
+                .Where(p => p.UserId == accessRequest.RequestedByUserId && modules.Contains(p.Module))
+                .ToDictionaryAsync(p => p.Module, cancellationToken);
+
+            foreach (var module in modules)
+            {
+                if (existing.TryGetValue(module, out var grant))
+                {
+                    if (!grant.CanView)
+                    {
+                        grant.CanView = true;
+                        _unitOfWork.Repository<SubAdminPermission>().Update(grant);
+                    }
+                }
+                else
+                {
+                    await _unitOfWork.Repository<SubAdminPermission>().AddAsync(
+                        new SubAdminPermission { UserId = accessRequest.RequestedByUserId, Module = module, CanView = true },
+                        cancellationToken);
+                }
+            }
         }
 
         private async Task<IReadOnlyList<AccessRequestDto>> ToDtosAsync(

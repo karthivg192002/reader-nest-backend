@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using iucs.readernest.domain.Data;
@@ -11,9 +12,11 @@ using iucs.readernest.domain.Data;
 namespace iucs.readernest.domain.Migrations
 {
     [DbContext(typeof(ReaderNestDbContext))]
-    partial class ReaderNestDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260829145731_AddNotificationTemplateKey")]
+    partial class AddNotificationTemplateKey
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -582,128 +585,6 @@ namespace iucs.readernest.domain.Migrations
                     b.ToTable("leave_requests");
                 });
 
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Activities.WhiteboardActivityItem", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at_utc");
-
-                    b.Property<DateTime?>("DeletedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("deleted_at_utc");
-
-                    b.Property<int>("DisplayOrder")
-                        .HasColumnType("integer")
-                        .HasColumnName("display_order");
-
-                    b.Property<string>("Emoji")
-                        .IsRequired()
-                        .HasMaxLength(16)
-                        .HasColumnType("character varying(16)")
-                        .HasColumnName("emoji");
-
-                    b.Property<bool>("IsDeleted")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_deleted");
-
-                    b.Property<bool>("IsTarget")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_target");
-
-                    b.Property<string>("Label")
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)")
-                        .HasColumnName("label");
-
-                    b.Property<DateTime?>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at_utc");
-
-                    b.Property<Guid>("WhiteboardActivityTemplateId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("whiteboard_activity_template_id");
-
-                    b.HasKey("Id")
-                        .HasName("pk_whiteboard_activity_items");
-
-                    b.HasIndex("WhiteboardActivityTemplateId")
-                        .HasDatabaseName("ix_whiteboard_activity_items_whiteboard_activity_template_id");
-
-                    b.ToTable("whiteboard_activity_items");
-                });
-
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Activities.WhiteboardActivityTemplate", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
-
-                    b.Property<Guid?>("CourseId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("course_id");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at_utc");
-
-                    b.Property<Guid?>("CreatedBy")
-                        .HasColumnType("uuid")
-                        .HasColumnName("created_by");
-
-                    b.Property<DateTime?>("DeletedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("deleted_at_utc");
-
-                    b.Property<Guid>("DepartmentId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("department_id");
-
-                    b.Property<int>("DisplayOrder")
-                        .HasColumnType("integer")
-                        .HasColumnName("display_order");
-
-                    b.Property<bool>("IsDeleted")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_deleted");
-
-                    b.Property<string>("Mode")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("mode");
-
-                    b.Property<string>("Prompt")
-                        .IsRequired()
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)")
-                        .HasColumnName("prompt");
-
-                    b.Property<DateTime?>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at_utc");
-
-                    b.Property<Guid?>("UpdatedBy")
-                        .HasColumnType("uuid")
-                        .HasColumnName("updated_by");
-
-                    b.HasKey("Id")
-                        .HasName("pk_whiteboard_activity_templates");
-
-                    b.HasIndex("CourseId")
-                        .HasDatabaseName("ix_whiteboard_activity_templates_course_id");
-
-                    b.HasIndex("DepartmentId")
-                        .HasDatabaseName("ix_whiteboard_activity_templates_department_id");
-
-                    b.ToTable("whiteboard_activity_templates");
-                });
-
             modelBuilder.Entity("iucs.readernest.domain.Entities.Admission.DemoBooking", b =>
                 {
                     b.Property<Guid>("Id")
@@ -759,10 +640,6 @@ namespace iucs.readernest.domain.Migrations
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("boolean")
                         .HasColumnName("is_deleted");
-
-                    b.Property<DateOnly?>("NextFollowUpOn")
-                        .HasColumnType("date")
-                        .HasColumnName("next_follow_up_on");
 
                     b.Property<string>("ParentEmail")
                         .IsRequired()
@@ -4074,38 +3951,6 @@ namespace iucs.readernest.domain.Migrations
                     b.Navigation("TeacherProfile");
                 });
 
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Activities.WhiteboardActivityItem", b =>
-                {
-                    b.HasOne("iucs.readernest.domain.Entities.Activities.WhiteboardActivityTemplate", "WhiteboardActivityTemplate")
-                        .WithMany("Items")
-                        .HasForeignKey("WhiteboardActivityTemplateId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired()
-                        .HasConstraintName("fk_whiteboard_activity_items_whiteboard_activity_templates_white");
-
-                    b.Navigation("WhiteboardActivityTemplate");
-                });
-
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Activities.WhiteboardActivityTemplate", b =>
-                {
-                    b.HasOne("iucs.readernest.domain.Entities.Academics.Course", "Course")
-                        .WithMany()
-                        .HasForeignKey("CourseId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .HasConstraintName("fk_whiteboard_activity_templates_courses_course_id");
-
-                    b.HasOne("iucs.readernest.domain.Entities.Academics.Department", "Department")
-                        .WithMany()
-                        .HasForeignKey("DepartmentId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired()
-                        .HasConstraintName("fk_whiteboard_activity_templates_departments_department_id");
-
-                    b.Navigation("Course");
-
-                    b.Navigation("Department");
-                });
-
             modelBuilder.Entity("iucs.readernest.domain.Entities.Admission.DemoBooking", b =>
                 {
                     b.HasOne("iucs.readernest.domain.Entities.Sessions.ClassSession", "ClassSession")
@@ -4787,11 +4632,6 @@ namespace iucs.readernest.domain.Migrations
             modelBuilder.Entity("iucs.readernest.domain.Entities.Academics.Batch", b =>
                 {
                     b.Navigation("Enrollments");
-                });
-
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Activities.WhiteboardActivityTemplate", b =>
-                {
-                    b.Navigation("Items");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Admission.DemoBooking", b =>

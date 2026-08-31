@@ -1,6 +1,6 @@
-# Reader Nest Backend
+# Meet to Manage Backend
 
-.NET 9 Web API for The Reader Nest LMS & Virtual Classroom platform.
+.NET 9 Web API for the Meet to Manage LMS & Virtual Classroom platform (internal project/namespace names remain `iucs.readernest.*` — see note below).
 
 ## Solution structure
 

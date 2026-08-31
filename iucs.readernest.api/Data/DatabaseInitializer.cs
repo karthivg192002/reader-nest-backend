@@ -45,6 +45,7 @@ namespace iucs.readernest.api.Data
             await EnsurePackagesAndStudentViewMenusAsync(context);
             await EnsureAdminDepartmentsMenuAsync(context);
             await EnsureAdminQuizBankMenuAsync(context);
+            await EnsureAdminActivityBankMenuAsync(context);
             await EnsureAdminServerMonitoringMenuAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
@@ -92,7 +93,7 @@ namespace iucs.readernest.api.Data
             {
                 Email = email.Trim().ToLowerInvariant(),
                 PinHash = hasher.Hash(pin),
-                FirstName = configuration["Seed:AdminFirstName"] ?? "Reader Nest",
+                FirstName = configuration["Seed:AdminFirstName"] ?? "Meet to Manage",
                 LastName = configuration["Seed:AdminLastName"] ?? "Admin",
                 Role = UserRole.Admin,
             });
@@ -192,15 +193,15 @@ namespace iucs.readernest.api.Data
                 new() { Category = category, Key = key, Value = value, IsPublic = isPublic };
 
             context.AppSettings.AddRange(
-                Setting(SettingCategory.General, "org.name", "The Reader Nest", isPublic: true),
-                Setting(SettingCategory.General, "org.domain", "app.thereadernest.com"),
-                Setting(SettingCategory.General, "org.supportEmail", "support@thereadernest.com"),
+                Setting(SettingCategory.General, "org.name", "Meet to Manage", isPublic: true),
+                Setting(SettingCategory.General, "org.domain", "app.meettomanage.cloud"),
+                Setting(SettingCategory.General, "org.supportEmail", "support@meettomanage.cloud"),
                 Setting(SettingCategory.General, "org.supportPhone", "+91 98200 00000"),
                 Setting(SettingCategory.General, "org.timezone", "Asia/Kolkata (GMT +5:30)"),
-                Setting(SettingCategory.Branding, "brand.name", "The Reader Nest", isPublic: true),
+                Setting(SettingCategory.Branding, "brand.name", "Meet to Manage", isPublic: true),
                 Setting(SettingCategory.Branding, "brand.logoUrl", null, isPublic: true),
-                Setting(SettingCategory.Branding, "brand.primaryColor", "#1F6FE0", isPublic: true),
-                Setting(SettingCategory.Branding, "brand.accentColor", "#57B33B", isPublic: true),
+                Setting(SettingCategory.Branding, "brand.primaryColor", "#1E3A5F", isPublic: true),
+                Setting(SettingCategory.Branding, "brand.accentColor", "#E63329", isPublic: true),
                 Setting(SettingCategory.Notifications, "notify.feeReminders", "true"),
                 Setting(SettingCategory.Notifications, "notify.leaveRequests", "true"),
                 Setting(SettingCategory.Notifications, "notify.lowAttendance", "false"),
@@ -734,6 +735,45 @@ namespace iucs.readernest.api.Data
         }
 
         /// <summary>
+        /// Inserts the Admin "Activity Bank" menu item into a database that was seeded before
+        /// the admin-authored whiteboard activity bank existed (SeedMenusAsync only ever
+        /// creates rows once). Appended after whatever the Academics section's last item
+        /// currently is, same placement rule as EnsureAdminQuizBankMenuAsync right above.
+        /// </summary>
+        private static async Task EnsureAdminActivityBankMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/admin/activity-bank";
+            if (context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == path))
+            {
+                return;
+            }
+
+            var academicsItems = await context.MenuItems
+                .Where(m => m.Portal == "admin" && m.Section == "Academics")
+                .ToListAsync();
+            if (academicsItems.Count == 0)
+            {
+                return; // no Academics section at all (unexpected) — nothing sensible to append after
+            }
+
+            var last = academicsItems.OrderByDescending(m => m.SortOrder).First();
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "admin",
+                Section = "Academics",
+                SectionOrder = last.SectionOrder,
+                Label = "Activity Bank",
+                Path = path,
+                Icon = "PencilRuler",
+                SortOrder = last.SortOrder + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.CourseBatchManagement,
+            });
+        }
+
+        /// <summary>
         /// Inserts the Admin "Server Monitoring" menu item into a database that was seeded
         /// before that screen existed (SeedMenusAsync only ever creates rows once). Appended
         /// after whatever the System section's last item currently is (today just "Settings &amp;
@@ -827,7 +867,7 @@ namespace iucs.readernest.api.Data
                     Description = "Transactional email for confirmations, reminders and reports.",
                     IsEnabled = true,
                     IsSystem = true,
-                    ConfigJson = Json(new() { ["fromAddress"] = "support@thereadernest.com", ["smtpHost"] = "", ["smtpPort"] = "587" }),
+                    ConfigJson = Json(new() { ["fromAddress"] = "support@meettomanage.cloud", ["smtpHost"] = "", ["smtpPort"] = "587" }),
                 },
                 new Integration
                 {

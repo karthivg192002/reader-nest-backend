@@ -8,6 +8,11 @@ namespace iucs.readernest.application.Dto.Communication
 
         public NotificationType Type { get; set; }
 
+        /// <summary>The template this was rendered from (e.g. "batch-assignment"), null for
+        /// hand-built/bulk emails — lets the frontend route a click more precisely than the
+        /// coarse Type alone (several distinct templates share NotificationType.General).</summary>
+        public string? TemplateKey { get; set; }
+
         public NotificationChannel Channel { get; set; }
 
         public string? Subject { get; set; }

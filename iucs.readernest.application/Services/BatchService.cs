@@ -288,7 +288,7 @@ namespace iucs.readernest.application.Services
                     new Dictionary<string, string>
                     {
                         ["ChildFirstName"] = child.FirstName,
-                        ["ChildFullName"] = $"{child.FirstName} {child.LastName}",
+                        ["ChildFullName"] = $"{child.FirstName} {child.LastName}".Trim(),
                         ["BatchName"] = batch.Name,
                     },
                     cancellationToken);

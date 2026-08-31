@@ -30,7 +30,7 @@ namespace iucs.readernest.api.Auth
                 new(JwtRegisteredClaimNames.Email, user.Email),
                 new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
                 new(ClaimTypes.NameIdentifier, user.Id.ToString()),
-                new(ClaimTypes.Name, $"{user.FirstName} {user.LastName}"),
+                new(ClaimTypes.Name, $"{user.FirstName} {user.LastName}".Trim()),
                 new(ClaimTypes.Role, user.Role.ToString()),
             };
             claims.AddRange(permissionClaims.Select(p => new Claim(PermissionClaimType, p)));
