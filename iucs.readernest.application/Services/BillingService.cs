@@ -2053,6 +2053,7 @@ namespace iucs.readernest.application.Services
         {
             return cycle switch
             {
+                BillingCycle.Biweekly => fromUtc.AddDays(14),
                 BillingCycle.Monthly => fromUtc.AddMonths(1),
                 BillingCycle.Quarterly => fromUtc.AddMonths(3),
                 BillingCycle.Yearly => fromUtc.AddYears(1),

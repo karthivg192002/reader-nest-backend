@@ -131,6 +131,7 @@ namespace iucs.readernest.api.Services
 
                     subscription.NextBillingAtUtc = subscription.PackagePlan.BillingCycle switch
                     {
+                        BillingCycle.Biweekly => subscription.NextBillingAtUtc!.Value.AddDays(14),
                         BillingCycle.Monthly => subscription.NextBillingAtUtc!.Value.AddMonths(1),
                         BillingCycle.Quarterly => subscription.NextBillingAtUtc!.Value.AddMonths(3),
                         BillingCycle.Yearly => subscription.NextBillingAtUtc!.Value.AddYears(1),
