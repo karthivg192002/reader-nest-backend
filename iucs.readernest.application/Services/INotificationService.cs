@@ -8,13 +8,16 @@ namespace iucs.readernest.application.Services
         /// <summary>
         /// Records the notification and attempts immediate delivery through the
         /// configured transport; the row keeps Pending/Sent/Failed state for retries.
+        /// Returns the resulting status so a caller sending many of these (e.g. Bulk
+        /// Email) can track each recipient's own outcome.
         /// </summary>
-        Task SendEmailAsync(
+        Task<NotificationStatus> SendEmailAsync(
             Guid recipientUserId,
             string recipientEmail,
             NotificationType type,
             string subject,
             string body,
+            Guid? bulkEmailRecipientId = null,
             CancellationToken cancellationToken = default);
 
         /// <summary>

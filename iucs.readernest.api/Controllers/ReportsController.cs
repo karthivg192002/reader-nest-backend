@@ -1,8 +1,10 @@
+using System.Security.Claims;
 using System.Text;
 using iucs.readernest.api.Auth;
 using iucs.readernest.application.Dto.Reports;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace iucs.readernest.api.Controllers
@@ -70,7 +72,7 @@ namespace iucs.readernest.api.Controllers
             BulkEmailRequest request,
             CancellationToken cancellationToken)
         {
-            return Ok(await _reportsService.SendBulkEmailAsync(request, cancellationToken));
+            return Ok(await _reportsService.SendBulkEmailAsync(UserId(), request, cancellationToken));
         }
 
         /// <summary>Live recipient count for the compose screen (same rule as the send).</summary>
@@ -82,5 +84,35 @@ namespace iucs.readernest.api.Controllers
         {
             return Ok(await _reportsService.PreviewBulkEmailAsync(batchId, cancellationToken));
         }
+
+        /// <summary>Past Bulk Email sends, newest first.</summary>
+        [HttpGet("bulk-email/history")]
+        [HasPermission(PermissionModule.Communication, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<BulkEmailHistoryItemDto>>> BulkEmailHistory(CancellationToken cancellationToken)
+        {
+            return Ok(await _reportsService.GetBulkEmailHistoryAsync(cancellationToken));
+        }
+
+        /// <summary>One blast's recipients, delivery status and replies.</summary>
+        [HttpGet("bulk-email/history/{id:guid}")]
+        [HasPermission(PermissionModule.Communication, PermissionAction.View)]
+        public async Task<ActionResult<BulkEmailBlastDetailDto>> BulkEmailHistoryDetail(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _reportsService.GetBulkEmailBlastDetailAsync(id, cancellationToken));
+        }
+
+        /// <summary>A parent's reply to one Bulk Email they received.</summary>
+        [HttpPost("bulk-email/{recipientId:guid}/reply")]
+        [Authorize(Roles = nameof(UserRole.Parent))]
+        public async Task<IActionResult> ReplyToBulkEmail(
+            Guid recipientId,
+            ReplyToBulkEmailRequest request,
+            CancellationToken cancellationToken)
+        {
+            await _reportsService.ReplyToBulkEmailAsync(UserId(), recipientId, request, cancellationToken);
+            return NoContent();
+        }
+
+        private Guid UserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
     }
 }

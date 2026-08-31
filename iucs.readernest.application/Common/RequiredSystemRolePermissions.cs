@@ -17,6 +17,11 @@ namespace iucs.readernest.application.Common
         public static readonly IReadOnlyList<RequiredGrant> All =
         [
             new("teacher", PermissionModule.Payouts, View: true),
+            // The Relationship Manager Dashboard's KPI tiles read GET /api/reports/dashboard-summary,
+            // gated on this module — the "sub-admin" preset shipped with an empty grant set ("grant
+            // modules as needed"), so every Relationship Manager who never had this hand-granted saw
+            // every KPI tile fail with "Couldn't load" from the moment they first logged in.
+            new("sub-admin", PermissionModule.ReportsAnalytics, View: true),
             // Lets a teacher see and resolve doubts the "Ask a Doubt" chatbot escalated —
             // Communication already gates Progress Reports/Email Templates for the same module.
             new("teacher", PermissionModule.Communication, View: true, Edit: true),

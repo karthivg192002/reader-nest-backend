@@ -46,5 +46,12 @@ namespace iucs.readernest.domain.Entities.Communication
 
         /// <summary>Optional structured payload (e.g. sessionId, invoiceId) as JSON.</summary>
         public string? MetadataJson { get; set; }
+
+        /// <summary>Set when this notification is one recipient's copy of a Bulk Email
+        /// (TemplateKey "bulk-email") — lets the parent-facing feed offer a reply box
+        /// and route it to the right <see cref="BulkEmailRecipient"/>.</summary>
+        public Guid? BulkEmailRecipientId { get; set; }
+
+        public BulkEmailRecipient? BulkEmailRecipient { get; set; }
     }
 }

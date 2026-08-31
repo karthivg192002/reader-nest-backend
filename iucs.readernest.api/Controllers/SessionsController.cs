@@ -176,13 +176,25 @@ namespace iucs.readernest.api.Controllers
             return recording is null ? NoContent() : Ok(recording);
         }
 
-        /// <summary>Parents see their own child's recordings only via the scoped parent-portal resources endpoint.</summary>
+        /// <summary>
+        /// Parents see their own child's recordings only via the scoped parent-portal resources
+        /// endpoint. Admin/Teacher pass unconditionally; a Sub Admin (e.g. Coordinator) additionally
+        /// needs SessionCalendarManagement:View — the same grant their preset already carries for
+        /// calendar work — checked manually here rather than via [HasPermission], which would deny
+        /// Teacher (Teacher has no permission claims at all; see AuthService.LoadPermissionClaimsAsync).
+        /// </summary>
         [HttpGet("{id:guid}/recordings")]
-        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)},{nameof(UserRole.SubAdmin)}")]
         public async Task<ActionResult<IReadOnlyList<SessionRecordingDto>>> ListRecordings(
             Guid id,
             CancellationToken cancellationToken)
         {
+            if (User.IsInRole(nameof(UserRole.SubAdmin)) &&
+                !User.HasClaim(JwtTokenService.PermissionClaimType, $"{PermissionModule.SessionCalendarManagement}:{PermissionAction.View}"))
+            {
+                return Forbid();
+            }
+
             return Ok(await _sessionService.ListRecordingsAsync(id, cancellationToken));
         }
 

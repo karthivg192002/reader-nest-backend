@@ -47,6 +47,7 @@ namespace iucs.readernest.api.Data
             await EnsureAdminQuizBankMenuAsync(context);
             await EnsureAdminActivityBankMenuAsync(context);
             await EnsureAdminServerMonitoringMenuAsync(context);
+            await EnsureBulkEmailHistoryMenuAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
             await EnsureCashPaymentMethodAsync(context);
@@ -486,6 +487,7 @@ namespace iucs.readernest.api.Data
             ("admin", "Finance", "Fee Suspension", "/admin/fee-suspension", "Ban", PermissionModule.BillingFinance),
             ("admin", "Insights", "Reports & Analytics", "/admin/reports", "BarChart3", PermissionModule.ReportsAnalytics),
             ("admin", "Insights", "Bulk Email", "/admin/bulk-email", "Mail", PermissionModule.Communication),
+            ("admin", "Insights", "Bulk Email History", "/admin/bulk-email/history", "History", PermissionModule.Communication),
             ("admin", "Insights", "Email Templates", "/admin/email-templates", "FileText", PermissionModule.Communication),
             ("admin", "Insights", "Progress Reports", "/admin/progress-reports", "ScrollText", PermissionModule.Communication),
             ("admin", "Insights", "Doubt Chatbot", "/admin/chatbot", "MessageCircleQuestion", PermissionModule.Communication),
@@ -1042,6 +1044,36 @@ namespace iucs.readernest.api.Data
                 Label = "Email Templates",
                 Path = "/admin/email-templates",
                 Icon = "FileText",
+                SortOrder = (bulkEmail?.SortOrder ?? 0) + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.Communication,
+            });
+        }
+
+        /// <summary>
+        /// Retrofits the "Bulk Email History" admin menu item into a database that was seeded
+        /// before it existed (mirrors EnsureEmailTemplatesMenuAsync). Fresh databases already
+        /// get it from MenuSeedItems(); this only fires for pre-existing ones.
+        /// </summary>
+        private static async Task EnsureBulkEmailHistoryMenuAsync(ReaderNestDbContext context)
+        {
+            if (context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == "/admin/bulk-email/history") ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == "/admin/bulk-email/history"))
+            {
+                return;
+            }
+
+            var bulkEmail = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "admin" && m.Path == "/admin/bulk-email");
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "admin",
+                Section = "Insights",
+                SectionOrder = bulkEmail?.SectionOrder ?? 4,
+                Label = "Bulk Email History",
+                Path = "/admin/bulk-email/history",
+                Icon = "History",
                 SortOrder = (bulkEmail?.SortOrder ?? 0) + 1,
                 IsActive = true,
                 RequiredModule = PermissionModule.Communication,

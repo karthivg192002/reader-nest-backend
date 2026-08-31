@@ -225,4 +225,73 @@ namespace iucs.readernest.application.Dto.Reports
     {
         public int RecipientCount { get; set; }
     }
+
+    /// <summary>One past Bulk Email send, for the admin History list.</summary>
+    public class BulkEmailHistoryItemDto
+    {
+        public Guid Id { get; set; }
+
+        public string Subject { get; set; } = null!;
+
+        public string SentByName { get; set; } = null!;
+
+        public BulkEmailScope Scope { get; set; }
+
+        public string? BatchName { get; set; }
+
+        public DateTime SentAtUtc { get; set; }
+
+        public int TotalRecipients { get; set; }
+
+        public int SuccessCount { get; set; }
+
+        public int FailureCount { get; set; }
+    }
+
+    /// <summary>One blast's full recipient list with delivery status and any reply, for the
+    /// admin History detail view.</summary>
+    public class BulkEmailBlastDetailDto
+    {
+        public Guid Id { get; set; }
+
+        public string Subject { get; set; } = null!;
+
+        public string Body { get; set; } = null!;
+
+        public string SentByName { get; set; } = null!;
+
+        public BulkEmailScope Scope { get; set; }
+
+        public string? BatchName { get; set; }
+
+        public DateTime SentAtUtc { get; set; }
+
+        public IReadOnlyList<BulkEmailRecipientDto> Recipients { get; set; } = [];
+    }
+
+    public class BulkEmailRecipientDto
+    {
+        public Guid Id { get; set; }
+
+        public string RecipientName { get; set; } = null!;
+
+        public string Email { get; set; } = null!;
+
+        public NotificationStatus Status { get; set; }
+
+        public string? ErrorMessage { get; set; }
+
+        public DateTime? SentAtUtc { get; set; }
+
+        public string? ReplyMessage { get; set; }
+
+        public DateTime? ReplyAtUtc { get; set; }
+    }
+
+    public class ReplyToBulkEmailRequest
+    {
+        [System.ComponentModel.DataAnnotations.Required]
+        [System.ComponentModel.DataAnnotations.MaxLength(4000)]
+        public string Message { get; set; } = null!;
+    }
 }
