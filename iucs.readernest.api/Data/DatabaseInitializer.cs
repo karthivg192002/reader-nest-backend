@@ -42,6 +42,7 @@ namespace iucs.readernest.api.Data
             await SeedMenusAsync(context);
             await RemoveRetiredMenusAsync(context);
             await EnsureSubAdminIntegrationsMenuAsync(context);
+            await EnsureSubAdminBatchesAndUsersMenusAsync(context);
             await EnsurePackagesAndStudentViewMenusAsync(context);
             await EnsureAdminDepartmentsMenuAsync(context);
             await EnsureAdminQuizBankMenuAsync(context);
@@ -512,6 +513,8 @@ namespace iucs.readernest.api.Data
             ("subadmin", null, "Dashboard", "/subadmin", "LayoutDashboard", null),
             ("subadmin", "Access", "My Permissions", "/subadmin/permissions", "ShieldCheck", null),
             ("subadmin", "Access", "Integrations", "/subadmin/integrations", "Plug", PermissionModule.Settings),
+            ("subadmin", "Delegated Work", "Batches", "/subadmin/batches", "Layers", PermissionModule.CourseBatchManagement),
+            ("subadmin", "Delegated Work", "Users", "/subadmin/users", "Users", PermissionModule.UserManagement),
             ("subadmin", "Delegated Work", "Assigned Reports", "/subadmin/reports", "BarChart3", PermissionModule.ReportsAnalytics),
             ("subadmin", "Delegated Work", "Audit Log", "/subadmin/audit-log", "History", null),
             ("admission", null, "Dashboard", "/admission", "LayoutDashboard", null),
@@ -594,6 +597,66 @@ namespace iucs.readernest.api.Data
                 IsActive = true,
                 RequiredModule = PermissionModule.Settings,
             });
+        }
+
+        /// <summary>
+        /// Inserts the Sub Admin "Batches" and "Users" menu items into a database that was
+        /// seeded before this baseline Relationship Manager access existed (SeedMenusAsync
+        /// only ever creates rows once). Placed ahead of "Assigned Reports" in "Delegated
+        /// Work", nudging Reports/Audit Log down two slots.
+        /// </summary>
+        private static async Task EnsureSubAdminBatchesAndUsersMenusAsync(ReaderNestDbContext context)
+        {
+            const string batchesPath = "/subadmin/batches";
+            const string usersPath = "/subadmin/users";
+            var alreadyHasBatches = context.MenuItems.Local.Any(m => m.Portal == "subadmin" && m.Path == batchesPath) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "subadmin" && m.Path == batchesPath);
+            var alreadyHasUsers = context.MenuItems.Local.Any(m => m.Portal == "subadmin" && m.Path == usersPath) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "subadmin" && m.Path == usersPath);
+            if (alreadyHasBatches && alreadyHasUsers)
+            {
+                return;
+            }
+
+            var delegatedWork = await context.MenuItems
+                .Where(m => m.Portal == "subadmin" && m.Section == "Delegated Work")
+                .ToListAsync();
+            foreach (var item in delegatedWork)
+            {
+                item.SortOrder += 2;
+            }
+
+            if (!alreadyHasBatches)
+            {
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "subadmin",
+                    Section = "Delegated Work",
+                    SectionOrder = delegatedWork.FirstOrDefault()?.SectionOrder ?? 0,
+                    Label = "Batches",
+                    Path = batchesPath,
+                    Icon = "Layers",
+                    SortOrder = 0,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.CourseBatchManagement,
+                });
+            }
+
+            if (!alreadyHasUsers)
+            {
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "subadmin",
+                    Section = "Delegated Work",
+                    SectionOrder = delegatedWork.FirstOrDefault()?.SectionOrder ?? 0,
+                    Label = "Users",
+                    Path = usersPath,
+                    Icon = "Users",
+                    SortOrder = 1,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.UserManagement,
+                });
+            }
         }
 
         /// <summary>

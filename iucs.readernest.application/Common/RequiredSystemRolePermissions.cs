@@ -22,6 +22,14 @@ namespace iucs.readernest.application.Common
             // modules as needed"), so every Relationship Manager who never had this hand-granted saw
             // every KPI tile fail with "Couldn't load" from the moment they first logged in.
             new("sub-admin", PermissionModule.ReportsAnalytics, View: true),
+            // Batches, Users (view) and Audit Log are baseline Relationship Manager access —
+            // granted the moment the role is assigned, never gated behind the Admin's
+            // Access-Requests approval popup. No Delete flag: BatchesController has no delete
+            // endpoint at all (a batch only moves Active/Dormant/Archived via SetStatus, which
+            // is PermissionAction.Edit), so "Create/Edit/View/Delete" for batches means
+            // Create + Edit + View here, with Edit covering the archive-as-delete action.
+            new("sub-admin", PermissionModule.CourseBatchManagement, View: true, Create: true, Edit: true),
+            new("sub-admin", PermissionModule.UserManagement, View: true),
             // Lets a teacher see and resolve doubts the "Ask a Doubt" chatbot escalated —
             // Communication already gates Progress Reports/Email Templates for the same module.
             new("teacher", PermissionModule.Communication, View: true, Edit: true),
