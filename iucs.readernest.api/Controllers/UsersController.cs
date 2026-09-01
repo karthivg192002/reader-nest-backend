@@ -5,6 +5,7 @@ using iucs.readernest.application.Dto.Users;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -37,9 +38,16 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _userService.ListAsync(role, search, page, pageSize, cancellationToken));
         }
 
-        /// <summary>Teacher options for assignment dropdowns; visible to any module that schedules.</summary>
+        /// <summary>
+        /// Teacher options (name/department only, nothing sensitive) for assignment dropdowns.
+        /// [Authorize]-only, not UserManagement-gated -- Batches, Calendar, Availability and
+        /// Demo Scheduling all populate a teacher picker from this and only need
+        /// CourseBatchManagement/SessionCalendarManagement/Admission respectively, not
+        /// UserManagement. Confirmed live: a role granted only those modules got a 403 here
+        /// on pages that have nothing to do with user management.
+        /// </summary>
         [HttpGet("teachers")]
-        [HasPermission(PermissionModule.UserManagement, PermissionAction.View)]
+        [Authorize]
         public async Task<ActionResult<IReadOnlyList<TeacherOptionDto>>> ListTeachers(CancellationToken cancellationToken)
         {
             return Ok(await _userService.ListTeachersAsync(cancellationToken));
