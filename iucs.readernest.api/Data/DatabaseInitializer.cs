@@ -68,6 +68,8 @@ namespace iucs.readernest.api.Data
             await SeedChatFaqsAsync(context);
             await EnsureAdditionalChatFaqsAsync(context);
             await BackfillPlainTextNotificationBodiesAsync(context);
+            await EnsureMenuAccessMenuItemAsync(context);
+            await EnsureMenuPermissionsBackfilledAsync(context);
 
             await context.SaveChangesAsync();
         }
@@ -812,6 +814,95 @@ namespace iucs.readernest.api.Data
                 IsActive = true,
                 RequiredModule = PermissionModule.SystemMonitoring,
             });
+        }
+
+        /// <summary>Mirrors EnsureAdminServerMonitoringMenuAsync — the admin page for Phase 1 of the menu/role redesign.</summary>
+        private static async Task EnsureMenuAccessMenuItemAsync(ReaderNestDbContext context)
+        {
+            const string path = "/admin/menu-access";
+            if (context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == path))
+            {
+                return;
+            }
+
+            var systemItems = await context.MenuItems
+                .Where(m => m.Portal == "admin" && m.Section == "System")
+                .ToListAsync();
+            if (systemItems.Count == 0)
+            {
+                return; // no System section at all (unexpected) — nothing sensible to append after
+            }
+
+            var last = systemItems.OrderByDescending(m => m.SortOrder).First();
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "admin",
+                Section = "System",
+                SectionOrder = last.SectionOrder,
+                Label = "Menu Access",
+                Path = path,
+                Icon = "KeySquare",
+                SortOrder = last.SortOrder + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.Settings,
+            });
+        }
+
+        /// <summary>
+        /// Phase 1 seed for the new menu-role mapping table: gives the admin's new Menu Access
+        /// grid a sensible starting point (today's effective access) instead of an empty slate,
+        /// by expanding each active menu item's single RequiredModule gate into an explicit
+        /// MenuPermission row for every role currently granted View on that module. Runs once
+        /// per (menu item, role) pair — an existing row (whether from a prior backfill or an
+        /// admin's own edit in the new grid) is never touched again. Purely additive: MenuService
+        /// does not read this table yet, so this has no effect on what anyone currently sees.
+        /// </summary>
+        private static async Task EnsureMenuPermissionsBackfilledAsync(ReaderNestDbContext context)
+        {
+            var gatedItems = await context.MenuItems
+                .Where(m => m.IsActive && m.RequiredModule != null)
+                .ToListAsync();
+            if (gatedItems.Count == 0)
+            {
+                return;
+            }
+
+            var roles = await context.RoleDefinitions
+                .Include(r => r.Permissions)
+                .ToListAsync();
+            var existing = await context.MenuPermissions
+                .Where(p => p.RoleDefinitionId != null)
+                .ToListAsync();
+
+            foreach (var item in gatedItems)
+            {
+                foreach (var role in roles)
+                {
+                    var grant = role.Permissions.FirstOrDefault(p => p.Module == item.RequiredModule!.Value);
+                    if (grant is null || !grant.CanView)
+                    {
+                        continue;
+                    }
+
+                    if (existing.Any(p => p.MenuItemId == item.Id && p.RoleDefinitionId == role.Id) ||
+                        context.MenuPermissions.Local.Any(p => p.MenuItemId == item.Id && p.RoleDefinitionId == role.Id))
+                    {
+                        continue;
+                    }
+
+                    context.MenuPermissions.Add(new MenuPermission
+                    {
+                        MenuItemId = item.Id,
+                        RoleDefinitionId = role.Id,
+                        CanView = grant.CanView,
+                        CanCreate = grant.CanCreate,
+                        CanEdit = grant.CanEdit,
+                        CanDelete = grant.CanDelete,
+                    });
+                }
+            }
         }
 
         private static async Task SeedMenusAsync(ReaderNestDbContext context)

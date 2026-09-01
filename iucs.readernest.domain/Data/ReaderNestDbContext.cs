@@ -109,6 +109,7 @@ namespace iucs.readernest.domain.Data
         // Platform configuration
         public DbSet<AppSetting> AppSettings => Set<AppSetting>();
         public DbSet<MenuItem> MenuItems => Set<MenuItem>();
+        public DbSet<MenuPermission> MenuPermissions => Set<MenuPermission>();
         public DbSet<Integration> Integrations => Set<Integration>();
 
         protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)

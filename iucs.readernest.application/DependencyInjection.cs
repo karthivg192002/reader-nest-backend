@@ -38,6 +38,7 @@ namespace iucs.readernest.application
             services.AddScoped<IReportsService, ReportsService>();
             services.AddScoped<ISettingsService, SettingsService>();
             services.AddScoped<IMenuService, MenuService>();
+            services.AddScoped<IMenuPermissionService, MenuPermissionService>();
             services.AddScoped<IRoleService, RoleService>();
             services.AddScoped<IIntegrationService, IntegrationService>();
             services.AddScoped<IFloatingNoteService, FloatingNoteService>();

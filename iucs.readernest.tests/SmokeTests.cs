@@ -95,6 +95,8 @@ namespace iucs.readernest.tests
 
         private MenuService CreateMenuService() => new(_db.UnitOfWork, _auditLog);
 
+        private MenuPermissionService CreateMenuPermissionService() => new(_db.UnitOfWork, _auditLog);
+
         private AcademicOpsService CreateAcademicOpsService() =>
             new(_db.UnitOfWork, _auditLog, _notifications, _db.CurrentUser, CreateSessionService());
 
@@ -7182,6 +7184,7 @@ namespace iucs.readernest.tests
         {
             var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 2);
             var reports = new ReportsService(_db.UnitOfWork, _notifications);
+            var sender = await _db.SeedUserAsync($"sender-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
 
             async Task<ParentProfile> SeedParentWithChildAsync(bool enrol, UserStatus status = UserStatus.Active)
             {
@@ -7207,7 +7210,7 @@ namespace iucs.readernest.tests
             Assert.Equal(2, batchPreview.RecipientCount);
 
             _emailSender.Sent.Clear();
-            var batchSend = await reports.SendBulkEmailAsync(new BulkEmailRequest
+            var batchSend = await reports.SendBulkEmailAsync(sender.Id, new BulkEmailRequest
             {
                 Subject = "Class update",
                 Body = "<p>See you Monday.</p>",
@@ -7222,7 +7225,7 @@ namespace iucs.readernest.tests
             Assert.Equal(3, allPreview.RecipientCount);
 
             _emailSender.Sent.Clear();
-            var allSend = await reports.SendBulkEmailAsync(new BulkEmailRequest
+            var allSend = await reports.SendBulkEmailAsync(sender.Id, new BulkEmailRequest
             {
                 Subject = "Newsletter",
                 Body = "<p>Hello</p>",
@@ -7380,6 +7383,122 @@ namespace iucs.readernest.tests
                 "some/stored/path.txt", "text/plain", 100);
             Assert.Equal(course.Id, dto.CourseId);
             Assert.Equal(batch.Id, dto.BatchId);
+        }
+
+        /// <summary>
+        /// Phase 1 of the menu/role redesign (see Documentation/Dynamic_Menu_RBAC_Redesign_Feasibility.md):
+        /// GetForRoleAsync must report every active menu item, defaulting to all-false when no
+        /// grant row exists yet, and SetForRoleAsync must round-trip whatever was saved while
+        /// silently dropping all-false rows rather than storing them ("no row = no access").
+        /// </summary>
+        [Fact]
+        public async Task MenuPermissionService_SetForRole_ThenGet_RoundTripsGrantsAndDropsAllFalseRows()
+        {
+            var role = new RoleDefinition { Name = "front-desk", DisplayName = "Front Desk" };
+            var menuA = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "admin", Label = "Users", Path = "/admin/users", Icon = "Users",
+                SectionOrder = 0, SortOrder = 0, IsActive = true,
+            };
+            var menuB = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "admin", Label = "Billing", Path = "/admin/billing", Icon = "Receipt",
+                SectionOrder = 0, SortOrder = 1, IsActive = true,
+            };
+            _db.Context.AddRange(role, menuA, menuB);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            var service = CreateMenuPermissionService();
+
+            var initial = await service.GetForRoleAsync(role.Id);
+            Assert.All(initial, r => Assert.False(r.CanView || r.CanCreate || r.CanEdit || r.CanDelete));
+
+            await service.SetForRoleAsync(role.Id,
+            [
+                new SaveMenuPermissionItem { MenuItemId = menuA.Id, CanView = true, CanEdit = true },
+                new SaveMenuPermissionItem { MenuItemId = menuB.Id }, // all-false — must not be stored
+            ]);
+
+            var stored = await _db.Context.MenuPermissions.Where(p => p.RoleDefinitionId == role.Id).ToListAsync();
+            Assert.Single(stored);
+
+            var afterSet = await service.GetForRoleAsync(role.Id);
+            var grantA = Assert.Single(afterSet, r => r.MenuItemId == menuA.Id);
+            Assert.True(grantA.CanView);
+            Assert.True(grantA.CanEdit);
+            Assert.False(grantA.CanCreate);
+            Assert.False(grantA.CanDelete);
+
+            var grantB = Assert.Single(afterSet, r => r.MenuItemId == menuB.Id);
+            Assert.False(grantB.CanView || grantB.CanCreate || grantB.CanEdit || grantB.CanDelete);
+        }
+
+        /// <summary>
+        /// SetForRoleAsync is replace-all, mirroring RoleService.UpdateAsync: a menu item
+        /// granted in one save that is simply absent from the next save (not explicitly
+        /// unchecked, just omitted) must lose its grant rather than linger.
+        /// </summary>
+        [Fact]
+        public async Task MenuPermissionService_SetForRole_ReplacesAll_DroppingItemsNotResubmitted()
+        {
+            var role = new RoleDefinition { Name = "front-desk", DisplayName = "Front Desk" };
+            var menuA = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "admin", Label = "Users", Path = "/admin/users", Icon = "Users",
+                SectionOrder = 0, SortOrder = 0, IsActive = true,
+            };
+            var menuB = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "admin", Label = "Billing", Path = "/admin/billing", Icon = "Receipt",
+                SectionOrder = 0, SortOrder = 1, IsActive = true,
+            };
+            _db.Context.AddRange(role, menuA, menuB);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            var service = CreateMenuPermissionService();
+            await service.SetForRoleAsync(role.Id,
+            [
+                new SaveMenuPermissionItem { MenuItemId = menuA.Id, CanView = true },
+                new SaveMenuPermissionItem { MenuItemId = menuB.Id, CanView = true },
+            ]);
+
+            // The next save only resubmits menuA — menuB's earlier grant must not survive.
+            await service.SetForRoleAsync(role.Id, [new SaveMenuPermissionItem { MenuItemId = menuA.Id, CanView = true }]);
+
+            var afterSet = await service.GetForRoleAsync(role.Id);
+            Assert.True(Assert.Single(afterSet, r => r.MenuItemId == menuA.Id).CanView);
+            Assert.False(Assert.Single(afterSet, r => r.MenuItemId == menuB.Id).CanView);
+        }
+
+        [Fact]
+        public async Task MenuPermissionService_SetForRole_RejectsUnknownOrInactiveMenuItem()
+        {
+            var role = new RoleDefinition { Name = "front-desk", DisplayName = "Front Desk" };
+            var inactiveMenu = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "admin", Label = "Retired", Path = "/admin/retired", Icon = "Circle",
+                SectionOrder = 0, SortOrder = 0, IsActive = false,
+            };
+            _db.Context.AddRange(role, inactiveMenu);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            var service = CreateMenuPermissionService();
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.SetForRoleAsync(
+                role.Id, [new SaveMenuPermissionItem { MenuItemId = Guid.NewGuid(), CanView = true }]));
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.SetForRoleAsync(
+                role.Id, [new SaveMenuPermissionItem { MenuItemId = inactiveMenu.Id, CanView = true }]));
+        }
+
+        [Fact]
+        public async Task MenuPermissionService_ThrowsNotFound_ForAnUnknownRole()
+        {
+            var service = CreateMenuPermissionService();
+            await Assert.ThrowsAsync<NotFoundException>(() => service.GetForRoleAsync(Guid.NewGuid()));
         }
 
         public void Dispose() => _db.Dispose();
