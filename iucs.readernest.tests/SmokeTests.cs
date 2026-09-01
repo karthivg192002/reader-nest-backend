@@ -7182,6 +7182,7 @@ namespace iucs.readernest.tests
         {
             var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 2);
             var reports = new ReportsService(_db.UnitOfWork, _notifications);
+            var sender = await _db.SeedUserAsync($"sender-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
 
             async Task<ParentProfile> SeedParentWithChildAsync(bool enrol, UserStatus status = UserStatus.Active)
             {
@@ -7207,7 +7208,7 @@ namespace iucs.readernest.tests
             Assert.Equal(2, batchPreview.RecipientCount);
 
             _emailSender.Sent.Clear();
-            var batchSend = await reports.SendBulkEmailAsync(new BulkEmailRequest
+            var batchSend = await reports.SendBulkEmailAsync(sender.Id, new BulkEmailRequest
             {
                 Subject = "Class update",
                 Body = "<p>See you Monday.</p>",
@@ -7222,7 +7223,7 @@ namespace iucs.readernest.tests
             Assert.Equal(3, allPreview.RecipientCount);
 
             _emailSender.Sent.Clear();
-            var allSend = await reports.SendBulkEmailAsync(new BulkEmailRequest
+            var allSend = await reports.SendBulkEmailAsync(sender.Id, new BulkEmailRequest
             {
                 Subject = "Newsletter",
                 Body = "<p>Hello</p>",

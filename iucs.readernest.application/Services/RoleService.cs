@@ -94,7 +94,71 @@ namespace iucs.readernest.application.Services
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(RoleDefinition), name, cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            await SyncAssignedSubAdminsAsync(role, cancellationToken);
             return ToDto(role);
+        }
+
+        /// <summary>
+        /// Pushes a just-saved role's matrix out to every Sub Admin currently assigned it,
+        /// replacing their SubAdminPermission rows to match exactly (same replace-all
+        /// semantics as the role save itself). Without this, editing a role preset only
+        /// affected new "Apply preset" clicks going forward — anyone already on that role
+        /// silently kept whatever matrix they'd been copied at assignment time, so an admin
+        /// editing "Coordinator" could believe every Coordinator's access just changed when
+        /// only brand-new assignments would. This intentionally overwrites any one-off ad-hoc
+        /// grant an Access Request approval gave someone beyond their role — a person who
+        /// needs to keep extra access permanently needs their own role, not a shared one.
+        /// Teacher/Parent/Admission/Student never use SubAdminPermission at all (they resolve
+        /// their role's matrix live at every login instead), so this is a no-op for those.
+        /// </summary>
+        private async Task SyncAssignedSubAdminsAsync(RoleDefinition role, CancellationToken cancellationToken)
+        {
+            if (NonSubAdminPresetNames.Names.Contains(role.Name))
+            {
+                return;
+            }
+
+            var assignedUserIds = await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.RoleDefinitionId == role.Id)
+                .Select(u => u.Id)
+                .ToListAsync(cancellationToken);
+
+            if (assignedUserIds.Count == 0)
+            {
+                return;
+            }
+
+            var permissionRepository = _unitOfWork.Repository<SubAdminPermission>();
+            var existingGrants = await permissionRepository.Query()
+                .Where(p => assignedUserIds.Contains(p.UserId))
+                .ToListAsync(cancellationToken);
+
+            foreach (var grant in existingGrants)
+            {
+                permissionRepository.Remove(grant);
+            }
+
+            foreach (var userId in assignedUserIds)
+            {
+                foreach (var permission in role.Permissions)
+                {
+                    await permissionRepository.AddAsync(
+                        new SubAdminPermission
+                        {
+                            UserId = userId,
+                            Module = permission.Module,
+                            CanView = permission.CanView,
+                            CanCreate = permission.CanCreate,
+                            CanEdit = permission.CanEdit,
+                            CanDelete = permission.CanDelete,
+                            CanApprove = permission.CanApprove,
+                        },
+                        cancellationToken);
+                }
+            }
+
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
         /// <summary>
