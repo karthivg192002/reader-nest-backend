@@ -33,6 +33,7 @@ namespace iucs.readernest.application.Services
         {
             var name = NormalizeName(request.Name);
             ValidateDisplayName(request.DisplayName);
+            await ValidateModuleKeysAsync(request.Permissions, cancellationToken);
 
             var repository = _unitOfWork.Repository<RoleDefinition>();
             if (await repository.ExistsAsync(r => r.Name == name, cancellationToken))
@@ -59,6 +60,7 @@ namespace iucs.readernest.application.Services
         {
             var name = NormalizeName(request.Name);
             ValidateDisplayName(request.DisplayName);
+            await ValidateModuleKeysAsync(request.Permissions, cancellationToken);
 
             var repository = _unitOfWork.Repository<RoleDefinition>();
             var role = await repository.Query()
@@ -175,12 +177,12 @@ namespace iucs.readernest.application.Services
         {
             foreach (var required in RequiredSystemRolePermissions.All.Where(r => r.RoleName == role.Name))
             {
-                var existing = role.Permissions.FirstOrDefault(p => p.Module == required.Module);
+                var existing = role.Permissions.FirstOrDefault(p => p.Module == required.Module.ToString());
                 if (existing is null)
                 {
                     role.Permissions.Add(new RolePermission
                     {
-                        Module = required.Module,
+                        Module = required.Module.ToString(),
                         CanView = required.View,
                         CanCreate = required.Create,
                         CanEdit = required.Edit,
@@ -254,6 +256,32 @@ namespace iucs.readernest.application.Services
             if (string.IsNullOrWhiteSpace(displayName))
             {
                 throw new DomainValidationException("Role display name is required.");
+            }
+        }
+
+        /// <summary>
+        /// Module was a compile-time-checked enum on the wire until it became a plain string
+        /// key (to allow Admin-defined custom modules) — model binding no longer rejects a
+        /// bogus value on its own, so every write path that accepts a permission matrix needs
+        /// this same check against the real catalog (built-in ∪ custom).
+        /// </summary>
+        private async Task ValidateModuleKeysAsync(IEnumerable<PermissionDto> permissions, CancellationToken cancellationToken)
+        {
+            var keys = permissions.Select(p => p.Module).Distinct().ToList();
+            if (keys.Count == 0)
+            {
+                return;
+            }
+
+            var validKeys = await _unitOfWork.Repository<domain.Entities.Users.PermissionModuleDefinition>().Query()
+                .Select(m => m.Key)
+                .ToListAsync(cancellationToken);
+            var validSet = validKeys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var unknown = keys.Where(k => !validSet.Contains(k)).ToList();
+            if (unknown.Count > 0)
+            {
+                throw new DomainValidationException($"Unknown permission module(s): {string.Join(", ", unknown)}.");
             }
         }
 

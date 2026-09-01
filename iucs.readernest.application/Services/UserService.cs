@@ -521,6 +521,23 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException($"Module '{duplicateModule.Key}' appears more than once.");
             }
 
+            // Module was a compile-time-checked enum on the wire until it became a plain
+            // string key (to allow Admin-defined custom modules) — model binding no longer
+            // rejects a bogus value on its own.
+            var requestedKeys = permissions.Select(p => p.Module).Distinct().ToList();
+            if (requestedKeys.Count > 0)
+            {
+                var validKeys = (await _unitOfWork.Repository<PermissionModuleDefinition>().Query()
+                    .Select(m => m.Key)
+                    .ToListAsync(cancellationToken))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var unknown = requestedKeys.Where(k => !validKeys.Contains(k)).ToList();
+                if (unknown.Count > 0)
+                {
+                    throw new DomainValidationException($"Unknown permission module(s): {string.Join(", ", unknown)}.");
+                }
+            }
+
             // Only an explicit role assignment (apply-preset) stamps the user's
             // named role; hand-editing individual checkboxes leaves it as-is.
             if (roleDefinitionId.HasValue)

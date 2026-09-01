@@ -37,6 +37,7 @@ namespace iucs.readernest.api.Data
             await SeedDepartmentsAsync(context);
             await SeedPaymentAccountsAsync(context);
             await SeedSettingsAsync(context);
+            await SeedPermissionModulesAsync(context);
             await SeedRolesAsync(context);
             await BackfillSystemRolePermissionsAsync(context);
             await SeedMenusAsync(context);
@@ -210,6 +211,56 @@ namespace iucs.readernest.api.Data
                 Setting(SettingCategory.Notifications, "notify.weeklyDigest", "true"));
         }
 
+        /// <summary>
+        /// The 12 built-in permission modules as real PermissionModuleDefinition rows (IsSystem
+        /// = true, Key matching the PermissionModule enum's own name), so the Roles &amp;
+        /// Permissions screen's module list is entirely DB-driven — an Admin-defined custom
+        /// module sits in the same table alongside these, not a separate hardcoded list.
+        /// Insert-if-absent only: never touches a row an Admin might have (in principle)
+        /// already renamed, and never touches custom modules.
+        /// </summary>
+        private static async Task SeedPermissionModulesAsync(ReaderNestDbContext context)
+        {
+            (PermissionModule Module, string Label)[] builtIns =
+            [
+                (PermissionModule.UserManagement, "User Management"),
+                (PermissionModule.CourseBatchManagement, "Courses & Batches"),
+                (PermissionModule.SessionCalendarManagement, "Sessions & Calendar"),
+                (PermissionModule.ContentAccessManagement, "Content & Resources"),
+                (PermissionModule.BillingFinance, "Billing & Finance"),
+                (PermissionModule.Payouts, "Payouts"),
+                (PermissionModule.ReportsAnalytics, "Reports & Analytics"),
+                (PermissionModule.Admission, "Admission"),
+                (PermissionModule.LeaveManagement, "Leave Management"),
+                (PermissionModule.Communication, "Communication"),
+                (PermissionModule.Settings, "Settings"),
+                (PermissionModule.SystemMonitoring, "Server Monitoring"),
+            ];
+
+            var existingKeys = await context.PermissionModuleDefinitions
+                .Select(m => m.Key)
+                .ToListAsync();
+            var existingKeySet = existingKeys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            for (var i = 0; i < builtIns.Length; i++)
+            {
+                var (module, label) = builtIns[i];
+                var key = module.ToString();
+                if (existingKeySet.Contains(key))
+                {
+                    continue;
+                }
+
+                context.PermissionModuleDefinitions.Add(new PermissionModuleDefinition
+                {
+                    Key = key,
+                    Label = label,
+                    IsSystem = true,
+                    SortOrder = i,
+                });
+            }
+        }
+
         private static async Task SeedRolesAsync(ReaderNestDbContext context)
         {
             // System roles mirror the platform's portals so the Roles & Permissions
@@ -329,13 +380,13 @@ namespace iucs.readernest.api.Data
                     continue;
                 }
 
-                var existing = role.Permissions.FirstOrDefault(p => p.Module == module);
+                var existing = role.Permissions.FirstOrDefault(p => p.Module == module.ToString());
                 if (existing is null)
                 {
                     context.RolePermissions.Add(new RolePermission
                     {
                         RoleDefinitionId = role.Id,
-                        Module = module,
+                        Module = module.ToString(),
                         CanView = view,
                         CanCreate = create,
                         CanEdit = edit,
@@ -363,13 +414,13 @@ namespace iucs.readernest.api.Data
 
                 foreach (var userId in subAdminUserIds.Where(u => u.RoleDefinitionId == role.Id).Select(u => u.Id))
                 {
-                    var grant = existingSubAdminGrants.FirstOrDefault(p => p.UserId == userId && p.Module == module);
+                    var grant = existingSubAdminGrants.FirstOrDefault(p => p.UserId == userId && p.Module == module.ToString());
                     if (grant is null)
                     {
                         context.SubAdminPermissions.Add(new SubAdminPermission
                         {
                             UserId = userId,
-                            Module = module,
+                            Module = module.ToString(),
                             CanView = view,
                             CanCreate = create,
                             CanEdit = edit,
@@ -392,7 +443,7 @@ namespace iucs.readernest.api.Data
         private static IReadOnlyList<(string Name, string DisplayName, string Description, string DefaultRoute, PermissionDto[] Permissions)> SystemRoleSeeds()
         {
             PermissionDto Grant(PermissionModule module, bool view = false, bool create = false, bool edit = false, bool delete = false, bool approve = false) =>
-                new() { Module = module, CanView = view, CanCreate = create, CanEdit = edit, CanDelete = delete, CanApprove = approve };
+                new() { Module = module.ToString(), CanView = view, CanCreate = create, CanEdit = edit, CanDelete = delete, CanApprove = approve };
 
             PermissionDto[] AllModulesFull() =>
                 Enum.GetValues<PermissionModule>()
@@ -467,70 +518,70 @@ namespace iucs.readernest.api.Data
         /// always visible (dashboards and other mandatory, non-delegable actions); Admin
         /// bypasses gating entirely regardless of what's set here.
         /// </summary>
-        private static (string Portal, string? Section, string Label, string Path, string Icon, PermissionModule? RequiredModule)[] MenuSeedItems() =>
+        private static (string Portal, string? Section, string Label, string Path, string Icon, string? RequiredModule)[] MenuSeedItems() =>
         [
             ("admin", null, "Dashboard", "/admin", "LayoutDashboard", null),
-            ("admin", "Academics", "Courses", "/admin/courses", "BookOpen", PermissionModule.CourseBatchManagement),
-            ("admin", "Academics", "Departments", "/admin/departments", "Building2", PermissionModule.CourseBatchManagement),
-            ("admin", "Academics", "Batches", "/admin/batches", "Layers", PermissionModule.CourseBatchManagement),
-            ("admin", "Academics", "Academic Calendar", "/admin/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement),
-            ("admin", "Academics", "Sessions", "/admin/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement),
-            ("admin", "Academics", "Quiz Bank", "/admin/quiz-bank", "Sparkles", PermissionModule.CourseBatchManagement),
-            ("admin", "People", "Users", "/admin/users", "Users", PermissionModule.UserManagement),
-            ("admin", "People", "Roles & Permissions", "/admin/permissions", "ShieldCheck", PermissionModule.UserManagement),
-            ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck", PermissionModule.Admission),
-            ("admin", "People", "Store Inquiries", "/admin/store-inquiries", "ShoppingBag", PermissionModule.Admission),
-            ("admin", "Content", "Content & Resources", "/admin/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
-            ("admin", "Finance", "Billing & Finance", "/admin/billing", "Receipt", PermissionModule.BillingFinance),
-            ("admin", "Finance", "Packages & Subscriptions", "/admin/packages", "CreditCard", PermissionModule.BillingFinance),
-            ("admin", "Finance", "Payment Gateway Mapping", "/admin/payment-mapping", "Landmark", PermissionModule.BillingFinance),
-            ("admin", "Finance", "Teacher Payouts", "/admin/payouts", "Wallet", PermissionModule.Payouts),
-            ("admin", "Finance", "Fee Suspension", "/admin/fee-suspension", "Ban", PermissionModule.BillingFinance),
-            ("admin", "Insights", "Reports & Analytics", "/admin/reports", "BarChart3", PermissionModule.ReportsAnalytics),
-            ("admin", "Insights", "Bulk Email", "/admin/bulk-email", "Mail", PermissionModule.Communication),
-            ("admin", "Insights", "Bulk Email History", "/admin/bulk-email/history", "History", PermissionModule.Communication),
-            ("admin", "Insights", "Email Templates", "/admin/email-templates", "FileText", PermissionModule.Communication),
-            ("admin", "Insights", "Progress Reports", "/admin/progress-reports", "ScrollText", PermissionModule.Communication),
-            ("admin", "Insights", "Doubt Chatbot", "/admin/chatbot", "MessageCircleQuestion", PermissionModule.Communication),
-            ("admin", "System", "Settings & Branding", "/admin/settings", "Settings", PermissionModule.Settings),
+            ("admin", "Academics", "Courses", "/admin/courses", "BookOpen", PermissionModule.CourseBatchManagement.ToString()),
+            ("admin", "Academics", "Departments", "/admin/departments", "Building2", PermissionModule.CourseBatchManagement.ToString()),
+            ("admin", "Academics", "Batches", "/admin/batches", "Layers", PermissionModule.CourseBatchManagement.ToString()),
+            ("admin", "Academics", "Academic Calendar", "/admin/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement.ToString()),
+            ("admin", "Academics", "Sessions", "/admin/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+            ("admin", "Academics", "Quiz Bank", "/admin/quiz-bank", "Sparkles", PermissionModule.CourseBatchManagement.ToString()),
+            ("admin", "People", "Users", "/admin/users", "Users", PermissionModule.UserManagement.ToString()),
+            ("admin", "People", "Roles & Permissions", "/admin/permissions", "ShieldCheck", PermissionModule.UserManagement.ToString()),
+            ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck", PermissionModule.Admission.ToString()),
+            ("admin", "People", "Store Inquiries", "/admin/store-inquiries", "ShoppingBag", PermissionModule.Admission.ToString()),
+            ("admin", "Content", "Content & Resources", "/admin/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
+            ("admin", "Finance", "Billing & Finance", "/admin/billing", "Receipt", PermissionModule.BillingFinance.ToString()),
+            ("admin", "Finance", "Packages & Subscriptions", "/admin/packages", "CreditCard", PermissionModule.BillingFinance.ToString()),
+            ("admin", "Finance", "Payment Gateway Mapping", "/admin/payment-mapping", "Landmark", PermissionModule.BillingFinance.ToString()),
+            ("admin", "Finance", "Teacher Payouts", "/admin/payouts", "Wallet", PermissionModule.Payouts.ToString()),
+            ("admin", "Finance", "Fee Suspension", "/admin/fee-suspension", "Ban", PermissionModule.BillingFinance.ToString()),
+            ("admin", "Insights", "Reports & Analytics", "/admin/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
+            ("admin", "Insights", "Bulk Email", "/admin/bulk-email", "Mail", PermissionModule.Communication.ToString()),
+            ("admin", "Insights", "Bulk Email History", "/admin/bulk-email/history", "History", PermissionModule.Communication.ToString()),
+            ("admin", "Insights", "Email Templates", "/admin/email-templates", "FileText", PermissionModule.Communication.ToString()),
+            ("admin", "Insights", "Progress Reports", "/admin/progress-reports", "ScrollText", PermissionModule.Communication.ToString()),
+            ("admin", "Insights", "Doubt Chatbot", "/admin/chatbot", "MessageCircleQuestion", PermissionModule.Communication.ToString()),
+            ("admin", "System", "Settings & Branding", "/admin/settings", "Settings", PermissionModule.Settings.ToString()),
             ("teacher", null, "Dashboard", "/teacher", "LayoutDashboard", null),
-            ("teacher", "Teaching", "My Classes", "/teacher/classes", "CalendarClock", PermissionModule.SessionCalendarManagement),
-            ("teacher", "Teaching", "Live Classroom", "/teacher/live/s-1", "Video", PermissionModule.SessionCalendarManagement),
-            ("teacher", "Teaching", "Attendance & Records", "/teacher/attendance", "ClipboardList", PermissionModule.SessionCalendarManagement),
-            ("teacher", "Teaching", "Demo Feedback", "/teacher/demo-feedback", "ClipboardCheck", PermissionModule.SessionCalendarManagement),
-            ("teacher", "Teaching", "Student Doubts", "/teacher/doubts", "MessageCircleQuestion", PermissionModule.Communication),
-            ("teacher", "My Account", "Leave Management", "/teacher/leave", "CalendarOff", PermissionModule.LeaveManagement),
-            ("teacher", "My Account", "My Payout", "/teacher/payout", "Banknote", PermissionModule.Payouts),
-            ("teacher", "My Account", "Resources", "/teacher/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
+            ("teacher", "Teaching", "My Classes", "/teacher/classes", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+            ("teacher", "Teaching", "Live Classroom", "/teacher/live/s-1", "Video", PermissionModule.SessionCalendarManagement.ToString()),
+            ("teacher", "Teaching", "Attendance & Records", "/teacher/attendance", "ClipboardList", PermissionModule.SessionCalendarManagement.ToString()),
+            ("teacher", "Teaching", "Demo Feedback", "/teacher/demo-feedback", "ClipboardCheck", PermissionModule.SessionCalendarManagement.ToString()),
+            ("teacher", "Teaching", "Student Doubts", "/teacher/doubts", "MessageCircleQuestion", PermissionModule.Communication.ToString()),
+            ("teacher", "My Account", "Leave Management", "/teacher/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
+            ("teacher", "My Account", "My Payout", "/teacher/payout", "Banknote", PermissionModule.Payouts.ToString()),
+            ("teacher", "My Account", "Resources", "/teacher/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
             ("parent", null, "Dashboard", "/parent", "LayoutDashboard", null),
-            ("parent", "Learning", "Schedule & Live Class", "/parent/schedule", "CalendarClock", PermissionModule.SessionCalendarManagement),
-            ("parent", "Learning", "Resources", "/parent/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
-            ("parent", "Learning", "Recordings", "/parent/recordings", "Video", PermissionModule.ContentAccessManagement),
+            ("parent", "Learning", "Schedule & Live Class", "/parent/schedule", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+            ("parent", "Learning", "Resources", "/parent/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
+            ("parent", "Learning", "Recordings", "/parent/recordings", "Video", PermissionModule.ContentAccessManagement.ToString()),
             ("parent", "Learning", "Student View", "/student", "Sparkles", null),
-            ("parent", "Account", "Payments & Billing", "/parent/billing", "CreditCard", PermissionModule.BillingFinance),
-            ("parent", "Account", "Notifications & Reports", "/parent/notifications", "Bell", PermissionModule.Communication),
+            ("parent", "Account", "Payments & Billing", "/parent/billing", "CreditCard", PermissionModule.BillingFinance.ToString()),
+            ("parent", "Account", "Notifications & Reports", "/parent/notifications", "Bell", PermissionModule.Communication.ToString()),
             ("parent", "Account", "Add Child", "/parent/add-child", "UserPlus", null),
             ("subadmin", null, "Dashboard", "/subadmin", "LayoutDashboard", null),
             ("subadmin", "Access", "My Permissions", "/subadmin/permissions", "ShieldCheck", null),
-            ("subadmin", "Access", "Integrations", "/subadmin/integrations", "Plug", PermissionModule.Settings),
-            ("subadmin", "Delegated Work", "Batches", "/subadmin/batches", "Layers", PermissionModule.CourseBatchManagement),
-            ("subadmin", "Delegated Work", "Users", "/subadmin/users", "Users", PermissionModule.UserManagement),
-            ("subadmin", "Delegated Work", "Assigned Reports", "/subadmin/reports", "BarChart3", PermissionModule.ReportsAnalytics),
+            ("subadmin", "Access", "Integrations", "/subadmin/integrations", "Plug", PermissionModule.Settings.ToString()),
+            ("subadmin", "Delegated Work", "Batches", "/subadmin/batches", "Layers", PermissionModule.CourseBatchManagement.ToString()),
+            ("subadmin", "Delegated Work", "Users", "/subadmin/users", "Users", PermissionModule.UserManagement.ToString()),
+            ("subadmin", "Delegated Work", "Assigned Reports", "/subadmin/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
             ("subadmin", "Delegated Work", "Audit Log", "/subadmin/audit-log", "History", null),
             ("admission", null, "Dashboard", "/admission", "LayoutDashboard", null),
-            ("admission", "Pipeline", "Demo Scheduling", "/admission/demo-scheduling", "CalendarClock", PermissionModule.Admission),
-            ("admission", "Pipeline", "Demo Feedback", "/admission/demo-feedback", "ClipboardCheck", PermissionModule.Admission),
-            ("admission", "Pipeline", "Conversion Board", "/admission/conversion", "KanbanSquare", PermissionModule.Admission),
-            ("admission", "CRM", "Leads & Parents", "/admission/leads", "UserSearch", PermissionModule.Admission),
-            ("admission", "CRM", "Payment Tracking", "/admission/payments", "Link2", PermissionModule.BillingFinance),
-            ("admission", "Insights", "Reports", "/admission/reports", "BarChart3", PermissionModule.ReportsAnalytics),
+            ("admission", "Pipeline", "Demo Scheduling", "/admission/demo-scheduling", "CalendarClock", PermissionModule.Admission.ToString()),
+            ("admission", "Pipeline", "Demo Feedback", "/admission/demo-feedback", "ClipboardCheck", PermissionModule.Admission.ToString()),
+            ("admission", "Pipeline", "Conversion Board", "/admission/conversion", "KanbanSquare", PermissionModule.Admission.ToString()),
+            ("admission", "CRM", "Leads & Parents", "/admission/leads", "UserSearch", PermissionModule.Admission.ToString()),
+            ("admission", "CRM", "Payment Tracking", "/admission/payments", "Link2", PermissionModule.BillingFinance.ToString()),
+            ("admission", "Insights", "Reports", "/admission/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
             ("coordinator", null, "Dashboard", "/coordinator", "LayoutDashboard", null),
-            ("coordinator", "Monitoring", "Academic Calendar", "/coordinator/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement),
-            ("coordinator", "Monitoring", "Teacher Availability", "/coordinator/availability", "CalendarRange", PermissionModule.SessionCalendarManagement),
+            ("coordinator", "Monitoring", "Academic Calendar", "/coordinator/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement.ToString()),
+            ("coordinator", "Monitoring", "Teacher Availability", "/coordinator/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
             ("management", null, "Executive Overview", "/management", "LayoutDashboard", null),
-            ("management", "Performance", "Revenue & Courses", "/management/revenue", "TrendingUp", PermissionModule.ReportsAnalytics),
-            ("management", "Performance", "Teacher & Batch Performance", "/management/performance", "Gauge", PermissionModule.ReportsAnalytics),
-            ("management", "Insights", "Reports", "/management/reports", "FileBarChart", PermissionModule.ReportsAnalytics),
+            ("management", "Performance", "Revenue & Courses", "/management/revenue", "TrendingUp", PermissionModule.ReportsAnalytics.ToString()),
+            ("management", "Performance", "Teacher & Batch Performance", "/management/performance", "Gauge", PermissionModule.ReportsAnalytics.ToString()),
+            ("management", "Insights", "Reports", "/management/reports", "FileBarChart", PermissionModule.ReportsAnalytics.ToString()),
             ("student", null, "My Learning", "/student", "Sparkles", null),
         ];
 
@@ -595,7 +646,7 @@ namespace iucs.readernest.api.Data
                 Icon = "Plug",
                 SortOrder = 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.Settings,
+                RequiredModule = PermissionModule.Settings.ToString(),
             });
         }
 
@@ -638,7 +689,7 @@ namespace iucs.readernest.api.Data
                     Icon = "Layers",
                     SortOrder = 0,
                     IsActive = true,
-                    RequiredModule = PermissionModule.CourseBatchManagement,
+                    RequiredModule = PermissionModule.CourseBatchManagement.ToString(),
                 });
             }
 
@@ -654,7 +705,7 @@ namespace iucs.readernest.api.Data
                     Icon = "Users",
                     SortOrder = 1,
                     IsActive = true,
-                    RequiredModule = PermissionModule.UserManagement,
+                    RequiredModule = PermissionModule.UserManagement.ToString(),
                 });
             }
         }
@@ -693,7 +744,7 @@ namespace iucs.readernest.api.Data
                     Icon = "CreditCard",
                     SortOrder = insertAt,
                     IsActive = true,
-                    RequiredModule = PermissionModule.BillingFinance,
+                    RequiredModule = PermissionModule.BillingFinance.ToString(),
                 });
             }
 
@@ -755,7 +806,7 @@ namespace iucs.readernest.api.Data
                 Icon = "Building2",
                 SortOrder = insertAt,
                 IsActive = true,
-                RequiredModule = PermissionModule.CourseBatchManagement,
+                RequiredModule = PermissionModule.CourseBatchManagement.ToString(),
             });
         }
 
@@ -795,7 +846,7 @@ namespace iucs.readernest.api.Data
                 Icon = "Sparkles",
                 SortOrder = last.SortOrder + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.CourseBatchManagement,
+                RequiredModule = PermissionModule.CourseBatchManagement.ToString(),
             });
         }
 
@@ -834,7 +885,7 @@ namespace iucs.readernest.api.Data
                 Icon = "PencilRuler",
                 SortOrder = last.SortOrder + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.CourseBatchManagement,
+                RequiredModule = PermissionModule.CourseBatchManagement.ToString(),
             });
         }
 
@@ -873,7 +924,7 @@ namespace iucs.readernest.api.Data
                 Icon = "Activity",
                 SortOrder = last.SortOrder + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.SystemMonitoring,
+                RequiredModule = PermissionModule.SystemMonitoring.ToString(),
             });
         }
 
@@ -1109,7 +1160,7 @@ namespace iucs.readernest.api.Data
                 Icon = "FileText",
                 SortOrder = (bulkEmail?.SortOrder ?? 0) + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.Communication,
+                RequiredModule = PermissionModule.Communication.ToString(),
             });
         }
 
@@ -1139,7 +1190,7 @@ namespace iucs.readernest.api.Data
                 Icon = "History",
                 SortOrder = (bulkEmail?.SortOrder ?? 0) + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.Communication,
+                RequiredModule = PermissionModule.Communication.ToString(),
             });
         }
 
@@ -1169,7 +1220,7 @@ namespace iucs.readernest.api.Data
                 Icon = "ScrollText",
                 SortOrder = (emailTemplates?.SortOrder ?? 0) + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.Communication,
+                RequiredModule = PermissionModule.Communication.ToString(),
             });
         }
 
@@ -1196,7 +1247,7 @@ namespace iucs.readernest.api.Data
                     Icon = "MessageCircleQuestion",
                     SortOrder = (progressReports?.SortOrder ?? 0) + 1,
                     IsActive = true,
-                    RequiredModule = PermissionModule.Communication,
+                    RequiredModule = PermissionModule.Communication.ToString(),
                 });
             }
 
@@ -1216,7 +1267,7 @@ namespace iucs.readernest.api.Data
                     Icon = "MessageCircleQuestion",
                     SortOrder = (demoFeedback?.SortOrder ?? 0) + 1,
                     IsActive = true,
-                    RequiredModule = PermissionModule.Communication,
+                    RequiredModule = PermissionModule.Communication.ToString(),
                 });
             }
         }
@@ -1369,7 +1420,7 @@ namespace iucs.readernest.api.Data
                 Icon = "ShoppingBag",
                 SortOrder = (enrollmentReview?.SortOrder ?? 0) + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.Admission,
+                RequiredModule = PermissionModule.Admission.ToString(),
             });
         }
 
@@ -1407,7 +1458,7 @@ namespace iucs.readernest.api.Data
                 Icon = "Video",
                 SortOrder = (resources?.SortOrder ?? 0) + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.ContentAccessManagement,
+                RequiredModule = PermissionModule.ContentAccessManagement.ToString(),
             });
         }
 

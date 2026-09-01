@@ -263,7 +263,7 @@ namespace iucs.readernest.application.Services
         }
 
         private static List<string> ToClaims(
-            IEnumerable<(PermissionModule Module, bool CanView, bool CanCreate, bool CanEdit, bool CanDelete, bool CanApprove)> grants)
+            IEnumerable<(string Module, bool CanView, bool CanCreate, bool CanEdit, bool CanDelete, bool CanApprove)> grants)
         {
             var claims = new List<string>();
             foreach (var grant in grants)

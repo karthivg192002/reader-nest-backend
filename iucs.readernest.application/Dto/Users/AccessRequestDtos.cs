@@ -13,7 +13,7 @@ namespace iucs.readernest.application.Dto.Users
 
         public string RequestedByEmail { get; set; } = null!;
 
-        public IReadOnlyList<PermissionModule> RequestedModules { get; set; } = [];
+        public IReadOnlyList<string> RequestedModules { get; set; } = [];
 
         public AccessRequestStatus Status { get; set; }
 
@@ -33,7 +33,7 @@ namespace iucs.readernest.application.Dto.Users
         /// <summary>The modules the Sub Admin doesn't currently hold and is asking for.</summary>
         [Required]
         [MinLength(1)]
-        public List<PermissionModule> RequestedModules { get; set; } = [];
+        public List<string> RequestedModules { get; set; } = [];
     }
 
     public class ReviewAccessRequestRequest

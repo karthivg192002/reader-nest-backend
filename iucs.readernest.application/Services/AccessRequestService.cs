@@ -47,6 +47,19 @@ namespace iucs.readernest.application.Services
             }
 
             var modules = request.RequestedModules.Distinct().ToList();
+            if (modules.Count > 0)
+            {
+                var validKeys = (await _unitOfWork.Repository<PermissionModuleDefinition>().Query()
+                    .Select(m => m.Key)
+                    .ToListAsync(cancellationToken))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var unknown = modules.Where(m => !validKeys.Contains(m)).ToList();
+                if (unknown.Count > 0)
+                {
+                    throw new DomainValidationException($"Unknown permission module(s): {string.Join(", ", unknown)}.");
+                }
+            }
+
             var accessRequest = new AccessRequest
             {
                 RequestedByUserId = requestedByUserId,
@@ -202,10 +215,8 @@ namespace iucs.readernest.application.Services
             return requests.Select(r => ToDto(r, reviewers.GetValueOrDefault(r.ReviewedBy ?? Guid.Empty))).ToList();
         }
 
-        private static IReadOnlyList<PermissionModule> ParseModules(string csv) =>
-            csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Select(Enum.Parse<PermissionModule>)
-                .ToList();
+        private static IReadOnlyList<string> ParseModules(string csv) =>
+            csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
         private static AccessRequestDto ToDto(AccessRequest r, string? reviewedByName = null) => new()
         {
