@@ -29,29 +29,53 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default)
         {
             var isAdmin = role == UserRole.Admin;
-            var key = await ResolvePortalAsync(userId, role, cancellationToken);
+            var (key, roleDefinitionId) = await ResolvePortalAndRoleAsync(userId, role, cancellationToken);
 
             var items = await _unitOfWork.Repository<MenuItem>().Query()
                 .Where(m => m.Portal == key && m.IsActive)
                 .OrderBy(m => m.SectionOrder).ThenBy(m => m.SortOrder)
                 .ToListAsync(cancellationToken);
 
-            // A menu item with no RequiredModule is always visible; a gated item shows
-            // only when the user's assigned role grants View on that module (Admin bypasses).
+            var grants = new Dictionary<Guid, MenuPermission>();
+            if (roleDefinitionId is { } id)
+            {
+                var menuIds = items.Select(m => m.Id).ToList();
+                grants = await _unitOfWork.Repository<MenuPermission>().Query()
+                    .Where(p => p.RoleDefinitionId == id && menuIds.Contains(p.MenuItemId))
+                    .ToDictionaryAsync(p => p.MenuItemId, cancellationToken);
+            }
+
+            // Phase 3 of the menu/role redesign: once a role has been explicitly configured
+            // for a menu item via Menu Access, that grant is authoritative (whatever it says,
+            // including "hidden"). A menu item nobody has touched in the new grid yet — no row
+            // at all — keeps behaving exactly as before: always visible when unrequired, or
+            // gated by the caller's module-level View grant (Admin bypasses), so nothing
+            // regresses for menus the new page hasn't been used on.
             var visible = items.Where(m =>
-                m.RequiredModule is null
-                || isAdmin
-                || viewableModules.Contains(m.RequiredModule.Value));
+                grants.TryGetValue(m.Id, out var grant)
+                    ? grant.CanView
+                    : m.RequiredModule is null || isAdmin || viewableModules.Contains(m.RequiredModule.Value));
 
             return visible.Select(ToDto).ToList();
         }
 
         /// <summary>
-        /// Portal key for a user. Sub Admins take the portal from their assigned role's
-        /// DefaultRoute (e.g. "/coordinator/..." → "coordinator") so a Coordinator/Management
-        /// preset lands on its own sidebar; everyone else maps straight from the account role.
+        /// Portal key and governing RoleDefinition for a user, resolved together since Sub
+        /// Admin needs the same lookup for both. Sub Admins take the portal from their assigned
+        /// preset's DefaultRoute (e.g. "/coordinator/..." → "coordinator") so a
+        /// Coordinator/Management preset lands on its own sidebar and its menu grants come from
+        /// that shared preset; a Sub Admin with no preset explicitly applied (RoleDefinitionId is
+        /// only ever set by account creation with a preset, or "Apply preset…" — plain per-user
+        /// permission edits and access-request approval never touch it, so this is the common
+        /// case, not an edge case) falls back to the base "sub-admin" system RoleDefinition
+        /// ("Parent Relationship Manager") by name — mirroring exactly how Teacher/Parent/
+        /// AdmissionTeam below resolve to their own named system role. Confirmed live: a plain
+        /// Relationship Manager account (no preset ever applied) kept the pre-Phase-3 menu
+        /// visibility no matter what was configured for them in Menu Access, because this used
+        /// to return a bare null RoleDefinitionId instead of that base preset.
         /// </summary>
-        private async Task<string> ResolvePortalAsync(Guid userId, UserRole role, CancellationToken cancellationToken)
+        private async Task<(string Portal, Guid? RoleDefinitionId)> ResolvePortalAndRoleAsync(
+            Guid userId, UserRole role, CancellationToken cancellationToken)
         {
             if (role == UserRole.SubAdmin)
             {
@@ -61,17 +85,20 @@ namespace iucs.readernest.application.Services
                 {
                     var roleDef = await _unitOfWork.Repository<domain.Entities.Users.RoleDefinition>()
                         .GetByIdAsync(roleId, cancellationToken);
-                    var segment = roleDef?.DefaultRoute?.Trim('/').Split('/').FirstOrDefault();
-                    if (!string.IsNullOrWhiteSpace(segment) && Portals.Contains(segment))
+                    if (roleDef is not null)
                     {
-                        return segment;
+                        var segment = roleDef.DefaultRoute?.Trim('/').Split('/').FirstOrDefault();
+                        var portal = !string.IsNullOrWhiteSpace(segment) && Portals.Contains(segment) ? segment : "subadmin";
+                        return (portal, roleDef.Id);
                     }
                 }
 
-                return "subadmin";
+                var baseRole = await _unitOfWork.Repository<domain.Entities.Users.RoleDefinition>()
+                    .FirstOrDefaultAsync(r => r.Name == "sub-admin", cancellationToken);
+                return ("subadmin", baseRole?.Id);
             }
 
-            return role switch
+            var portalKey = role switch
             {
                 UserRole.Admin => "admin",
                 UserRole.Teacher => "teacher",
@@ -79,6 +106,23 @@ namespace iucs.readernest.application.Services
                 UserRole.AdmissionTeam => "admission",
                 _ => "admin",
             };
+
+            var systemRoleName = role switch
+            {
+                UserRole.Admin => "admin",
+                UserRole.Teacher => "teacher",
+                UserRole.Parent => "parent",
+                UserRole.AdmissionTeam => "admission",
+                _ => (string?)null,
+            };
+            if (systemRoleName is null)
+            {
+                return (portalKey, null);
+            }
+
+            var systemRole = await _unitOfWork.Repository<domain.Entities.Users.RoleDefinition>()
+                .FirstOrDefaultAsync(r => r.Name == systemRoleName, cancellationToken);
+            return (portalKey, systemRole?.Id);
         }
 
         public async Task<IReadOnlyList<MenuItemDto>> ListAsync(

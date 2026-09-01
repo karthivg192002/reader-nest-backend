@@ -66,14 +66,14 @@ namespace iucs.readernest.application.Services
                 permissionRepository.Remove(grant);
             }
 
+            // Every submitted row is stored, all-false included: MenuService.GetForUserAsync
+            // treats "a grant row exists" as this role having been explicitly configured for
+            // that menu item, distinct from "never touched in this grid" (falls back to the
+            // legacy RequiredModule gate). Dropping all-false rows here would make an explicit
+            // "hide this" indistinguishable from "not configured" and silently undo the hide.
             var saved = new Dictionary<Guid, MenuPermission>();
             foreach (var item in items)
             {
-                if (!item.CanView && !item.CanCreate && !item.CanEdit && !item.CanDelete)
-                {
-                    continue; // all-false rows are dropped rather than stored ("no row = no access")
-                }
-
                 var grant = new MenuPermission
                 {
                     MenuItemId = item.MenuItemId,

@@ -2575,6 +2575,106 @@ namespace iucs.readernest.tests
             Assert.Contains(adminMenu, m => m.Path == "/admin/billing");
         }
 
+        /// <summary>
+        /// Phase 3 of the menu/role redesign: once a RoleDefinition has an explicit
+        /// MenuPermission row for a menu item, that grant is authoritative in both directions —
+        /// it can hide an otherwise-always-visible (ungated) item or a module-permitted gated
+        /// item, and it can show a gated item the role's module grants would otherwise hide.
+        /// A menu item with no row at all must keep falling back to the pre-Phase-3 behavior.
+        /// </summary>
+        [Fact]
+        public async Task Menu_ForUser_ExplicitMenuPermissionGrant_OverridesTheLegacyModuleGateInBothDirections()
+        {
+            var teacherRole = new RoleDefinition { Name = "teacher", DisplayName = "Teacher" };
+            teacherRole.Permissions.Add(new RolePermission { Module = PermissionModule.ContentAccessManagement, CanView = true });
+            var teacherUser = await _db.SeedUserAsync($"teacher-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+
+            var ungated = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "teacher", Label = "Dashboard", Path = "/teacher", Icon = "LayoutDashboard",
+                SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = null,
+            };
+            var gatedAllowed = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "teacher", Label = "Resources", Path = "/teacher/resources", Icon = "FolderOpen",
+                SectionOrder = 0, SortOrder = 1, IsActive = true, RequiredModule = PermissionModule.ContentAccessManagement,
+            };
+            var gatedDenied = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "teacher", Label = "Billing", Path = "/teacher/billing", Icon = "Receipt",
+                SectionOrder = 0, SortOrder = 2, IsActive = true, RequiredModule = PermissionModule.BillingFinance,
+            };
+            _db.Context.AddRange(teacherRole, ungated, gatedAllowed, gatedDenied);
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateMenuService();
+            var viewableModules = new[] { PermissionModule.ContentAccessManagement };
+
+            // Sanity check: before any explicit grant, legacy behavior holds.
+            var beforeOverrides = await service.GetForUserAsync(teacherUser.Id, UserRole.Teacher, viewableModules);
+            Assert.Contains(beforeOverrides, m => m.Path == ungated.Path);
+            Assert.Contains(beforeOverrides, m => m.Path == gatedAllowed.Path);
+            Assert.DoesNotContain(beforeOverrides, m => m.Path == gatedDenied.Path);
+
+            // Explicitly hide the two the legacy path would show, and show the one it would hide.
+            var menuPermissions = CreateMenuPermissionService();
+            await menuPermissions.SetForRoleAsync(teacherRole.Id,
+            [
+                new SaveMenuPermissionItem { MenuItemId = ungated.Id, CanView = false },
+                new SaveMenuPermissionItem { MenuItemId = gatedAllowed.Id, CanView = false },
+                new SaveMenuPermissionItem { MenuItemId = gatedDenied.Id, CanView = true },
+            ]);
+
+            var afterOverrides = await service.GetForUserAsync(teacherUser.Id, UserRole.Teacher, viewableModules);
+            Assert.DoesNotContain(afterOverrides, m => m.Path == ungated.Path);
+            Assert.DoesNotContain(afterOverrides, m => m.Path == gatedAllowed.Path);
+            Assert.Contains(afterOverrides, m => m.Path == gatedDenied.Path);
+        }
+
+        /// <summary>
+        /// Reproduces the live bug: RoleDefinitionId is only ever set by account creation with
+        /// an explicit preset or "Apply preset…" — plain per-user permission edits and
+        /// access-request approval never touch it, so a "plain" Relationship Manager with no
+        /// preset applied is the common case, not an edge case. Before this fix,
+        /// ResolvePortalAndRoleAsync returned a bare null RoleDefinitionId for that case, so
+        /// Menu Access grants configured for "Parent Relationship Manager" (the sub-admin base
+        /// preset) never applied to them. A Sub Admin WITH a different explicit preset
+        /// (Coordinator here) must still use that preset's own grants, not the base one.
+        /// </summary>
+        [Fact]
+        public async Task Menu_ForUser_SubAdminWithoutAnAppliedPreset_FallsBackToTheBaseSubAdminRoleDefinition()
+        {
+            var baseRole = new RoleDefinition { Name = "sub-admin", DisplayName = "Parent Relationship Manager" };
+            var coordinatorRole = new RoleDefinition { Name = "coordinator", DisplayName = "Coordinator" };
+            var plainRelationshipManager = await _db.SeedUserAsync($"rm-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+            var coordinatorUser = await _db.SeedUserAsync($"coord-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+
+            var reportsItem = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "subadmin", Label = "Reports", Path = "/subadmin/reports", Icon = "BarChart3",
+                SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = null,
+            };
+            _db.Context.AddRange(baseRole, coordinatorRole, reportsItem);
+            await _db.Context.SaveChangesAsync();
+            coordinatorUser.RoleDefinitionId = coordinatorRole.Id;
+            await _db.Context.SaveChangesAsync();
+
+            var menuPermissions = CreateMenuPermissionService();
+            // The base preset explicitly hides an otherwise-unrequired (always-visible) item.
+            await menuPermissions.SetForRoleAsync(baseRole.Id, [new SaveMenuPermissionItem { MenuItemId = reportsItem.Id, CanView = false }]);
+
+            var service = CreateMenuService();
+
+            var plainUserMenu = await service.GetForUserAsync(plainRelationshipManager.Id, UserRole.SubAdmin, []);
+            Assert.DoesNotContain(plainUserMenu, m => m.Path == reportsItem.Path);
+
+            // Coordinator has an explicit preset with no grant configured for this item — must
+            // fall back to the legacy "unrequired → visible" rule for THEIR preset, not borrow
+            // the base preset's explicit hide.
+            var coordinatorMenu = await service.GetForUserAsync(coordinatorUser.Id, UserRole.SubAdmin, []);
+            Assert.Contains(coordinatorMenu, m => m.Path == reportsItem.Path);
+        }
+
         [Fact]
         public async Task Login_Succeeds_WithValidCredentials()
         {
@@ -7392,7 +7492,7 @@ namespace iucs.readernest.tests
         /// silently dropping all-false rows rather than storing them ("no row = no access").
         /// </summary>
         [Fact]
-        public async Task MenuPermissionService_SetForRole_ThenGet_RoundTripsGrantsAndDropsAllFalseRows()
+        public async Task MenuPermissionService_SetForRole_ThenGet_RoundTripsGrants_StoringAllFalseRowsToo()
         {
             var role = new RoleDefinition { Name = "front-desk", DisplayName = "Front Desk" };
             var menuA = new domain.Entities.Navigation.MenuItem
@@ -7417,11 +7517,11 @@ namespace iucs.readernest.tests
             await service.SetForRoleAsync(role.Id,
             [
                 new SaveMenuPermissionItem { MenuItemId = menuA.Id, CanView = true, CanEdit = true },
-                new SaveMenuPermissionItem { MenuItemId = menuB.Id }, // all-false — must not be stored
+                new SaveMenuPermissionItem { MenuItemId = menuB.Id }, // all-false — an explicit "hide this", still stored as a row
             ]);
 
             var stored = await _db.Context.MenuPermissions.Where(p => p.RoleDefinitionId == role.Id).ToListAsync();
-            Assert.Single(stored);
+            Assert.Equal(2, stored.Count);
 
             var afterSet = await service.GetForRoleAsync(role.Id);
             var grantA = Assert.Single(afterSet, r => r.MenuItemId == menuA.Id);
