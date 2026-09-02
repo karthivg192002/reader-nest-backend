@@ -191,11 +191,14 @@ namespace iucs.readernest.api.Services
                 await unitOfWork.SaveChangesAsync(cancellationToken);
             }
 
-            // Account suspension: any parent left with an overdue invoice and no active
+            // Account suspension: any parent left with an invoice overdue by at least the
+            // configured grace period (Settings → Notifications, BillingSettings) and no active
             // suspension gets one; the parent portal blocks sessions/content while Active
             var suspendedCount = 0;
+            var graceDays = await BillingSettings.GetSuspensionGraceDaysAsync(unitOfWork, cancellationToken);
+            var suspensionCutoff = today.AddDays(-graceDays);
             var overdueParents = await unitOfWork.Repository<Invoice>().Query()
-                .Where(i => i.Status == InvoiceStatus.Overdue)
+                .Where(i => i.Status == InvoiceStatus.Overdue && i.DueDate <= suspensionCutoff)
                 .Select(i => new { i.ParentProfileId, i.Id, i.InvoiceNumber })
                 .ToListAsync(cancellationToken);
 
@@ -357,7 +360,8 @@ namespace iucs.readernest.api.Services
             }
 
             var notifications = services.GetRequiredService<INotificationService>();
-            var reminderWindow = today.AddDays(3);
+            var reminderDays = await BillingSettings.GetReminderDaysBeforeDueAsync(unitOfWork, cancellationToken);
+            var reminderWindow = today.AddDays(reminderDays);
 
             var dueInvoices = await unitOfWork.Repository<Invoice>().Query()
                 .Include(i => i.ParentProfile).ThenInclude(p => p.User)
