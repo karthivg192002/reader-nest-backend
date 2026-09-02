@@ -19,6 +19,20 @@ namespace iucs.readernest.application.Services
             IReadOnlyCollection<PermissionModule> viewableModules,
             CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// The real API-authorization claims for a user, aggregated from Menu Access instead of
+        /// the legacy RolePermission/SubAdminPermission tables: resolves the same governing
+        /// RoleDefinition GetForUserAsync does, then for every menu item that RoleDefinition has
+        /// been granted anything on, ORs each of View/Create/Edit/Delete/Approve into whichever
+        /// PermissionModule the item's RequiredModule names (a menu with no RequiredModule
+        /// contributes nothing here — it's a pure visibility gate). Returns "Module:Action"
+        /// strings in the same shape the JWT "perm" claims already use, so every existing
+        /// [HasPermission] check keeps working unchanged. Empty for Admin (implicit bypass) and
+        /// for any role with no resolvable RoleDefinition.
+        /// </summary>
+        Task<IReadOnlyList<string>> GetModulePermissionClaimsAsync(
+            Guid userId, UserRole role, CancellationToken cancellationToken = default);
+
         /// <summary>All items (including inactive), optionally filtered by portal, for the admin menu manager.</summary>
         Task<IReadOnlyList<MenuItemDto>> ListAsync(string? portal, CancellationToken cancellationToken = default);
 

@@ -82,6 +82,7 @@ namespace iucs.readernest.application.Services
                     CanCreate = item.CanCreate,
                     CanEdit = item.CanEdit,
                     CanDelete = item.CanDelete,
+                    CanApprove = item.CanApprove,
                 };
                 await permissionRepository.AddAsync(grant, cancellationToken);
                 saved[item.MenuItemId] = grant;
@@ -122,6 +123,7 @@ namespace iucs.readernest.application.Services
                     CanCreate = grant?.CanCreate ?? false,
                     CanEdit = grant?.CanEdit ?? false,
                     CanDelete = grant?.CanDelete ?? false,
+                    CanApprove = grant?.CanApprove ?? false,
                 };
             }).ToList();
     }

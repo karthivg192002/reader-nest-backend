@@ -66,6 +66,65 @@ namespace iucs.readernest.application.Services
             return visible.Select(ToDto).ToList();
         }
 
+        public async Task<IReadOnlyList<string>> GetModulePermissionClaimsAsync(
+            Guid userId, UserRole role, CancellationToken cancellationToken = default)
+        {
+            var (_, roleDefinitionId) = await ResolvePortalAndRoleAsync(userId, role, cancellationToken);
+            if (roleDefinitionId is not { } id)
+            {
+                return [];
+            }
+
+            var grants = await _unitOfWork.Repository<MenuPermission>().Query()
+                .Include(p => p.MenuItem)
+                .Where(p => p.RoleDefinitionId == id)
+                .ToListAsync(cancellationToken);
+
+            // Module-aggregated enforcement: every [HasPermission] check still reads a
+            // "Module:Action" claim, so a menu's grant is rolled up (OR'd) into whichever
+            // PermissionModule its MenuItem.RequiredModule names — a menu with no
+            // RequiredModule has nothing to aggregate into and is skipped here (it's a pure
+            // visibility gate; GetForUserAsync above already handles that). Two menu items
+            // sharing one module, only one granted CanEdit, both end up Edit-enabled at the
+            // API — a known, accepted limitation of keeping every existing [HasPermission]
+            // attribute unchanged rather than rewriting all of them to reference a specific
+            // menu item; the Roles & Menu Access page carries a note saying so.
+            var byModule = new Dictionary<PermissionModule, (bool View, bool Create, bool Edit, bool Delete, bool Approve)>();
+            foreach (var grant in grants)
+            {
+                if (grant.MenuItem.RequiredModule is not { } module)
+                {
+                    continue;
+                }
+
+                var current = byModule.TryGetValue(module, out var existing) ? existing : default;
+                byModule[module] = (
+                    current.View || grant.CanView,
+                    current.Create || grant.CanCreate,
+                    current.Edit || grant.CanEdit,
+                    current.Delete || grant.CanDelete,
+                    current.Approve || grant.CanApprove);
+            }
+
+            return ToClaims(byModule);
+        }
+
+        private static List<string> ToClaims(
+            IReadOnlyDictionary<PermissionModule, (bool View, bool Create, bool Edit, bool Delete, bool Approve)> byModule)
+        {
+            var claims = new List<string>();
+            foreach (var (module, grant) in byModule)
+            {
+                if (grant.View) claims.Add($"{module}:{PermissionAction.View}");
+                if (grant.Create) claims.Add($"{module}:{PermissionAction.Create}");
+                if (grant.Edit) claims.Add($"{module}:{PermissionAction.Edit}");
+                if (grant.Delete) claims.Add($"{module}:{PermissionAction.Delete}");
+                if (grant.Approve) claims.Add($"{module}:{PermissionAction.Approve}");
+            }
+
+            return claims;
+        }
+
         /// <summary>
         /// Portal key and governing RoleDefinition for a user, resolved together since Sub
         /// Admin needs the same lookup for both. Sub Admins take the portal from their assigned

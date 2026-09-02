@@ -6,10 +6,14 @@ namespace iucs.readernest.domain.Entities.Navigation
 {
     /// <summary>
     /// Direct menu-to-role (or menu-to-user, reserved for a future per-user override — unused
-    /// today) grant: View/Create/Edit/Delete rights on one <see cref="MenuItem"/>. Introduced
-    /// alongside the existing module-level RolePermission/SubAdminPermission tables as an
-    /// additive foundation — MenuService does not read this table yet, so it has no effect on
-    /// sidebar visibility or API authorization until a later phase wires it in.
+    /// today) grant: View/Create/Edit/Delete/Approve rights on one <see cref="MenuItem"/>. This
+    /// is now the real source of API authorization for Sub Admin/Teacher/Parent/AdmissionTeam:
+    /// AuthService.LoadPermissionClaimsAsync aggregates these rows (OR'd across every menu item
+    /// sharing a module) into the "Module:Action" JWT claims every [HasPermission] check reads —
+    /// see MenuService.GetModulePermissionClaimsAsync. RolePermission/SubAdminPermission remain
+    /// in the schema (still editable from the old Roles and Permissions page) but only
+    /// SubAdminPermission still feeds real claims, as an additive overlay purely so Access
+    /// Request approval keeps working.
     /// </summary>
     [Index(nameof(MenuItemId), nameof(RoleDefinitionId), IsUnique = true)]
     [Index(nameof(MenuItemId), nameof(UserId), IsUnique = true)]
@@ -36,6 +40,11 @@ namespace iucs.readernest.domain.Entities.Navigation
         public bool CanEdit { get; set; }
 
         public bool CanDelete { get; set; }
+
+        /// <summary>A distinct second sign-off action (leave/enrollment/access-request/refund/
+        /// cash-intent/fee-suspension review) — not implied by Edit, mirrors the module system's
+        /// own separate Approve action.</summary>
+        public bool CanApprove { get; set; }
 
         public bool IsActive { get; set; } = true;
     }

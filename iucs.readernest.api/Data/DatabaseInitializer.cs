@@ -886,9 +886,20 @@ namespace iucs.readernest.api.Data
                         continue;
                     }
 
-                    if (existing.Any(p => p.MenuItemId == item.Id && p.RoleDefinitionId == role.Id) ||
-                        context.MenuPermissions.Local.Any(p => p.MenuItemId == item.Id && p.RoleDefinitionId == role.Id))
+                    var existingRow = existing.FirstOrDefault(p => p.MenuItemId == item.Id && p.RoleDefinitionId == role.Id)
+                        ?? context.MenuPermissions.Local.FirstOrDefault(p => p.MenuItemId == item.Id && p.RoleDefinitionId == role.Id);
+
+                    if (existingRow is not null)
                     {
+                        // CanApprove didn't exist when earlier backfills ran, so a row created
+                        // before today carries CanApprove = false even where the source
+                        // RolePermission grants it — reconcile just that one flag, OR-in only
+                        // (never revokes anything an admin has since set in the grid).
+                        if (grant.CanApprove && !existingRow.CanApprove)
+                        {
+                            existingRow.CanApprove = true;
+                        }
+
                         continue;
                     }
 
@@ -900,6 +911,7 @@ namespace iucs.readernest.api.Data
                         CanCreate = grant.CanCreate,
                         CanEdit = grant.CanEdit,
                         CanDelete = grant.CanDelete,
+                        CanApprove = grant.CanApprove,
                     });
                 }
             }

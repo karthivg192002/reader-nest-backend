@@ -16,6 +16,8 @@ namespace iucs.readernest.application.Dto.Navigation
         public bool CanEdit { get; set; }
 
         public bool CanDelete { get; set; }
+
+        public bool CanApprove { get; set; }
     }
 
     /// <summary>One row of a role's full menu grant matrix, submitted together as a replace-all save.</summary>
@@ -30,5 +32,7 @@ namespace iucs.readernest.application.Dto.Navigation
         public bool CanEdit { get; set; }
 
         public bool CanDelete { get; set; }
+
+        public bool CanApprove { get; set; }
     }
 }

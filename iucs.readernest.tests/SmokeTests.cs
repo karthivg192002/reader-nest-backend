@@ -7643,6 +7643,104 @@ namespace iucs.readernest.tests
             await Assert.ThrowsAsync<NotFoundException>(() => service.GetForRoleAsync(Guid.NewGuid()));
         }
 
+        [Fact]
+        public async Task MenuPermissionService_SetAndGet_RoundTripsCanApprove()
+        {
+            var role = new RoleDefinition { Name = "front-desk-approve", DisplayName = "Front Desk" };
+            var menuItem = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "admin", Label = "Refunds", Path = "/admin/refunds", Icon = "Receipt",
+                SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.BillingFinance,
+            };
+            _db.Context.AddRange(role, menuItem);
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateMenuPermissionService();
+            await service.SetForRoleAsync(role.Id, [new SaveMenuPermissionItem { MenuItemId = menuItem.Id, CanView = true, CanApprove = true }]);
+
+            var afterSet = await service.GetForRoleAsync(role.Id);
+            var grant = Assert.Single(afterSet, r => r.MenuItemId == menuItem.Id);
+            Assert.True(grant.CanView);
+            Assert.True(grant.CanApprove);
+            Assert.False(grant.CanCreate);
+        }
+
+        /// <summary>
+        /// Module-aggregated enforcement (the decided architecture): every [HasPermission]
+        /// check still reads a "Module:Action" claim, so a menu's grant is rolled up into
+        /// whichever module its RequiredModule names. Two menu items sharing one module, only
+        /// one granted CanEdit, must still produce the module's Edit claim — proving and
+        /// locking in the documented, accepted limitation (not just leaving it as a comment).
+        /// </summary>
+        [Fact]
+        public async Task MenuService_GetModulePermissionClaims_AggregatesAcrossSiblingMenuItems()
+        {
+            var teacherRole = new RoleDefinition { Name = "teacher", DisplayName = "Teacher" };
+            var teacherUser = await _db.SeedUserAsync($"teacher-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+
+            var itemA = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "teacher", Label = "My Classes", Path = "/teacher", Icon = "LayoutDashboard",
+                SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.SessionCalendarManagement,
+            };
+            var itemB = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "teacher", Label = "Attendance", Path = "/teacher/attendance", Icon = "ClipboardCheck",
+                SectionOrder = 0, SortOrder = 1, IsActive = true, RequiredModule = PermissionModule.SessionCalendarManagement,
+            };
+            _db.Context.AddRange(teacherRole, itemA, itemB);
+            await _db.Context.SaveChangesAsync();
+
+            var menuPermissions = CreateMenuPermissionService();
+            await menuPermissions.SetForRoleAsync(teacherRole.Id,
+            [
+                new SaveMenuPermissionItem { MenuItemId = itemA.Id, CanView = true }, // no Edit here
+                new SaveMenuPermissionItem { MenuItemId = itemB.Id, CanView = true, CanEdit = true }, // Edit granted only here
+            ]);
+
+            var menuService = CreateMenuService();
+            var claims = await menuService.GetModulePermissionClaimsAsync(teacherUser.Id, UserRole.Teacher);
+
+            Assert.Contains($"{PermissionModule.SessionCalendarManagement}:{PermissionAction.View}", claims);
+            Assert.Contains($"{PermissionModule.SessionCalendarManagement}:{PermissionAction.Edit}", claims);
+        }
+
+        /// <summary>
+        /// A Sub Admin's real login claims are the union of their preset's Menu Access grants
+        /// and their own SubAdminPermission rows — the additive overlay that keeps Access
+        /// Request approval (which writes SubAdminPermission directly) actually taking effect.
+        /// </summary>
+        [Fact]
+        public async Task AuthService_Login_SubAdminClaims_UnionMenuAccessGrantsWithSubAdminPermissionOverlay()
+        {
+            var baseRole = new RoleDefinition { Name = "sub-admin", DisplayName = "Parent Relationship Manager" };
+            var menuItem = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "subadmin", Label = "Reports", Path = "/subadmin/reports", Icon = "BarChart3",
+                SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.ReportsAnalytics,
+            };
+            var subAdmin = await _db.SeedUserAsync("rm-approve@test.com", _hasher.Hash("4821"), UserRole.SubAdmin);
+            _db.Context.AddRange(baseRole, menuItem);
+            await _db.Context.SaveChangesAsync();
+
+            var menuPermissions = CreateMenuPermissionService();
+            await menuPermissions.SetForRoleAsync(baseRole.Id, [new SaveMenuPermissionItem { MenuItemId = menuItem.Id, CanView = true }]);
+
+            // The per-person overlay Access Request approval writes directly.
+            _db.Context.SubAdminPermissions.Add(new SubAdminPermission
+            {
+                UserId = subAdmin.Id,
+                Module = PermissionModule.BillingFinance,
+                CanView = true,
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var response = await CreateAuthService().LoginAsync(new LoginRequest { Email = "rm-approve@test.com", Pin = "4821" });
+
+            Assert.Contains($"{PermissionModule.ReportsAnalytics}:{PermissionAction.View}", response.Permissions);
+            Assert.Contains($"{PermissionModule.BillingFinance}:{PermissionAction.View}", response.Permissions);
+        }
+
         public void Dispose() => _db.Dispose();
     }
 }
