@@ -24,6 +24,21 @@ namespace iucs.readernest.application.Dto.Navigation
         public bool IsActive { get; set; }
 
         public PermissionModule? RequiredModule { get; set; }
+
+        /// <summary>
+        /// The signed-in caller's own Create/Edit/Delete/Approve rights on this menu item —
+        /// only ever populated by MenuService.GetForUserAsync (the /api/menus/mine response).
+        /// Every other MenuItemDto producer (the admin menu manager's list/create/update/delete)
+        /// has no single "viewer" to resolve these against, so they stay false there — harmless,
+        /// since nothing reads them outside the per-user sidebar response.
+        /// </summary>
+        public bool CanCreate { get; set; }
+
+        public bool CanEdit { get; set; }
+
+        public bool CanDelete { get; set; }
+
+        public bool CanApprove { get; set; }
     }
 
     /// <remarks>Lengths mirror the MenuItem entity's columns — see SaveIntegrationRequest for why.</remarks>

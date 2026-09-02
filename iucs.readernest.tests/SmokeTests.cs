@@ -2576,6 +2576,52 @@ namespace iucs.readernest.tests
         }
 
         /// <summary>
+        /// Reproduces the live bug: a Relationship Manager granted View-only on "Users" via
+        /// Menu Access still saw Add User / Edit Profile buttons, because GetForUserAsync
+        /// previously returned no per-item Create/Edit/Delete/Approve info at all for the
+        /// frontend to gate on. An explicit grant must restrict those flags exactly as
+        /// configured; an item nobody has touched in the grid must default to permitted (true)
+        /// so this change doesn't silently hide buttons across the whole app.
+        /// </summary>
+        [Fact]
+        public async Task Menu_ForUser_CarriesTheCallersOwnCreateEditDeleteApproveRights()
+        {
+            var role = new RoleDefinition { Name = "sub-admin", DisplayName = "Parent Relationship Manager" };
+            var configuredItem = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "admin", Label = "Users", Path = "/admin/users", Icon = "Users",
+                SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.UserManagement,
+            };
+            // This Sub Admin has no preset assigned, so their resolved home portal is the base
+            // "subadmin" fallback — the untouched item must live there to be visible at all
+            // under the legacy fallback path (the configured item above is reachable cross-
+            // portal purely because of its explicit grant, unrelated to home portal).
+            var untouchedItem = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "subadmin", Label = "Dashboard", Path = "/subadmin", Icon = "LayoutDashboard",
+                SectionOrder = 0, SortOrder = 1, IsActive = true, RequiredModule = null,
+            };
+            var subAdmin = await _db.SeedUserAsync($"rm-crud-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+            _db.Context.AddRange(role, configuredItem, untouchedItem);
+            await _db.Context.SaveChangesAsync();
+
+            var menuPermissions = CreateMenuPermissionService();
+            await menuPermissions.SetForRoleAsync(role.Id, [new SaveMenuPermissionItem { MenuItemId = configuredItem.Id, CanView = true }]);
+
+            var menu = await CreateMenuService().GetForUserAsync(subAdmin.Id, UserRole.SubAdmin, []);
+
+            var users = Assert.Single(menu, m => m.Path == configuredItem.Path);
+            Assert.False(users.CanCreate);
+            Assert.False(users.CanEdit);
+            Assert.False(users.CanDelete);
+            Assert.False(users.CanApprove);
+
+            var dashboard = Assert.Single(menu, m => m.Path == untouchedItem.Path);
+            Assert.True(dashboard.CanCreate);
+            Assert.True(dashboard.CanEdit);
+        }
+
+        /// <summary>
         /// Phase 3 of the menu/role redesign: once a RoleDefinition has an explicit
         /// MenuPermission row for a menu item, that grant is authoritative in both directions —
         /// it can hide an otherwise-always-visible (ungated) item or a module-permitted gated

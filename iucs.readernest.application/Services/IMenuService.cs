@@ -12,6 +12,9 @@ namespace iucs.readernest.application.Services
         /// exists (Menu Access), falling back to the legacy RequiredModule/View-grant gate for
         /// any item nobody has configured in the new grid yet. Admins bypass the legacy gate
         /// (not an explicit grant) so an unconfigured item never disappears from their own view.
+        /// Each returned MenuItemDto also carries the caller's own Create/Edit/Delete/Approve
+        /// rights on that item (true when unconfigured — an explicit grant is what restricts,
+        /// not the absence of one) for the frontend to gate its own buttons on.
         /// </summary>
         Task<IReadOnlyList<MenuItemDto>> GetForUserAsync(
             Guid userId,

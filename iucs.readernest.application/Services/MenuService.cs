@@ -63,7 +63,24 @@ namespace iucs.readernest.application.Services
                     ? grant.CanView
                     : m.Portal == key && (m.RequiredModule is null || isAdmin || viewableModules.Contains(m.RequiredModule.Value)));
 
-            return visible.Select(ToDto).ToList();
+            // Create/Edit/Delete/Approve for the frontend to gate its own buttons on (this app
+            // never did that before today — every admin page showed Add/Edit/Delete
+            // unconditionally). Same "explicit grant wins, otherwise nothing changes" rule as
+            // View's own fallback above, except the *unconfigured* default is permissive (true)
+            // rather than restrictive: unlike View, these actions have never been gated by
+            // anything before, so defaulting an untouched item to false would silently hide
+            // buttons across the whole app the moment this shipped. An explicit Menu Access
+            // grant (even one that's all-false) is what actually restricts them.
+            return visible.Select(m =>
+            {
+                grants.TryGetValue(m.Id, out var grant);
+                var dto = ToDto(m);
+                dto.CanCreate = grant?.CanCreate ?? true;
+                dto.CanEdit = grant?.CanEdit ?? true;
+                dto.CanDelete = grant?.CanDelete ?? true;
+                dto.CanApprove = grant?.CanApprove ?? true;
+                return dto;
+            }).ToList();
         }
 
         public async Task<IReadOnlyList<string>> GetModulePermissionClaimsAsync(
