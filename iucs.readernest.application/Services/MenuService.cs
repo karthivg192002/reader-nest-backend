@@ -31,9 +31,14 @@ namespace iucs.readernest.application.Services
             var isAdmin = role == UserRole.Admin;
             var (key, roleDefinitionId) = await ResolvePortalAndRoleAsync(userId, role, cancellationToken);
 
+            // Every active item, not just the caller's home portal — an explicit grant on a
+            // foreign-portal item (Menu Access) can make it reachable cross-portal (see
+            // RequireAuth's matching accessiblePortals check on the frontend). The legacy
+            // fallback below stays scoped to the home portal only, so this alone changes
+            // nothing for anyone who's never touched Menu Access.
             var items = await _unitOfWork.Repository<MenuItem>().Query()
-                .Where(m => m.Portal == key && m.IsActive)
-                .OrderBy(m => m.SectionOrder).ThenBy(m => m.SortOrder)
+                .Where(m => m.IsActive)
+                .OrderBy(m => m.Portal).ThenBy(m => m.SectionOrder).ThenBy(m => m.SortOrder)
                 .ToListAsync(cancellationToken);
 
             var grants = new Dictionary<Guid, MenuPermission>();
@@ -47,14 +52,16 @@ namespace iucs.readernest.application.Services
 
             // Phase 3 of the menu/role redesign: once a role has been explicitly configured
             // for a menu item via Menu Access, that grant is authoritative (whatever it says,
-            // including "hidden"). A menu item nobody has touched in the new grid yet — no row
-            // at all — keeps behaving exactly as before: always visible when unrequired, or
-            // gated by the caller's module-level View grant (Admin bypasses), so nothing
-            // regresses for menus the new page hasn't been used on.
+            // including "hidden"), regardless of which portal the item belongs to. A menu item
+            // nobody has touched in the new grid yet — no row at all — keeps behaving exactly
+            // as before: visible only within the caller's own home portal, when unrequired or
+            // gated by the caller's module-level View grant (Admin bypasses); a foreign-portal
+            // item with no explicit grant stays invisible, so nothing regresses for menus the
+            // new page hasn't been used on.
             var visible = items.Where(m =>
                 grants.TryGetValue(m.Id, out var grant)
                     ? grant.CanView
-                    : m.RequiredModule is null || isAdmin || viewableModules.Contains(m.RequiredModule.Value));
+                    : m.Portal == key && (m.RequiredModule is null || isAdmin || viewableModules.Contains(m.RequiredModule.Value)));
 
             return visible.Select(ToDto).ToList();
         }

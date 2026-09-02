@@ -56,7 +56,7 @@ namespace iucs.readernest.tests
         }
 
         private AuthService CreateAuthService() =>
-            new(_db.UnitOfWork, _hasher, new FakeTokenService(), _auditLog, _notifications, new ConfigurationBuilder().Build());
+            new(_db.UnitOfWork, _hasher, new FakeTokenService(), _auditLog, _notifications, new ConfigurationBuilder().Build(), CreateMenuService());
 
         private readonly FakeWhatsAppSender _whatsAppSender = new();
 
@@ -2673,6 +2673,48 @@ namespace iucs.readernest.tests
             // the base preset's explicit hide.
             var coordinatorMenu = await service.GetForUserAsync(coordinatorUser.Id, UserRole.SubAdmin, []);
             Assert.Contains(coordinatorMenu, m => m.Path == reportsItem.Path);
+        }
+
+        /// <summary>
+        /// A role can now be explicitly granted View on a menu item from a DIFFERENT portal
+        /// than its own home — the cross-portal access feature. The legacy fallback (no
+        /// explicit row) must stay scoped to the caller's home portal only, so a foreign-portal
+        /// item nobody has granted stays invisible, and the caller's own home-portal items are
+        /// unaffected either way.
+        /// </summary>
+        [Fact]
+        public async Task Menu_ForUser_ExplicitGrant_MakesAForeignPortalItemVisible_ButOnlyWhenGranted()
+        {
+            var teacherRole = new RoleDefinition { Name = "teacher", DisplayName = "Teacher" };
+            var teacherUser = await _db.SeedUserAsync($"teacher-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+
+            var homeItem = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "teacher", Label = "My Classes", Path = "/teacher", Icon = "LayoutDashboard",
+                SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = null,
+            };
+            var grantedForeignItem = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "admin", Label = "Courses", Path = "/admin/courses", Icon = "BookOpen",
+                SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.CourseBatchManagement,
+            };
+            var ungrantedForeignItem = new domain.Entities.Navigation.MenuItem
+            {
+                Portal = "admin", Label = "Billing & Finance", Path = "/admin/billing", Icon = "Receipt",
+                SectionOrder = 0, SortOrder = 1, IsActive = true, RequiredModule = null, // unrequired, but still a foreign portal
+            };
+            _db.Context.AddRange(teacherRole, homeItem, grantedForeignItem, ungrantedForeignItem);
+            await _db.Context.SaveChangesAsync();
+
+            var menuPermissions = CreateMenuPermissionService();
+            await menuPermissions.SetForRoleAsync(teacherRole.Id, [new SaveMenuPermissionItem { MenuItemId = grantedForeignItem.Id, CanView = true }]);
+
+            var service = CreateMenuService();
+            var menu = await service.GetForUserAsync(teacherUser.Id, UserRole.Teacher, []);
+
+            Assert.Contains(menu, m => m.Path == homeItem.Path);
+            Assert.Contains(menu, m => m.Path == grantedForeignItem.Path);
+            Assert.DoesNotContain(menu, m => m.Path == ungrantedForeignItem.Path);
         }
 
         [Fact]

@@ -19,5 +19,13 @@ namespace iucs.readernest.application.Dto.Auth
         /// their account type if none is set.
         /// </summary>
         public string DefaultRoute { get; set; } = null!;
+
+        /// <summary>
+        /// Every portal key this session may enter — the home portal plus any other
+        /// portal holding a menu item this role has been explicitly granted View on via
+        /// Menu Access. RequireAuth admits a route when its required portal is in this
+        /// list, letting a cross-portal grant actually open the page, not just show a link.
+        /// </summary>
+        public IReadOnlyList<string> AccessiblePortals { get; set; } = [];
     }
 }

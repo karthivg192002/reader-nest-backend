@@ -29,6 +29,7 @@ namespace iucs.readernest.application.Services
         private readonly IAuditLogService _auditLog;
         private readonly INotificationService _notificationService;
         private readonly IConfiguration _configuration;
+        private readonly IMenuService _menuService;
 
         public AuthService(
             IUnitOfWork unitOfWork,
@@ -36,7 +37,8 @@ namespace iucs.readernest.application.Services
             ITokenService tokenService,
             IAuditLogService auditLog,
             INotificationService notificationService,
-            IConfiguration configuration)
+            IConfiguration configuration,
+            IMenuService menuService)
         {
             _unitOfWork = unitOfWork;
             _passwordHasher = passwordHasher;
@@ -44,6 +46,7 @@ namespace iucs.readernest.application.Services
             _auditLog = auditLog;
             _notificationService = notificationService;
             _configuration = configuration;
+            _menuService = menuService;
         }
 
         public async Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default)
@@ -90,7 +93,8 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             var defaultRoute = await ResolveDefaultRouteAsync(user, cancellationToken);
-            return BuildResponse(user, permissions, token, defaultRoute);
+            var accessiblePortals = await ResolveAccessiblePortalsAsync(user, permissions, cancellationToken);
+            return BuildResponse(user, permissions, token, defaultRoute, accessiblePortals);
         }
 
         public async Task<LoginResponse> GetCurrentUserAsync(Guid userId, CancellationToken cancellationToken = default)
@@ -102,6 +106,7 @@ namespace iucs.readernest.application.Services
 
             var permissions = await LoadPermissionClaimsAsync(user, cancellationToken);
             var defaultRoute = await ResolveDefaultRouteAsync(user, cancellationToken);
+            var accessiblePortals = await ResolveAccessiblePortalsAsync(user, permissions, cancellationToken);
 
             // Re-mints a fresh token carrying these just-recomputed permission claims — the
             // original login token's claims are frozen at issue time, so without this, a
@@ -110,7 +115,7 @@ namespace iucs.readernest.application.Services
             // back in. The frontend swaps its stored token for this one on every call here
             // (SessionProvider already polls this endpoint on load and periodically).
             var token = _tokenService.CreateToken(user, permissions);
-            return BuildResponse(user, permissions, token, defaultRoute);
+            return BuildResponse(user, permissions, token, defaultRoute, accessiblePortals);
         }
 
         public async Task<CurrentAccessSnapshot?> GetCurrentAccessAsync(Guid userId, CancellationToken cancellationToken = default)
@@ -220,6 +225,28 @@ namespace iucs.readernest.application.Services
             };
         }
 
+        /// <summary>
+        /// Every portal this session may enter: the home portal MenuService.GetForUserAsync
+        /// already resolves internally, plus any other portal holding a menu item this
+        /// account's role has been explicitly granted View on via Menu Access — reuses that
+        /// same method rather than re-deriving the rule, just projects the distinct portals
+        /// out of whatever it returns.
+        /// </summary>
+        private async Task<IReadOnlyList<string>> ResolveAccessiblePortalsAsync(
+            User user, IReadOnlyList<string> permissions, CancellationToken cancellationToken)
+        {
+            var viewableModules = permissions
+                .Where(p => p.EndsWith($":{PermissionAction.View}", StringComparison.Ordinal))
+                .Select(p => Enum.TryParse<PermissionModule>(p.Split(':')[0], out var m) ? (PermissionModule?)m : null)
+                .Where(m => m.HasValue)
+                .Select(m => m!.Value)
+                .Distinct()
+                .ToList();
+
+            var menu = await _menuService.GetForUserAsync(user.Id, user.Role, viewableModules, cancellationToken);
+            return menu.Select(m => m.Portal).Distinct().ToList();
+        }
+
         /// <summary>System RoleDefinition name backing each fixed-portal UserRole's default grant.</summary>
         private static string? SystemRoleNameFor(UserRole role) => role switch
         {
@@ -278,7 +305,8 @@ namespace iucs.readernest.application.Services
             return claims;
         }
 
-        private static LoginResponse BuildResponse(User user, IReadOnlyList<string> permissions, TokenResult? token, string defaultRoute)
+        private static LoginResponse BuildResponse(
+            User user, IReadOnlyList<string> permissions, TokenResult? token, string defaultRoute, IReadOnlyList<string> accessiblePortals)
         {
             return new LoginResponse
             {
@@ -287,6 +315,7 @@ namespace iucs.readernest.application.Services
                 User = user.ToDto(),
                 Permissions = permissions,
                 DefaultRoute = defaultRoute,
+                AccessiblePortals = accessiblePortals,
             };
         }
     }
