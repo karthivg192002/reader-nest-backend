@@ -86,8 +86,11 @@ namespace iucs.readernest.application.Services
                     SessionsCompleted = teacherCompletedIds.Count,
                     TeacherNoShows = teacherSessions.Count(s => s.Status == SessionStatus.TeacherNoShow),
                     UpcomingSessions = teacherSessions.Count(s => s.Status == SessionStatus.Scheduled && s.ScheduledStartAtUtc > now),
+                    // Null (not a vacuous 100%) when there's no attendance data yet — a teacher
+                    // with zero completed sessions hasn't earned a perfect score, they just
+                    // haven't been measured. See the DTO's doc comment.
                     StudentAttendancePercent = teacherAttendance.Count == 0
-                        ? 100
+                        ? null
                         : Math.Round(100.0 * teacherAttendance.Count(a => a != AttendanceStatus.Absent) / teacherAttendance.Count, 1),
                     SummariesWritten = teacherSessions.Count(s => s.HasSummary),
                     LatestPayoutPeriodYear = latestPayout?.PeriodYear,
