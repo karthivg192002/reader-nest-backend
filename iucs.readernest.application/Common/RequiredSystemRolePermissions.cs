@@ -55,6 +55,13 @@ namespace iucs.readernest.application.Common
             // even on a real account with real demos. Confirmed live via network trace:
             // GET /api/sessions?fromUtc=...&toUtc=... → 403 for the admission role.
             new("admission", PermissionModule.SessionCalendarManagement, View: true),
+            // The Admission Dashboard's KPI tiles (Demos This Week, Demo->Enrollment Conversion,
+            // Pending Follow-ups, Revenue From Conversions) and Conversion Funnel chart all read
+            // GET /api/reports/dashboard-summary, gated on this module -- same root cause as the
+            // "sub-admin" grant above, just never applied to the AdmissionTeam system role itself.
+            // Confirmed live: a real AdmissionTeam account 403'd on this endpoint, showing
+            // "Couldn't load" on every KPI tile despite having real demos/leads to show.
+            new("admission", PermissionModule.ReportsAnalytics, View: true),
             // /management/revenue's course-wise breakdown reads GET /api/courses, which is
             // gated on this module, not ReportsAnalytics — without it the page's own API call
             // 403's and silently renders "No records found, ₹0 total" instead of the real
