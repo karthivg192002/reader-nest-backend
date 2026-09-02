@@ -152,7 +152,12 @@ namespace iucs.readernest.application.Dto.Reports
 
         public int UpcomingSessions { get; set; }
 
-        public double StudentAttendancePercent { get; set; }
+        /// <summary>Null when the teacher has no completed, attendance-marked sessions yet —
+        /// distinct from a real 0%. A vacuous "100" here used to make an idle teacher with zero
+        /// sessions delivered look fully utilized on the Management "Teacher Utilization" chart,
+        /// which reads this field as delivery-vs-capacity. Consumers should render null as
+        /// "No data" rather than defaulting it to any percentage.</summary>
+        public double? StudentAttendancePercent { get; set; }
 
         public int SummariesWritten { get; set; }
 
