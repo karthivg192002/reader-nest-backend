@@ -19,9 +19,9 @@ namespace iucs.readernest.api.Controllers
             _payoutService = payoutService;
         }
 
-        /// <summary>Visibility rule: admin (or granted sub-admin) sees all payouts.</summary>
+        /// <summary>Visibility rule: admin (or a role explicitly granted Payouts:View, e.g. via Roles &amp; Menu Access) sees all payouts.</summary>
         [HttpGet]
-        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
+        [HasPermission(PermissionModule.Payouts, PermissionAction.View)] // #6: payout/salary details are Admin-only unless explicitly granted
         public async Task<ActionResult<IReadOnlyList<PayoutDto>>> List(
             [FromQuery] int? year,
             [FromQuery] int? month,
@@ -40,9 +40,9 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _payoutService.ListForTeacherUserAsync(userId, cancellationToken));
         }
 
-        /// <summary>Admin correction to one accrued line item -- the only way to act on a RequiresReview flag. Only while the payout is still Pending.</summary>
+        /// <summary>Correction to one accrued line item -- the only way to act on a RequiresReview flag. Only while the payout is still Pending.</summary>
         [HttpPut("{id:guid}/items/{itemId:guid}")]
-        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
+        [HasPermission(PermissionModule.Payouts, PermissionAction.Edit)] // #6: payout/salary details are Admin-only unless explicitly granted
         public async Task<ActionResult<PayoutDto>> AdjustItem(
             Guid id,
             Guid itemId,
@@ -52,16 +52,16 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _payoutService.AdjustItemAsync(id, itemId, request, cancellationToken));
         }
 
-        /// <summary>Locks the month's total and emails the statement to the teacher.</summary>
+        /// <summary>Locks the month's total and emails the statement to the teacher. Gated on Approve, same as other consequential financial decisions (see InvoicesController).</summary>
         [HttpPost("{id:guid}/finalize")]
-        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
+        [HasPermission(PermissionModule.Payouts, PermissionAction.Approve)] // #6: payout/salary details are Admin-only unless explicitly granted
         public async Task<ActionResult<PayoutDto>> Finalize(Guid id, CancellationToken cancellationToken)
         {
             return Ok(await _payoutService.FinalizeAsync(id, cancellationToken));
         }
 
         [HttpPost("{id:guid}/mark-paid")]
-        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
+        [HasPermission(PermissionModule.Payouts, PermissionAction.Approve)] // #6: payout/salary details are Admin-only unless explicitly granted
         public async Task<ActionResult<PayoutDto>> MarkPaid(Guid id, CancellationToken cancellationToken)
         {
             return Ok(await _payoutService.MarkPaidAsync(id, cancellationToken));
@@ -80,7 +80,7 @@ namespace iucs.readernest.api.Controllers
         }
 
         [HttpGet]
-        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
+        [HasPermission(PermissionModule.Payouts, PermissionAction.View)] // #6: payout/salary details are Admin-only unless explicitly granted
         public async Task<ActionResult<IReadOnlyList<PayoutRateDto>>> List(
             [FromQuery] Guid? teacherProfileId,
             CancellationToken cancellationToken)
@@ -88,9 +88,9 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _payoutService.ListRatesAsync(teacherProfileId, cancellationToken));
         }
 
-        /// <summary>Configurable per-session rate by teacher and class duration.</summary>
+        /// <summary>Configurable per-session rate by teacher and class duration. A single upsert endpoint (new card or edit of an existing one), so gated on Edit — matches the frontend's "Configure"/row-edit actions, both of which call this.</summary>
         [HttpPost]
-        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
+        [HasPermission(PermissionModule.Payouts, PermissionAction.Edit)] // #6: payout/salary details are Admin-only unless explicitly granted
         public async Task<ActionResult<PayoutRateDto>> SetRate(
             SavePayoutRateRequest request,
             CancellationToken cancellationToken)
