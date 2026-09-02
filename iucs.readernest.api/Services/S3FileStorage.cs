@@ -85,15 +85,28 @@ namespace iucs.readernest.api.Services
             await content.CopyToAsync(buffered, cancellationToken);
             buffered.Position = 0;
 
-            await _client.PutObjectAsync(
-                new PutObjectRequest
-                {
-                    BucketName = _bucket,
-                    Key = key,
-                    InputStream = buffered,
-                    AutoCloseStream = false,
-                },
-                cancellationToken);
+            try
+            {
+                await _client.PutObjectAsync(
+                    new PutObjectRequest
+                    {
+                        BucketName = _bucket,
+                        Key = key,
+                        InputStream = buffered,
+                        AutoCloseStream = false,
+                    },
+                    cancellationToken);
+            }
+            catch (AmazonServiceException ex)
+            {
+                // Wraps auth/bucket/network failures from the S3-compatible endpoint --
+                // otherwise these surface as an opaque 500 with no indication that the
+                // problem is storage configuration (credentials, bucket, endpoint) rather
+                // than the upload itself. See ExternalServiceException's summary.
+                throw new ExternalServiceException(
+                    $"Could not upload to object storage ({ex.StatusCode}): {ex.Message}. " +
+                    "Check the Storage:S3 configuration (endpoint, credentials, bucket).");
+            }
 
             return new StoredFile { RelativePath = key, SizeBytes = buffered.Length };
         }
@@ -108,6 +121,12 @@ namespace iucs.readernest.api.Services
             catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
             {
                 return null;
+            }
+            catch (AmazonServiceException ex)
+            {
+                throw new ExternalServiceException(
+                    $"Could not read from object storage ({ex.StatusCode}): {ex.Message}. " +
+                    "Check the Storage:S3 configuration (endpoint, credentials, bucket).");
             }
         }
     }
