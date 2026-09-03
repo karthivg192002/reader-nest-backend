@@ -903,7 +903,7 @@ namespace iucs.readernest.application.Services
                 // token that's valid indefinitely — it dies with the class, not with the link.
                 session.ScheduledEndAtUtc.AddHours(2));
 
-            return new JitsiJoinDto { Room = session.MeetingRoomId, Domain = domain, Token = token };
+            return new JitsiJoinDto { Room = session.MeetingRoomId, Domain = domain, Token = token, ScheduledEndAtUtc = session.ScheduledEndAtUtc };
         }
 
         public async Task<ClassroomSettingsDto> GetClassroomSettingsAsync(CancellationToken cancellationToken = default)
