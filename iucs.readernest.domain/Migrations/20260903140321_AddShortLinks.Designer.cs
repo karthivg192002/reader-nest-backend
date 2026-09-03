@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using iucs.readernest.domain.Data;
@@ -11,9 +12,11 @@ using iucs.readernest.domain.Data;
 namespace iucs.readernest.domain.Migrations
 {
     [DbContext(typeof(ReaderNestDbContext))]
-    partial class ReaderNestDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260903140321_AddShortLinks")]
+    partial class AddShortLinks
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -2596,98 +2599,6 @@ namespace iucs.readernest.domain.Migrations
                     b.ToTable("menu_items");
                 });
 
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Navigation.MenuPermission", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
-
-                    b.Property<bool>("CanApprove")
-                        .HasColumnType("boolean")
-                        .HasColumnName("can_approve");
-
-                    b.Property<bool>("CanCreate")
-                        .HasColumnType("boolean")
-                        .HasColumnName("can_create");
-
-                    b.Property<bool>("CanDelete")
-                        .HasColumnType("boolean")
-                        .HasColumnName("can_delete");
-
-                    b.Property<bool>("CanEdit")
-                        .HasColumnType("boolean")
-                        .HasColumnName("can_edit");
-
-                    b.Property<bool>("CanView")
-                        .HasColumnType("boolean")
-                        .HasColumnName("can_view");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at_utc");
-
-                    b.Property<Guid?>("CreatedBy")
-                        .HasColumnType("uuid")
-                        .HasColumnName("created_by");
-
-                    b.Property<DateTime?>("DeletedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("deleted_at_utc");
-
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_active");
-
-                    b.Property<bool>("IsDeleted")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_deleted");
-
-                    b.Property<Guid>("MenuItemId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("menu_item_id");
-
-                    b.Property<Guid?>("RoleDefinitionId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("role_definition_id");
-
-                    b.Property<DateTime?>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at_utc");
-
-                    b.Property<Guid?>("UpdatedBy")
-                        .HasColumnType("uuid")
-                        .HasColumnName("updated_by");
-
-                    b.Property<Guid?>("UserId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("user_id");
-
-                    b.HasKey("Id")
-                        .HasName("pk_menu_permissions");
-
-                    b.HasIndex("RoleDefinitionId")
-                        .HasDatabaseName("ix_menu_permissions_role_definition_id");
-
-                    b.HasIndex("UserId")
-                        .HasDatabaseName("ix_menu_permissions_user_id");
-
-                    b.HasIndex("MenuItemId", "RoleDefinitionId")
-                        .IsUnique()
-                        .HasDatabaseName("ix_menu_permissions_menu_item_id_role_definition_id")
-                        .HasFilter("\"is_deleted\" = FALSE");
-
-                    b.HasIndex("MenuItemId", "UserId")
-                        .IsUnique()
-                        .HasDatabaseName("ix_menu_permissions_menu_item_id_user_id")
-                        .HasFilter("\"is_deleted\" = FALSE");
-
-                    b.ToTable("menu_permissions", t =>
-                        {
-                            t.HasCheckConstraint("ck_menu_permissions_owner", "role_definition_id IS NOT NULL OR user_id IS NOT NULL");
-                        });
-                });
-
             modelBuilder.Entity("iucs.readernest.domain.Entities.Notes.FloatingNote", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3880,6 +3791,70 @@ namespace iucs.readernest.domain.Migrations
                     b.ToTable("parent_profiles");
                 });
 
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Users.PermissionModuleDefinition", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at_utc");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("text")
+                        .HasColumnName("description");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<bool>("IsSystem")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_system");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("key");
+
+                    b.Property<string>("Label")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("label");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("integer")
+                        .HasColumnName("sort_order");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_permission_module_definitions");
+
+                    b.HasIndex("Key")
+                        .IsUnique()
+                        .HasDatabaseName("ix_permission_module_definitions_key")
+                        .HasFilter("\"is_deleted\" = FALSE");
+
+                    b.ToTable("permission_module_definitions");
+                });
+
             modelBuilder.Entity("iucs.readernest.domain.Entities.Users.PinResetToken", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4048,8 +4023,7 @@ namespace iucs.readernest.domain.Migrations
 
                     b.Property<string>("Module")
                         .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
+                        .HasColumnType("text")
                         .HasColumnName("module");
 
                     b.Property<Guid>("RoleDefinitionId")
@@ -4120,8 +4094,7 @@ namespace iucs.readernest.domain.Migrations
 
                     b.Property<string>("Module")
                         .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
+                        .HasColumnType("text")
                         .HasColumnName("module");
 
                     b.Property<DateTime?>("UpdatedAtUtc")
@@ -4849,34 +4822,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasConstraintName("fk_progress_reports_children_child_id");
 
                     b.Navigation("Child");
-                });
-
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Navigation.MenuPermission", b =>
-                {
-                    b.HasOne("iucs.readernest.domain.Entities.Navigation.MenuItem", "MenuItem")
-                        .WithMany()
-                        .HasForeignKey("MenuItemId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired()
-                        .HasConstraintName("fk_menu_permissions_menu_items_menu_item_id");
-
-                    b.HasOne("iucs.readernest.domain.Entities.Users.RoleDefinition", "RoleDefinition")
-                        .WithMany()
-                        .HasForeignKey("RoleDefinitionId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .HasConstraintName("fk_menu_permissions_role_definitions_role_definition_id");
-
-                    b.HasOne("iucs.readernest.domain.Entities.Users.User", "User")
-                        .WithMany()
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .HasConstraintName("fk_menu_permissions_users_user_id");
-
-                    b.Navigation("MenuItem");
-
-                    b.Navigation("RoleDefinition");
-
-                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Notes.FloatingNote", b =>

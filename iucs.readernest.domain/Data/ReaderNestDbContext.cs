@@ -111,6 +111,7 @@ namespace iucs.readernest.domain.Data
         public DbSet<MenuItem> MenuItems => Set<MenuItem>();
         public DbSet<MenuPermission> MenuPermissions => Set<MenuPermission>();
         public DbSet<Integration> Integrations => Set<Integration>();
+        public DbSet<ShortLink> ShortLinks => Set<ShortLink>();
 
         protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
         {
