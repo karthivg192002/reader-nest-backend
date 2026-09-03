@@ -17,6 +17,7 @@ namespace iucs.readernest.application
             services.AddSingleton<IClassroomPresenceTracker, ClassroomPresenceTracker>();
             services.AddSingleton<IPasswordHasher, BcryptPasswordHasher>();
             services.AddScoped<IAuditLogService, AuditLogService>();
+            services.AddScoped<IShortLinkService, ShortLinkService>();
             services.AddScoped<INotificationService, NotificationService>();
             services.AddScoped<IEmailTemplateService, EmailTemplateService>();
             services.AddScoped<IAuthService, AuthService>();

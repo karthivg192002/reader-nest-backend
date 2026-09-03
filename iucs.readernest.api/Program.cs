@@ -332,6 +332,21 @@ app.MapHub<iucs.readernest.api.Hubs.MonitoringHub>("/hubs/monitoring");
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok", timestampUtc = DateTime.UtcNow }));
 
+// Deliberately outside /api and unauthenticated -- the whole point of a short link is that
+// whoever receives it (a parent with no account, on any device) can just tap it. Redirects
+// straight to the real target (e.g. a personal Jitsi join URL with its own signed token)
+// rather than round-tripping through the SPA first.
+app.MapGet("/m/{slug}", async (
+    string slug,
+    iucs.readernest.application.Services.IShortLinkService shortLinks,
+    CancellationToken cancellationToken) =>
+{
+    var target = await shortLinks.ResolveAsync(slug, cancellationToken);
+    return target is null
+        ? Results.NotFound("This link has expired or doesn't exist.")
+        : Results.Redirect(target, permanent: false);
+});
+
 await DatabaseInitializer.InitializeAsync(app.Services, app.Configuration);
 
 app.Run();
