@@ -16,8 +16,18 @@ namespace iucs.readernest.application.Dto.Portal
 
         public double AttendancePercent { get; set; }
 
-        /// <summary>paid | due | overdue | suspended</summary>
+        /// <summary>paid | due | overdue | suspended -- genuinely this child's own status; a
+        /// sibling's unrelated overdue invoice never marks another child suspended.</summary>
         public string FeeStatus { get; set; } = "paid";
+
+        /// <summary>True when this specific child's access is blocked (their own suspension,
+        /// or an account-wide one) -- see FeeSuspension's doc comment on the two scopes.</summary>
+        public bool IsSuspended { get; set; }
+
+        /// <summary>The invoice that must be paid to unlock this child specifically. Null when
+        /// not suspended, or when blocked only by an account-wide suspension with no single
+        /// invoice to point at (see ParentDashboardDto.SuspendedInvoiceId for that case).</summary>
+        public Guid? SuspendedInvoiceId { get; set; }
     }
 
     public class ParentDashboardDto
@@ -26,9 +36,21 @@ namespace iucs.readernest.application.Dto.Portal
 
         public bool EnrollmentFormCompleted { get; set; }
 
-        /// <summary>Active fee suspension blocks session/content access and triggers the Pay Now popup.</summary>
+        /// <summary>True when at least one child is suspended -- see each child's own
+        /// IsSuspended for which. Kept for callers that only need "is anything blocked".</summary>
         public bool IsSuspended { get; set; }
 
+        /// <summary>True only when EVERY child on the account is currently suspended -- nothing
+        /// on the account is reachable, so the whole portal can be replaced with a single block
+        /// screen instead of a per-child one. False whenever at least one child still has full
+        /// access, even if others don't.</summary>
+        public bool AllChildrenSuspended { get; set; }
+
+        /// <summary>The invoice to pay to fully unblock the account when AllChildrenSuspended is
+        /// true and every affected child shares one common family-level (ChildId-null) invoice.
+        /// Null otherwise -- with multiple children, resolve each one's own
+        /// ParentChildSummaryDto.SuspendedInvoiceId instead of assuming a single invoice fixes
+        /// everything.</summary>
         public Guid? SuspendedInvoiceId { get; set; }
 
         public IReadOnlyList<ParentChildSummaryDto> Children { get; set; } = [];

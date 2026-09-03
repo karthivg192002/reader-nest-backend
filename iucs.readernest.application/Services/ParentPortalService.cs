@@ -30,16 +30,24 @@ namespace iucs.readernest.application.Services
         {
             var parent = await GetParentAsync(parentUserId, cancellationToken);
 
-            var suspension = await _unitOfWork.Repository<FeeSuspension>().FirstOrDefaultAsync(
-                s => s.ParentProfileId == parent.Id && s.Status == SuspensionStatus.Active, cancellationToken);
+            // Loaded once for the whole sibling group and matched per child in memory below --
+            // same reasoning as the batch/session/attendance queries further down. A suspension
+            // with ChildId null applies to every child; one with ChildId set only to that child.
+            var activeSuspensions = await _unitOfWork.Repository<FeeSuspension>().Query()
+                .Where(s => s.ParentProfileId == parent.Id && s.Status == SuspensionStatus.Active)
+                .ToListAsync(cancellationToken);
+            var accountWideSuspension = activeSuspensions.FirstOrDefault(s => s.ChildId is null);
 
-            var hasOverdue = await _unitOfWork.Repository<Invoice>().ExistsAsync(
-                i => i.ParentProfileId == parent.Id && i.Status == InvoiceStatus.Overdue, cancellationToken);
-            var hasDue = await _unitOfWork.Repository<Invoice>().ExistsAsync(
-                i => i.ParentProfileId == parent.Id
-                     && (i.Status == InvoiceStatus.Pending || i.Status == InvoiceStatus.PartiallyPaid),
-                cancellationToken);
-            var accountFeeStatus = suspension is not null ? "suspended" : hasOverdue ? "overdue" : hasDue ? "due" : "paid";
+            // Same reasoning: per-child invoice status (a sibling's overdue invoice must never
+            // read as *this* child's own status), plus family-level (ChildId null) invoices,
+            // which affect every child the same way an account-wide suspension does.
+            var invoiceStatusByChild = await _unitOfWork.Repository<Invoice>().Query()
+                .Where(i => i.ParentProfileId == parent.Id)
+                .Select(i => new { i.ChildId, i.Status })
+                .ToListAsync(cancellationToken);
+            var familyLevelHasOverdue = invoiceStatusByChild.Any(i => i.ChildId is null && i.Status == InvoiceStatus.Overdue);
+            var familyLevelHasDue = invoiceStatusByChild.Any(i => i.ChildId is null
+                && (i.Status == InvoiceStatus.Pending || i.Status == InvoiceStatus.PartiallyPaid));
 
             var children = await _unitOfWork.Repository<Child>().Query()
                 .Where(c => c.ParentProfileId == parent.Id)
@@ -127,6 +135,12 @@ namespace iucs.readernest.application.Services
                     ? 100
                     : Math.Round(100.0 * attendance.Present / attendance.Total, 1);
 
+                var childSuspension = accountWideSuspension ?? activeSuspensions.FirstOrDefault(s => s.ChildId == child.Id);
+                var childHasOverdue = familyLevelHasOverdue || invoiceStatusByChild.Any(i => i.ChildId == child.Id && i.Status == InvoiceStatus.Overdue);
+                var childHasDue = familyLevelHasDue || invoiceStatusByChild.Any(i => i.ChildId == child.Id
+                    && (i.Status == InvoiceStatus.Pending || i.Status == InvoiceStatus.PartiallyPaid));
+                var childFeeStatus = childSuspension is not null ? "suspended" : childHasOverdue ? "overdue" : childHasDue ? "due" : "paid";
+
                 summaries.Add(new ParentChildSummaryDto
                 {
                     ChildId = child.Id,
@@ -135,16 +149,20 @@ namespace iucs.readernest.application.Services
                     ClassesCompleted = completed,
                     ClassesRemaining = upcoming,
                     AttendancePercent = attendancePercent,
-                    FeeStatus = accountFeeStatus,
+                    FeeStatus = childFeeStatus,
+                    IsSuspended = childSuspension is not null,
+                    SuspendedInvoiceId = childSuspension?.InvoiceId,
                 });
             }
 
+            var allSuspended = children.Count > 0 && summaries.All(c => c.IsSuspended);
             return new ParentDashboardDto
             {
                 ParentProfileId = parent.Id,
                 EnrollmentFormCompleted = parent.EnrollmentFormCompleted,
-                IsSuspended = suspension is not null,
-                SuspendedInvoiceId = suspension?.InvoiceId,
+                IsSuspended = summaries.Any(c => c.IsSuspended),
+                AllChildrenSuspended = allSuspended,
+                SuspendedInvoiceId = allSuspended ? accountWideSuspension?.InvoiceId : null,
                 Children = summaries,
             };
         }
@@ -221,10 +239,11 @@ namespace iucs.readernest.application.Services
         {
             var parent = await GetParentAsync(parentUserId, cancellationToken);
 
-            // Fee suspension blocks content access until payment or admin restoration
-            var suspended = await _unitOfWork.Repository<FeeSuspension>().ExistsAsync(
-                s => s.ParentProfileId == parent.Id && s.Status == SuspensionStatus.Active, cancellationToken);
-            if (suspended)
+            // Account-wide suspension (family-level invoice overdue) blocks every child's
+            // content outright. A per-child suspension only blocks resources reachable through
+            // THAT child's own batches -- filtered below rather than thrown here, since a
+            // sibling's fees being current must still see their own resources.
+            if (await SuspensionCheck.IsAccountBlockedAsync(_unitOfWork, parent.Id, cancellationToken))
             {
                 throw new DomainValidationException("Content access is suspended until the pending fee is settled.");
             }
@@ -235,10 +254,20 @@ namespace iucs.readernest.application.Services
                 .Select(a => a.Resource)
                 .ToListAsync(cancellationToken);
 
-            // Multi-batch visibility: resources the teacher made visible to a batch reach
-            // every parent with an actively enrolled child in that batch (no grant needed).
+            // Multi-batch visibility: resources the teacher made visible to a batch reach every
+            // parent with an actively enrolled, non-suspended child in that batch (no grant
+            // needed). ResourceAccess (granted, above) has no ChildId to filter by, so a direct
+            // grant stays visible regardless of which child triggered a per-child suspension --
+            // a known, narrow gap versus the batch-derived list below, which resolves cleanly.
+            var suspendedChildIds = (await _unitOfWork.Repository<FeeSuspension>().Query()
+                    .Where(s => s.ParentProfileId == parent.Id && s.Status == SuspensionStatus.Active && s.ChildId != null)
+                    .Select(s => s.ChildId!.Value)
+                    .ToListAsync(cancellationToken))
+                .ToHashSet();
             var enrolledBatchIds = _unitOfWork.Repository<BatchEnrollment>().Query()
-                .Where(e => e.Status == EnrollmentStatus.Active && e.Child.ParentProfileId == parent.Id)
+                .Where(e => e.Status == EnrollmentStatus.Active
+                    && e.Child.ParentProfileId == parent.Id
+                    && !suspendedChildIds.Contains(e.ChildId))
                 .Select(e => e.BatchId);
             var batchVisible = await _unitOfWork.Repository<ResourceBatchVisibility>().Query()
                 .Where(v => enrolledBatchIds.Contains(v.BatchId))
@@ -272,9 +301,7 @@ namespace iucs.readernest.application.Services
         {
             var parent = await GetParentAsync(parentUserId, cancellationToken);
 
-            var suspended = await _unitOfWork.Repository<FeeSuspension>().ExistsAsync(
-                s => s.ParentProfileId == parent.Id && s.Status == SuspensionStatus.Active, cancellationToken);
-            if (suspended)
+            if (await SuspensionCheck.IsAccountBlockedAsync(_unitOfWork, parent.Id, cancellationToken))
             {
                 throw new DomainValidationException("Content access is suspended until the pending fee is settled.");
             }
@@ -291,13 +318,27 @@ namespace iucs.readernest.application.Services
             var resource = direct?.Resource;
             if (resource is null)
             {
-                var enrolledBatchIds = _unitOfWork.Repository<BatchEnrollment>().Query()
+                // A direct grant (ResourceAccess) has no ChildId to check per-child, so only
+                // this batch-visibility path can resolve which child grants access -- and
+                // therefore whether it's blocked by THAT child's own suspension specifically.
+                var enrolledBatches = await _unitOfWork.Repository<BatchEnrollment>().Query()
                     .Where(e => e.Status == EnrollmentStatus.Active && e.Child.ParentProfileId == parent.Id)
-                    .Select(e => e.BatchId);
-                resource = await _unitOfWork.Repository<ResourceBatchVisibility>().Query()
+                    .Select(e => new { e.BatchId, e.ChildId })
+                    .ToListAsync(cancellationToken);
+                var enrolledBatchIds = enrolledBatches.Select(e => e.BatchId).ToList();
+                var candidate = await _unitOfWork.Repository<ResourceBatchVisibility>().Query()
+                    .Include(v => v.Resource)
                     .Where(v => v.ResourceId == resourceId && enrolledBatchIds.Contains(v.BatchId))
-                    .Select(v => v.Resource)
                     .FirstOrDefaultAsync(cancellationToken);
+                if (candidate is not null)
+                {
+                    var grantingChildId = enrolledBatches.First(e => e.BatchId == candidate.BatchId).ChildId;
+                    if (await SuspensionCheck.IsChildBlockedAsync(_unitOfWork, parent.Id, grantingChildId, cancellationToken))
+                    {
+                        throw new DomainValidationException("Content access is suspended until the pending fee is settled.");
+                    }
+                }
+                resource = candidate?.Resource;
             }
 
             if (resource is null)
@@ -321,18 +362,32 @@ namespace iucs.readernest.application.Services
             var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken)
                 ?? throw new NotFoundException(nameof(ClassSession), sessionId);
 
-            var hasChildInBatch = session.BatchId.HasValue && await _unitOfWork.Repository<BatchEnrollment>().Query()
-                .AnyAsync(e => e.BatchId == session.BatchId.Value
-                    && e.Status == EnrollmentStatus.Active
-                    && e.Child.ParentProfileId == parent.Id, cancellationToken);
-            if (!hasChildInBatch)
+            var childIdsInBatch = session.BatchId.HasValue
+                ? await _unitOfWork.Repository<BatchEnrollment>().Query()
+                    .Where(e => e.BatchId == session.BatchId.Value
+                        && e.Status == EnrollmentStatus.Active
+                        && e.Child.ParentProfileId == parent.Id)
+                    .Select(e => e.ChildId)
+                    .ToListAsync(cancellationToken)
+                : [];
+            if (childIdsInBatch.Count == 0)
             {
                 throw new NotFoundException("This session's recordings have not been shared with your account.");
             }
 
-            var suspended = await _unitOfWork.Repository<FeeSuspension>().ExistsAsync(
-                s => s.ParentProfileId == parent.Id && s.Status == SuspensionStatus.Active, cancellationToken);
-            if (suspended)
+            // A batch can hold more than one of this parent's children (siblings sharing a
+            // batch) -- blocked only if EVERY one of them is currently suspended; one sibling's
+            // fees being current is enough to keep this recording reachable.
+            var anyChildAllowed = false;
+            foreach (var childId in childIdsInBatch)
+            {
+                if (!await SuspensionCheck.IsChildBlockedAsync(_unitOfWork, parent.Id, childId, cancellationToken))
+                {
+                    anyChildAllowed = true;
+                    break;
+                }
+            }
+            if (!anyChildAllowed)
             {
                 throw new DomainValidationException("Content access is suspended until the pending fee is settled.");
             }

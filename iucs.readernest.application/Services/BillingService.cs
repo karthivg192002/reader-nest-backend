@@ -771,16 +771,18 @@ namespace iucs.readernest.application.Services
                 invoice.Status = InvoiceStatus.Paid;
                 invoice.PaidAtUtc = DateTime.UtcNow;
 
-                // Access restoration: full payment on THIS invoice auto-lifts any active fee
-                // suspension for the parent — but only when nothing else is outstanding. A
-                // suspension is one row per parent (it can cover several overdue invoices at
-                // once, see BillingBackgroundService), so lifting it just because one of
-                // several overdue invoices got paid would silently restore access while the
-                // parent still owes money on another invoice.
+                // Access restoration: full payment on THIS invoice auto-lifts the matching fee
+                // suspension -- but only when nothing else in that same scope is outstanding.
+                // A child-specific invoice (ChildId set) only ever checks/lifts that child's own
+                // suspension; a family-level invoice (ChildId null) only checks/lifts the
+                // account-wide one. Paying off your own overdue invoice must never silently
+                // restore a sibling's access (or vice versa) -- see FeeSuspension's own doc
+                // comment on why suspensions are scoped this way.
                 var hasOtherOverdueInvoice = await _unitOfWork.Repository<Invoice>().ExistsAsync(
                     i => i.ParentProfileId == invoice.ParentProfileId
                         && i.Id != invoice.Id
-                        && i.Status == InvoiceStatus.Overdue,
+                        && i.Status == InvoiceStatus.Overdue
+                        && i.ChildId == invoice.ChildId,
                     cancellationToken);
 
                 if (!hasOtherOverdueInvoice)
@@ -788,7 +790,9 @@ namespace iucs.readernest.application.Services
                     // TrackedQuery() fetches every matching row already tracked, so each is
                     // mutated in place with no extra per-row round trip to re-fetch it.
                     var suspensions = await _unitOfWork.Repository<FeeSuspension>().TrackedQuery()
-                        .Where(s => s.ParentProfileId == invoice.ParentProfileId && s.Status == SuspensionStatus.Active)
+                        .Where(s => s.ParentProfileId == invoice.ParentProfileId
+                            && s.Status == SuspensionStatus.Active
+                            && s.ChildId == invoice.ChildId)
                         .ToListAsync(cancellationToken);
                     foreach (var suspension in suspensions)
                     {
