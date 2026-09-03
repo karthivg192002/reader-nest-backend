@@ -722,6 +722,30 @@ namespace iucs.readernest.application.Services
             return await GetAsync(bookingId, cancellationToken);
         }
 
+        /// <summary>
+        /// The parent's join link for this demo (plus the moment it stops working), for staff to
+        /// copy and share manually (WhatsApp, SMS) instead of relying on the email actually
+        /// landing. Same room and link-building as the email; does not mutate anything, so unlike
+        /// ResendLinkAsync it does not self-heal a pre-fixed-link booking's room -- call
+        /// ResendLinkAsync first if that matters here.
+        /// </summary>
+        public async Task<(string JoinUrl, DateTime ExpiresAtUtc)> GetJoinLinkAsync(Guid bookingId, CancellationToken cancellationToken = default)
+        {
+            var booking = await _unitOfWork.Repository<DemoBooking>().Query()
+                .Include(b => b.ClassSession)
+                .FirstOrDefaultAsync(b => b.Id == bookingId, cancellationToken)
+                ?? throw new NotFoundException(nameof(DemoBooking), bookingId);
+
+            if (booking.ClassSession is not { } session)
+            {
+                throw new DomainValidationException("This booking has no linked class session to build a link for.");
+            }
+
+            var expiresAtUtc = session.ScheduledEndAtUtc.AddHours(2);
+            var joinUrl = await BuildDemoJoinUrlAsync(session, booking.ParentName, booking.ParentEmail, moderator: false, cancellationToken);
+            return (joinUrl, expiresAtUtc);
+        }
+
         public async Task<IReadOnlyList<TeacherWorkloadDto>> GetTeacherWorkloadAsync(
             Guid bookingId,
             CancellationToken cancellationToken = default)

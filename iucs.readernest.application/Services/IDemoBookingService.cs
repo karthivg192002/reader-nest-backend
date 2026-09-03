@@ -55,6 +55,9 @@ namespace iucs.readernest.application.Services
         /// </summary>
         Task<DemoBookingDto> ResendLinkAsync(Guid bookingId, CancellationToken cancellationToken = default);
 
+        /// <summary>The parent's join link for this demo (and its expiry), for staff to copy and share manually.</summary>
+        Task<(string JoinUrl, DateTime ExpiresAtUtc)> GetJoinLinkAsync(Guid bookingId, CancellationToken cancellationToken = default);
+
         /// <summary>
         /// Every active teacher's load around the booking's slot, so staff can see who's
         /// free/light before overriding the assignment — not just a blind name dropdown.

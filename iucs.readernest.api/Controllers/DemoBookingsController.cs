@@ -122,6 +122,25 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _demoBookingService.ResendLinkAsync(id, cancellationToken));
         }
 
+        /// <summary>
+        /// A short, shareable link to the parent's join link for this demo -- the raw form
+        /// carries a full signed JWT in its fragment, which reads as broken/suspicious pasted
+        /// into WhatsApp or email. For staff to copy and share manually.
+        /// </summary>
+        [HttpGet("{id:guid}/join-link")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.View)]
+        public async Task<ActionResult<object>> GetJoinLink(
+            Guid id,
+            [FromServices] IShortLinkService shortLinks,
+            CancellationToken cancellationToken)
+        {
+            var (joinUrl, expiresAtUtc) = await _demoBookingService.GetJoinLinkAsync(id, cancellationToken);
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var slug = await shortLinks.CreateAsync(joinUrl, expiresAtUtc, userId, cancellationToken);
+            var apiBaseUrl = $"{Request.Scheme}://{Request.Host}";
+            return Ok(new { joinUrl = $"{apiBaseUrl}/m/{slug}", expiresAtUtc });
+        }
+
         /// <summary>Every active teacher's load around this booking's slot, for the reassignment page.</summary>
         [HttpGet("{id:guid}/teacher-workload")]
         [HasPermission(PermissionModule.Admission, PermissionAction.View)]
