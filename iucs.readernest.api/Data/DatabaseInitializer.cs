@@ -58,6 +58,7 @@ namespace iucs.readernest.api.Data
             await ReconcileWelcomeCredentialsPinTemplateAsync(context);
             await EnsureEmailTemplatesMenuAsync(context);
             await EnsureProgressReportEmailTemplateAsync(context);
+            await EnsureDemoScheduledTeacherEmailTemplateAsync(context);
             await EnsurePinResetEmailTemplateAsync(context);
             await EnsureAccessRequestEmailTemplatesAsync(context);
             await ReconcileOrgNameEmailTemplatesAsync(context);
@@ -1479,6 +1480,34 @@ namespace iucs.readernest.api.Data
         }
 
         /// <summary>
+        /// SeedEmailTemplatesAsync is insert-only, so a live DB that predates the fixed
+        /// per-teacher demo meeting link feature never picks this up on its own — inserts just
+        /// the "demo-scheduled-teacher" row if missing, mirroring EnsureProgressReportEmailTemplateAsync.
+        /// </summary>
+        private static async Task EnsureDemoScheduledTeacherEmailTemplateAsync(ReaderNestDbContext context)
+        {
+            if (context.EmailTemplates.Local.Any(t => t.Key == "demo-scheduled-teacher") ||
+                await context.EmailTemplates.AnyAsync(t => t.Key == "demo-scheduled-teacher"))
+            {
+                return;
+            }
+
+            var seed = EmailTemplateSeedData.All.First(s => s.Key == "demo-scheduled-teacher");
+            context.EmailTemplates.Add(new EmailTemplate
+            {
+                Key = seed.Key,
+                Name = seed.Name,
+                Description = seed.Description,
+                Category = seed.Category,
+                Subject = seed.Subject,
+                HtmlBody = seed.HtmlBody,
+                PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders),
+                IsActive = true,
+                IsSystem = true,
+            });
+        }
+
+        /// <summary>
         /// SeedEmailTemplatesAsync is insert-only, so a live DB that predates the self-service
         /// PIN reset feature never picks it up on its own — inserts just the "pin-reset" row
         /// if missing, mirroring EnsureProgressReportEmailTemplateAsync.
@@ -1572,7 +1601,7 @@ namespace iucs.readernest.api.Data
         /// </summary>
         private static async Task ReconcileJoinLinkEmailTemplatesAsync(ReaderNestDbContext context)
         {
-            foreach (var seed in EmailTemplateSeedData.All.Where(s => s.Key is "demo-confirmed" or "session-reminder-parent"))
+            foreach (var seed in EmailTemplateSeedData.All.Where(s => s.Key is "demo-confirmed" or "session-reminder-parent" or "demo-teacher-assigned"))
             {
                 var existing = await context.EmailTemplates.FirstOrDefaultAsync(t => t.Key == seed.Key);
                 if (existing is null || existing.HtmlBody.Contains("{{JoinUrl}}"))

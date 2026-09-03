@@ -49,6 +49,13 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Manually re-sends the demo's join link to the parent, every extra invitee, and the
+        /// assigned teacher — for when a parent reports never getting (or losing) the original
+        /// confirmation email. Always uses the teacher's current fixed personal room.
+        /// </summary>
+        Task<DemoBookingDto> ResendLinkAsync(Guid bookingId, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Every active teacher's load around the booking's slot, so staff can see who's
         /// free/light before overriding the assignment — not just a blind name dropdown.
         /// </summary>

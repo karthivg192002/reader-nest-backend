@@ -114,6 +114,14 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _demoBookingService.ReassignTeacherAsync(id, request, cancellationToken));
         }
 
+        /// <summary>Manually re-send the demo's join link to the parent, invitees and teacher.</summary>
+        [HttpPost("{id:guid}/resend-link")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<DemoBookingDto>> ResendLink(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _demoBookingService.ResendLinkAsync(id, cancellationToken));
+        }
+
         /// <summary>Every active teacher's load around this booking's slot, for the reassignment page.</summary>
         [HttpGet("{id:guid}/teacher-workload")]
         [HasPermission(PermissionModule.Admission, PermissionAction.View)]
