@@ -395,6 +395,7 @@ namespace iucs.readernest.application.Services
             query
                 .Include(i => i.Child)
                 .Include(i => i.Course)
+                .Include(i => i.Department)
                 .Include(i => i.ParentProfile).ThenInclude(p => p.User)
                 .Include(i => i.Subscription).ThenInclude(s => s!.PackagePlan).ThenInclude(p => p.Course);
 

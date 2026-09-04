@@ -34,7 +34,8 @@ namespace iucs.readernest.api.Controllers
             [FromQuery] Guid? batchId,
             CancellationToken cancellationToken)
         {
-            return Ok(await _sessionService.ListAsync(fromUtc, toUtc, teacherProfileId, batchId, cancellationToken));
+            return Ok(await _sessionService.ListAsync(
+                AsUtc(fromUtc), AsUtc(toUtc), teacherProfileId, batchId, cancellationToken));
         }
 
         /// <summary>Teacher dashboard agenda: the caller's own sessions.</summary>
@@ -46,8 +47,16 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-            return Ok(await _sessionService.ListForTeacherUserAsync(userId, fromUtc, toUtc, cancellationToken));
+            return Ok(await _sessionService.ListForTeacherUserAsync(userId, AsUtc(fromUtc), AsUtc(toUtc), cancellationToken));
         }
+
+        // Model binding parses a bare date/no-offset query value (e.g. "2026-01-01") as
+        // Kind=Unspecified, which Npgsql then refuses to compare against a timestamptz
+        // column (a 500, not a friendly 400). The frontend always sends a full ISO instant
+        // via toISOString(), which binds as Kind=Utc already, so this is a no-op for real
+        // traffic and only hardens the endpoint against a malformed/hand-built query string.
+        private static DateTime AsUtc(DateTime value) =>
+            value.Kind == DateTimeKind.Utc ? value : DateTime.SpecifyKind(value, DateTimeKind.Utc);
 
         /// <summary>Any session by id — staff-scoped for the same reason as the list above.</summary>
         [HttpGet("{id:guid}")]

@@ -499,12 +499,15 @@ namespace iucs.readernest.api.Data
 
         /// <summary>
         /// Removes menu items retired after the initial seed (the seed early-returns once
-        /// any menu exists, so removals need their own idempotent pass). Currently drops the
-        /// Coordinator "Scheduling" screen — the coordinator role is monitor-only.
+        /// any menu exists, so removals need their own idempotent pass). Drops the
+        /// Coordinator "Scheduling" screen — the coordinator role is monitor-only — and the
+        /// Teacher "Live Classroom" item, which hardcoded a demo-only mock session id
+        /// ("/teacher/live/s-1") that always 404s in real API mode; "Start Class" on My
+        /// Classes is the one entry point that actually knows which session/room to join.
         /// </summary>
         private static async Task RemoveRetiredMenusAsync(ReaderNestDbContext context)
         {
-            var retiredPaths = new[] { "/coordinator/scheduling" };
+            var retiredPaths = new[] { "/coordinator/scheduling", "/teacher/live/s-1" };
             var stale = await context.MenuItems.Where(m => retiredPaths.Contains(m.Path)).ToListAsync();
             if (stale.Count > 0)
             {
@@ -547,7 +550,6 @@ namespace iucs.readernest.api.Data
             ("admin", "System", "Settings & Branding", "/admin/settings", "Settings", PermissionModule.Settings.ToString()),
             ("teacher", null, "Dashboard", "/teacher", "LayoutDashboard", null),
             ("teacher", "Teaching", "My Classes", "/teacher/classes", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
-            ("teacher", "Teaching", "Live Classroom", "/teacher/live/s-1", "Video", PermissionModule.SessionCalendarManagement.ToString()),
             ("teacher", "Teaching", "Attendance & Records", "/teacher/attendance", "ClipboardList", PermissionModule.SessionCalendarManagement.ToString()),
             ("teacher", "Teaching", "Demo Feedback", "/teacher/demo-feedback", "ClipboardCheck", PermissionModule.SessionCalendarManagement.ToString()),
             ("teacher", "Teaching", "Student Doubts", "/teacher/doubts", "MessageCircleQuestion", PermissionModule.Communication.ToString()),
