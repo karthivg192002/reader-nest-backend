@@ -73,6 +73,15 @@ namespace iucs.readernest.api.Controllers
             return NoContent();
         }
 
+        /// <summary>Removes a mistaken/test child record. Refused if it still has an active enrolment or unpaid invoice.</summary>
+        [HttpDelete("students/{childId:guid}")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.Delete)]
+        public async Task<IActionResult> RemoveStudent(Guid childId, CancellationToken cancellationToken)
+        {
+            await _enrollmentService.RemoveChildAsync(childId, cancellationToken);
+            return NoContent();
+        }
+
         /// <summary>The signed-in user's own account (any role) — for the Profile screen.</summary>
         [HttpGet("me")]
         [Microsoft.AspNetCore.Authorization.Authorize]
