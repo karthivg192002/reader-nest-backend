@@ -131,8 +131,12 @@ namespace iucs.readernest.application.Services
                 }
 
                 attendanceByChild.TryGetValue(child.Id, out var attendance);
-                var attendancePercent = attendance is null || attendance.Total == 0
-                    ? 100
+                // Null (not a vacuous 100%) when there's no attendance data yet -- a child
+                // with zero completed sessions hasn't earned a perfect score, they just
+                // haven't been measured. Same fix already applied to teacher utilization
+                // (ReportsService's TeacherPerformanceDto) -- see that DTO's own doc comment.
+                double? attendancePercent = attendance is null || attendance.Total == 0
+                    ? null
                     : Math.Round(100.0 * attendance.Present / attendance.Total, 1);
 
                 var childSuspension = accountWideSuspension ?? activeSuspensions.FirstOrDefault(s => s.ChildId == child.Id);

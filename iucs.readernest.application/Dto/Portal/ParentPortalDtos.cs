@@ -14,7 +14,9 @@ namespace iucs.readernest.application.Dto.Portal
 
         public int ClassesRemaining { get; set; }
 
-        public double AttendancePercent { get; set; }
+        /// <summary>Null when this child has no attendance-marked sessions yet -- distinct from
+        /// a real 0%. Render as "no data yet", not as a default percentage.</summary>
+        public double? AttendancePercent { get; set; }
 
         /// <summary>paid | due | overdue | suspended -- genuinely this child's own status; a
         /// sibling's unrelated overdue invoice never marks another child suspended.</summary>
@@ -210,7 +212,9 @@ namespace iucs.readernest.application.Dto.Reports
 
         public string ChildName { get; set; } = null!;
 
-        public double AttendancePercent { get; set; }
+        /// <summary>Null when this child has no attendance-marked sessions yet -- distinct
+        /// from a real 0%.</summary>
+        public double? AttendancePercent { get; set; }
 
         public int SessionsAttended { get; set; }
 

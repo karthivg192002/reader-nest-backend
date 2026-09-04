@@ -113,7 +113,9 @@ namespace iucs.readernest.application.Services
                 .Select(a => a.Status)
                 .ToListAsync(cancellationToken);
             var attended = attendance.Count(a => a != AttendanceStatus.Absent);
-            var attendancePercent = attendance.Count == 0 ? 100 : Math.Round(100.0 * attended / attendance.Count, 1);
+            // Null (not a vacuous 100%) when there's no attendance data yet -- same fix as
+            // ParentPortalService.GetDashboardAsync and TeacherPerformanceDto.
+            double? attendancePercent = attendance.Count == 0 ? null : Math.Round(100.0 * attended / attendance.Count, 1);
 
             var events = await _unitOfWork.Repository<EngagementEvent>().Query()
                 .Where(e => e.ChildId == childId)
@@ -144,11 +146,13 @@ namespace iucs.readernest.application.Services
             // Generated progress insights: rule-based narrative from the captured signals
             var name = child.FirstName;
             var insights = new List<string>();
-            insights.Add(attendancePercent >= 90
-                ? $"{name} attends consistently ({attendancePercent}%) — a strong routine is in place."
-                : attendancePercent >= 75
-                    ? $"{name}'s attendance is {attendancePercent}%; a steadier routine would compound progress."
-                    : $"Attendance is {attendancePercent}% — missed classes are the biggest lever for {name} right now.");
+            insights.Add(attendancePercent is null
+                ? $"No completed sessions yet for {name} — attendance insights will appear after their first class."
+                : attendancePercent >= 90
+                    ? $"{name} attends consistently ({attendancePercent}%) — a strong routine is in place."
+                    : attendancePercent >= 75
+                        ? $"{name}'s attendance is {attendancePercent}%; a steadier routine would compound progress."
+                        : $"Attendance is {attendancePercent}% — missed classes are the biggest lever for {name} right now.");
             if (quizAttempts > 0)
             {
                 var accuracy = Math.Round(100.0 * quizCorrect / Math.Max(1, quizAttempts));
