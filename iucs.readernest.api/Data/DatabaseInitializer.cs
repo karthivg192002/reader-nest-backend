@@ -62,6 +62,7 @@ namespace iucs.readernest.api.Data
             await ReconcileOrgNameEmailTemplatesAsync(context);
             await EnsureProgressReportsMenuAsync(context);
             await EnsureStoreInquiriesMenuAsync(context);
+            await EnsureAdminLeaveAndAvailabilityMenuAsync(context);
             await EnsureParentRecordingsMenuAsync(context);
             await EnsureChatbotMenusAsync(context);
             await SeedChatFaqsAsync(context);
@@ -478,6 +479,8 @@ namespace iucs.readernest.api.Data
             ("admin", "People", "Roles & Permissions", "/admin/permissions", "ShieldCheck", PermissionModule.UserManagement),
             ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck", PermissionModule.Admission),
             ("admin", "People", "Store Inquiries", "/admin/store-inquiries", "ShoppingBag", PermissionModule.Admission),
+            ("admin", "People", "Leave Management", "/admin/leave", "CalendarOff", PermissionModule.LeaveManagement),
+            ("admin", "People", "Teacher Availability", "/admin/availability", "CalendarRange", PermissionModule.SessionCalendarManagement),
             ("admin", "Content", "Content & Resources", "/admin/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
             ("admin", "Finance", "Billing & Finance", "/admin/billing", "Receipt", PermissionModule.BillingFinance),
             ("admin", "Finance", "Packages & Subscriptions", "/admin/packages", "CreditCard", PermissionModule.BillingFinance),
@@ -1276,6 +1279,58 @@ namespace iucs.readernest.api.Data
                 IsActive = true,
                 RequiredModule = PermissionModule.Admission,
             });
+        }
+
+        /// <summary>
+        /// Retrofits the Admin "Leave Management" and "Teacher Availability" menu items into a
+        /// database that was seeded before this method existed. These two screens
+        /// (/admin/leave, /admin/availability) have been live routes in the frontend all
+        /// along, but were never part of the Admin portal's own menu seed — only the
+        /// teacher's own Leave Management and the coordinator's own Teacher Availability
+        /// were — so an Admin account could reach both pages directly by URL but never saw a
+        /// sidebar link to either of them. Fresh databases already get both from
+        /// MenuSeedItems(); this only fires for pre-existing ones.
+        /// </summary>
+        private static async Task EnsureAdminLeaveAndAvailabilityMenuAsync(ReaderNestDbContext context)
+        {
+            var storeInquiries = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "admin" && m.Path == "/admin/store-inquiries");
+            var sectionOrder = storeInquiries?.SectionOrder ?? 2;
+            var nextSortOrder = (storeInquiries?.SortOrder ?? 0) + 1;
+
+            if (!context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == "/admin/leave") &&
+                !await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == "/admin/leave"))
+            {
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "admin",
+                    Section = "People",
+                    SectionOrder = sectionOrder,
+                    Label = "Leave Management",
+                    Path = "/admin/leave",
+                    Icon = "CalendarOff",
+                    SortOrder = nextSortOrder++,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.LeaveManagement,
+                });
+            }
+
+            if (!context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == "/admin/availability") &&
+                !await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == "/admin/availability"))
+            {
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "admin",
+                    Section = "People",
+                    SectionOrder = sectionOrder,
+                    Label = "Teacher Availability",
+                    Path = "/admin/availability",
+                    Icon = "CalendarRange",
+                    SortOrder = nextSortOrder,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.SessionCalendarManagement,
+                });
+            }
         }
 
         /// <summary>
