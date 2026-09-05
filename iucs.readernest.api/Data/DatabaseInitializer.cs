@@ -69,6 +69,7 @@ namespace iucs.readernest.api.Data
             await EnsureAdminLeaveAndAvailabilityMenuAsync(context);
             await EnsureTeacherRecordingsMenuAsync(context);
             await EnsureAdmissionPaymentTrackingMenuAsync(context);
+            await EnsureTeacherAssignmentMenuAsync(context);
             await EnsureParentRecordingsMenuAsync(context);
             await EnsureChatbotMenusAsync(context);
             await SeedChatFaqsAsync(context);
@@ -579,6 +580,7 @@ namespace iucs.readernest.api.Data
             ("subadmin", "Delegated Work", "Audit Log", "/subadmin/audit-log", "History", null),
             ("admission", null, "Dashboard", "/admission", "LayoutDashboard", null),
             ("admission", "Pipeline", "Demo Scheduling", "/admission/demo-scheduling", "CalendarClock", PermissionModule.Admission.ToString()),
+            ("admission", "Pipeline", "Teacher Assignment", "/admission/demo-teacher-assignment", "UserCog", PermissionModule.Admission.ToString()),
             ("admission", "Pipeline", "Demo Feedback", "/admission/demo-feedback", "ClipboardCheck", PermissionModule.Admission.ToString()),
             ("admission", "Pipeline", "Conversion Board", "/admission/conversion", "KanbanSquare", PermissionModule.Admission.ToString()),
             ("admission", "CRM", "Leads & Parents", "/admission/leads", "UserSearch", PermissionModule.Admission.ToString()),
@@ -1571,6 +1573,61 @@ namespace iucs.readernest.api.Data
                 IsActive = true,
                 RequiredModule = PermissionModule.BillingFinance.ToString(),
             });
+        }
+
+        /// <summary>
+        /// Retrofits the "Teacher Assignment" menu item (/…/demo-teacher-assignment,
+        /// DemoTeacherAssignment.tsx) across every portal that routes to it -- Admission,
+        /// Coordinator, Management and Sub Admin all register the same route in App.tsx, but
+        /// none of their menu seeds ever included a link to it (unlike Demo Scheduling,
+        /// Payment Tracking, etc., which sit right next to it in each portal's own Pipeline /
+        /// Delegated Work section). Anchored right after each portal's own "Demo Scheduling"
+        /// item, wherever that happens to already be, rather than a hardcoded position --
+        /// these 4 portals' menu rows are largely backfilled by other ad-hoc patch methods
+        /// over time, so their exact section/sort layout isn't something to assume here.
+        /// </summary>
+        private static async Task EnsureTeacherAssignmentMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "demo-teacher-assignment";
+            var label = "Teacher Assignment";
+
+            foreach (var portal in new[] { "admission", "coordinator", "management", "subadmin" })
+            {
+                var fullPath = $"/{portal}/{path}";
+                if (context.MenuItems.Local.Any(m => m.Portal == portal && m.Path == fullPath) ||
+                    await context.MenuItems.AnyAsync(m => m.Portal == portal && m.Path == fullPath))
+                {
+                    continue;
+                }
+
+                var demoScheduling = await context.MenuItems
+                    .FirstOrDefaultAsync(m => m.Portal == portal && m.Path == $"/{portal}/demo-scheduling");
+                if (demoScheduling is null)
+                {
+                    continue; // this portal doesn't have Demo Scheduling seeded yet either — nothing sensible to anchor after
+                }
+
+                var siblings = await context.MenuItems
+                    .Where(m => m.Portal == portal && m.Section == demoScheduling.Section && m.SortOrder > demoScheduling.SortOrder)
+                    .ToListAsync();
+                foreach (var sibling in siblings)
+                {
+                    sibling.SortOrder += 1;
+                }
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = portal,
+                    Section = demoScheduling.Section,
+                    SectionOrder = demoScheduling.SectionOrder,
+                    Label = label,
+                    Path = fullPath,
+                    Icon = "UserCog",
+                    SortOrder = demoScheduling.SortOrder + 1,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.Admission.ToString(),
+                });
+            }
         }
 
         /// <summary>
