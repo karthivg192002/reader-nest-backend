@@ -66,6 +66,10 @@ namespace iucs.readernest.api.Data
             await ReconcileOrgNameEmailTemplatesAsync(context);
             await EnsureProgressReportsMenuAsync(context);
             await EnsureStoreInquiriesMenuAsync(context);
+            await EnsureAdminLeaveAndAvailabilityMenuAsync(context);
+            await EnsureTeacherRecordingsMenuAsync(context);
+            await EnsureAdmissionPaymentTrackingMenuAsync(context);
+            await EnsureTeacherAssignmentMenuAsync(context);
             await EnsureParentRecordingsMenuAsync(context);
             await EnsureChatbotMenusAsync(context);
             await SeedChatFaqsAsync(context);
@@ -535,6 +539,8 @@ namespace iucs.readernest.api.Data
             ("admin", "People", "Roles & Permissions", "/admin/permissions", "ShieldCheck", PermissionModule.UserManagement.ToString()),
             ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck", PermissionModule.Admission.ToString()),
             ("admin", "People", "Store Inquiries", "/admin/store-inquiries", "ShoppingBag", PermissionModule.Admission.ToString()),
+            ("admin", "People", "Leave Management", "/admin/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
+            ("admin", "People", "Teacher Availability", "/admin/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
             ("admin", "Content", "Content & Resources", "/admin/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
             ("admin", "Finance", "Billing & Finance", "/admin/billing", "Receipt", PermissionModule.BillingFinance.ToString()),
             ("admin", "Finance", "Packages & Subscriptions", "/admin/packages", "CreditCard", PermissionModule.BillingFinance.ToString()),
@@ -551,6 +557,7 @@ namespace iucs.readernest.api.Data
             ("teacher", null, "Dashboard", "/teacher", "LayoutDashboard", null),
             ("teacher", "Teaching", "My Classes", "/teacher/classes", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
             ("teacher", "Teaching", "Attendance & Records", "/teacher/attendance", "ClipboardList", PermissionModule.SessionCalendarManagement.ToString()),
+            ("teacher", "Teaching", "Recordings", "/teacher/recordings", "Video", PermissionModule.SessionCalendarManagement.ToString()),
             ("teacher", "Teaching", "Demo Feedback", "/teacher/demo-feedback", "ClipboardCheck", PermissionModule.SessionCalendarManagement.ToString()),
             ("teacher", "Teaching", "Student Doubts", "/teacher/doubts", "MessageCircleQuestion", PermissionModule.Communication.ToString()),
             ("teacher", "My Account", "Leave Management", "/teacher/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
@@ -573,6 +580,7 @@ namespace iucs.readernest.api.Data
             ("subadmin", "Delegated Work", "Audit Log", "/subadmin/audit-log", "History", null),
             ("admission", null, "Dashboard", "/admission", "LayoutDashboard", null),
             ("admission", "Pipeline", "Demo Scheduling", "/admission/demo-scheduling", "CalendarClock", PermissionModule.Admission.ToString()),
+            ("admission", "Pipeline", "Teacher Assignment", "/admission/demo-teacher-assignment", "UserCog", PermissionModule.Admission.ToString()),
             ("admission", "Pipeline", "Demo Feedback", "/admission/demo-feedback", "ClipboardCheck", PermissionModule.Admission.ToString()),
             ("admission", "Pipeline", "Conversion Board", "/admission/conversion", "KanbanSquare", PermissionModule.Admission.ToString()),
             ("admission", "CRM", "Leads & Parents", "/admission/leads", "UserSearch", PermissionModule.Admission.ToString()),
@@ -1425,6 +1433,201 @@ namespace iucs.readernest.api.Data
                 IsActive = true,
                 RequiredModule = PermissionModule.Admission.ToString(),
             });
+        }
+
+        /// <summary>
+        /// Retrofits the Admin "Leave Management" and "Teacher Availability" menu items into a
+        /// database that was seeded before this method existed. These two screens
+        /// (/admin/leave, /admin/availability) have been live routes in the frontend all
+        /// along, but were never part of the Admin portal's own menu seed — only the
+        /// teacher's own Leave Management and the coordinator's own Teacher Availability
+        /// were — so an Admin account could reach both pages directly by URL but never saw a
+        /// sidebar link to either of them. Fresh databases already get both from
+        /// MenuSeedItems(); this only fires for pre-existing ones.
+        /// </summary>
+        private static async Task EnsureAdminLeaveAndAvailabilityMenuAsync(ReaderNestDbContext context)
+        {
+            var storeInquiries = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "admin" && m.Path == "/admin/store-inquiries");
+            var sectionOrder = storeInquiries?.SectionOrder ?? 2;
+            var nextSortOrder = (storeInquiries?.SortOrder ?? 0) + 1;
+
+            if (!context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == "/admin/leave") &&
+                !await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == "/admin/leave"))
+            {
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "admin",
+                    Section = "People",
+                    SectionOrder = sectionOrder,
+                    Label = "Leave Management",
+                    Path = "/admin/leave",
+                    Icon = "CalendarOff",
+                    SortOrder = nextSortOrder++,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.LeaveManagement.ToString(),
+                });
+            }
+
+            if (!context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == "/admin/availability") &&
+                !await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == "/admin/availability"))
+            {
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "admin",
+                    Section = "People",
+                    SectionOrder = sectionOrder,
+                    Label = "Teacher Availability",
+                    Path = "/admin/availability",
+                    Icon = "CalendarRange",
+                    SortOrder = nextSortOrder,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.SessionCalendarManagement.ToString(),
+                });
+            }
+        }
+
+        /// <summary>
+        /// Retrofits the Teacher's own "Recordings" menu item into a database that was seeded
+        /// before this method existed. /teacher/recordings has been a real, working route
+        /// (TeacherRecordings.tsx) all along, but the Teaching section's own seed never
+        /// included it -- only the Parent portal's Recordings item did -- so a teacher account
+        /// could reach the page directly by URL but had no sidebar link to it. Fresh databases
+        /// already get it from MenuSeedItems(); this only fires for pre-existing ones.
+        /// </summary>
+        private static async Task EnsureTeacherRecordingsMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/teacher/recordings";
+            if (context.MenuItems.Local.Any(m => m.Portal == "teacher" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "teacher" && m.Path == path))
+            {
+                return;
+            }
+
+            var attendance = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "teacher" && m.Path == "/teacher/attendance");
+            if (attendance is null)
+            {
+                return; // no Teaching section item to anchor after (unexpected) — nothing sensible to append after
+            }
+
+            // Insert right after Attendance & Records, shifting Demo Feedback/Student Doubts
+            // (and anything else in the section after them) up by one — matches TEACHER_NAV's
+            // own ordering (My Classes, Attendance & Records, Recordings, Demo Feedback, ...)
+            // rather than just tacking it onto the end of the section.
+            var toShift = await context.MenuItems
+                .Where(m => m.Portal == "teacher" && m.Section == "Teaching" && m.SortOrder > attendance.SortOrder)
+                .ToListAsync();
+            foreach (var item in toShift)
+            {
+                item.SortOrder += 1;
+            }
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "teacher",
+                Section = "Teaching",
+                SectionOrder = attendance.SectionOrder,
+                Label = "Recordings",
+                Path = path,
+                Icon = "Video",
+                SortOrder = attendance.SortOrder + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.SessionCalendarManagement.ToString(),
+            });
+        }
+
+        /// <summary>
+        /// Retrofits the Admission "Payment Tracking" menu item into a database that was
+        /// seeded before it existed. It's been in MenuSeedItems() (fresh-database seed) all
+        /// along, and /admission/payments (AdmissionPayments.tsx) has been a real, working
+        /// route the whole time -- but a database seeded before this row was added to
+        /// MenuSeedItems() never got it backfilled, leaving an Admission account with no
+        /// sidebar link to it despite the page working fine if reached directly by URL.
+        /// </summary>
+        private static async Task EnsureAdmissionPaymentTrackingMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/admission/payments";
+            if (context.MenuItems.Local.Any(m => m.Portal == "admission" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "admission" && m.Path == path))
+            {
+                return;
+            }
+
+            var leads = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "admission" && m.Path == "/admission/leads");
+            if (leads is null)
+            {
+                return; // no CRM section item to anchor after (unexpected) — nothing sensible to append after
+            }
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "admission",
+                Section = "CRM",
+                SectionOrder = leads.SectionOrder,
+                Label = "Payment Tracking",
+                Path = path,
+                Icon = "Link2",
+                SortOrder = leads.SortOrder + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.BillingFinance.ToString(),
+            });
+        }
+
+        /// <summary>
+        /// Retrofits the "Teacher Assignment" menu item (/…/demo-teacher-assignment,
+        /// DemoTeacherAssignment.tsx) across every portal that routes to it -- Admission,
+        /// Coordinator, Management and Sub Admin all register the same route in App.tsx, but
+        /// none of their menu seeds ever included a link to it (unlike Demo Scheduling,
+        /// Payment Tracking, etc., which sit right next to it in each portal's own Pipeline /
+        /// Delegated Work section). Anchored right after each portal's own "Demo Scheduling"
+        /// item, wherever that happens to already be, rather than a hardcoded position --
+        /// these 4 portals' menu rows are largely backfilled by other ad-hoc patch methods
+        /// over time, so their exact section/sort layout isn't something to assume here.
+        /// </summary>
+        private static async Task EnsureTeacherAssignmentMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "demo-teacher-assignment";
+            var label = "Teacher Assignment";
+
+            foreach (var portal in new[] { "admission", "coordinator", "management", "subadmin" })
+            {
+                var fullPath = $"/{portal}/{path}";
+                if (context.MenuItems.Local.Any(m => m.Portal == portal && m.Path == fullPath) ||
+                    await context.MenuItems.AnyAsync(m => m.Portal == portal && m.Path == fullPath))
+                {
+                    continue;
+                }
+
+                var demoScheduling = await context.MenuItems
+                    .FirstOrDefaultAsync(m => m.Portal == portal && m.Path == $"/{portal}/demo-scheduling");
+                if (demoScheduling is null)
+                {
+                    continue; // this portal doesn't have Demo Scheduling seeded yet either — nothing sensible to anchor after
+                }
+
+                var siblings = await context.MenuItems
+                    .Where(m => m.Portal == portal && m.Section == demoScheduling.Section && m.SortOrder > demoScheduling.SortOrder)
+                    .ToListAsync();
+                foreach (var sibling in siblings)
+                {
+                    sibling.SortOrder += 1;
+                }
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = portal,
+                    Section = demoScheduling.Section,
+                    SectionOrder = demoScheduling.SectionOrder,
+                    Label = label,
+                    Path = fullPath,
+                    Icon = "UserCog",
+                    SortOrder = demoScheduling.SortOrder + 1,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.Admission.ToString(),
+                });
+            }
         }
 
         /// <summary>
