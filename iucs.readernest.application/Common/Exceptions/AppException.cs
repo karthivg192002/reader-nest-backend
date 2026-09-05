@@ -60,4 +60,15 @@ namespace iucs.readernest.application.Common.Exceptions
         {
         }
     }
+
+    /// <summary>A downstream infrastructure dependency (object storage, a payment gateway, etc.)
+    /// failed or is misconfigured -- distinct from a validation error, so callers see an
+    /// actionable "try again / contact support" message instead of a generic 500.</summary>
+    public class ExternalServiceException : AppException
+    {
+        public ExternalServiceException(string message)
+            : base(502, message)
+        {
+        }
+    }
 }

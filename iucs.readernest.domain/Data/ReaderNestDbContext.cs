@@ -36,6 +36,7 @@ namespace iucs.readernest.domain.Data
         public DbSet<SubAdminPermission> SubAdminPermissions => Set<SubAdminPermission>();
         public DbSet<RoleDefinition> RoleDefinitions => Set<RoleDefinition>();
         public DbSet<RolePermission> RolePermissions => Set<RolePermission>();
+        public DbSet<PermissionModuleDefinition> PermissionModuleDefinitions => Set<PermissionModuleDefinition>();
         public DbSet<PinResetToken> PinResetTokens => Set<PinResetToken>();
         public DbSet<AccessRequest> AccessRequests => Set<AccessRequest>();
 
@@ -91,6 +92,9 @@ namespace iucs.readernest.domain.Data
 
         // Communication & auditing
         public DbSet<Notification> Notifications => Set<Notification>();
+        public DbSet<BulkEmailBlast> BulkEmailBlasts => Set<BulkEmailBlast>();
+        public DbSet<BulkEmailRecipient> BulkEmailRecipients => Set<BulkEmailRecipient>();
+        public DbSet<BulkEmailReply> BulkEmailReplies => Set<BulkEmailReply>();
         public DbSet<EmailTemplate> EmailTemplates => Set<EmailTemplate>();
         public DbSet<ProgressReport> ProgressReports => Set<ProgressReport>();
         public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
@@ -107,6 +111,7 @@ namespace iucs.readernest.domain.Data
         public DbSet<AppSetting> AppSettings => Set<AppSetting>();
         public DbSet<MenuItem> MenuItems => Set<MenuItem>();
         public DbSet<Integration> Integrations => Set<Integration>();
+        public DbSet<ShortLink> ShortLinks => Set<ShortLink>();
 
         protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
         {

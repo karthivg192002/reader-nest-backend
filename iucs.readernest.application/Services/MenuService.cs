@@ -25,7 +25,7 @@ namespace iucs.readernest.application.Services
         public async Task<IReadOnlyList<MenuItemDto>> GetForUserAsync(
             Guid userId,
             UserRole role,
-            IReadOnlyCollection<PermissionModule> viewableModules,
+            IReadOnlyCollection<string> viewableModules,
             CancellationToken cancellationToken = default)
         {
             var isAdmin = role == UserRole.Admin;
@@ -41,7 +41,7 @@ namespace iucs.readernest.application.Services
             var visible = items.Where(m =>
                 m.RequiredModule is null
                 || isAdmin
-                || viewableModules.Contains(m.RequiredModule.Value));
+                || viewableModules.Contains(m.RequiredModule));
 
             return visible.Select(ToDto).ToList();
         }
@@ -104,6 +104,7 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default)
         {
             Validate(request);
+            await ValidateRequiredModuleAsync(request.RequiredModule, cancellationToken);
             var repository = _unitOfWork.Repository<MenuItem>();
             var portal = NormalizePortal(request.Portal);
             var path = request.Path.Trim();
@@ -128,6 +129,7 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default)
         {
             Validate(request);
+            await ValidateRequiredModuleAsync(request.RequiredModule, cancellationToken);
             var repository = _unitOfWork.Repository<MenuItem>();
             var item = await repository.GetByIdAsync(id, cancellationToken)
                 ?? throw new NotFoundException(nameof(MenuItem), id);
@@ -186,6 +188,26 @@ namespace iucs.readernest.application.Services
             if (string.IsNullOrWhiteSpace(request.Icon))
             {
                 throw new DomainValidationException("Menu icon is required.");
+            }
+        }
+
+        /// <summary>
+        /// RequiredModule was a compile-time-checked enum on the wire until it became a plain
+        /// string key (to allow gating on an Admin-defined custom module) — model binding no
+        /// longer rejects a bogus value on its own.
+        /// </summary>
+        private async Task ValidateRequiredModuleAsync(string? requiredModule, CancellationToken cancellationToken)
+        {
+            if (requiredModule is null)
+            {
+                return;
+            }
+
+            var exists = await _unitOfWork.Repository<domain.Entities.Users.PermissionModuleDefinition>()
+                .ExistsAsync(m => m.Key.ToLower() == requiredModule.ToLower(), cancellationToken);
+            if (!exists)
+            {
+                throw new DomainValidationException($"Unknown permission module '{requiredModule}'.");
             }
         }
 

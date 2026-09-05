@@ -95,6 +95,8 @@ namespace iucs.readernest.tests
 
         private MenuService CreateMenuService() => new(_db.UnitOfWork, _auditLog);
 
+        private PermissionModuleService CreatePermissionModuleService() => new(_db.UnitOfWork, _auditLog);
+
         private AcademicOpsService CreateAcademicOpsService() =>
             new(_db.UnitOfWork, _auditLog, _notifications, _db.CurrentUser, CreateSessionService());
 
@@ -212,7 +214,7 @@ namespace iucs.readernest.tests
             _db.Context.SubAdminPermissions.Add(new SubAdminPermission
             {
                 UserId = coordinator.Id,
-                Module = PermissionModule.SessionCalendarManagement,
+                Module = PermissionModule.SessionCalendarManagement.ToString(),
                 CanView = true,
                 CanEdit = true,
             });
@@ -221,7 +223,7 @@ namespace iucs.readernest.tests
             _db.Context.SubAdminPermissions.Add(new SubAdminPermission
             {
                 UserId = billingOnlySubAdmin.Id,
-                Module = PermissionModule.BillingFinance,
+                Module = PermissionModule.BillingFinance.ToString(),
                 CanView = true,
             });
             await _db.Context.SaveChangesAsync();
@@ -638,6 +640,147 @@ namespace iucs.readernest.tests
 
             var reviewed = await ops.ReviewLeaveAsync(leave.Id, new ReviewLeaveRequest { Approve = false, ReviewNote = "Clash" });
             Assert.Equal(LeaveStatus.Rejected, reviewed.Status);
+        }
+
+        [Fact]
+        public async Task SubmitLeave_OverlappingExistingPendingOrApproved_IsRejected()
+        {
+            var (_, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync();
+            var ops = CreateAcademicOpsService();
+
+            var start = DateTime.UtcNow.AddDays(10);
+            var first = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = start,
+                EndAtUtc = start.AddHours(2),
+                Reason = "First",
+            });
+            Assert.Equal(LeaveStatus.Pending, first.Status);
+
+            // Overlaps only partially (starts an hour into the first request's window) --
+            // still a conflict, not just an exact-match duplicate.
+            var ex = await Assert.ThrowsAsync<ConflictException>(() =>
+                ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+                {
+                    StartAtUtc = start.AddHours(1),
+                    EndAtUtc = start.AddHours(3),
+                    Reason = "Second, overlapping",
+                }));
+            Assert.Contains("already have a pending leave request", ex.Message);
+
+            // Approve the first -- still blocks a new overlapping request the same way.
+            _db.Context.ChangeTracker.Clear();
+            await ops.ReviewLeaveAsync(first.Id, new ReviewLeaveRequest { Approve = true });
+            _db.Context.ChangeTracker.Clear();
+            await Assert.ThrowsAsync<ConflictException>(() =>
+                ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+                {
+                    StartAtUtc = start.AddHours(1),
+                    EndAtUtc = start.AddHours(3),
+                    Reason = "Third, overlapping the now-approved one",
+                }));
+        }
+
+        [Fact]
+        public async Task SubmitLeave_SameWindowAsRejectedOrCancelled_Succeeds()
+        {
+            var (_, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync();
+            var ops = CreateAcademicOpsService();
+            var start = DateTime.UtcNow.AddDays(10);
+
+            var rejected = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = start,
+                EndAtUtc = start.AddHours(2),
+                Reason = "First",
+            });
+            _db.Context.ChangeTracker.Clear();
+            await ops.ReviewLeaveAsync(rejected.Id, new ReviewLeaveRequest { Approve = false, ReviewNote = "No" });
+
+            // Rejected no longer "holds" the window -- the same time can be re-requested.
+            _db.Context.ChangeTracker.Clear();
+            var resubmitted = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = start,
+                EndAtUtc = start.AddHours(2),
+                Reason = "Trying again",
+            });
+            Assert.Equal(LeaveStatus.Pending, resubmitted.Status);
+
+            // Cancel that one too -- also no longer holds the window.
+            _db.Context.ChangeTracker.Clear();
+            await ops.CancelLeaveAsync(teacher.UserId, resubmitted.Id);
+            _db.Context.ChangeTracker.Clear();
+            var thirdTry = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = start,
+                EndAtUtc = start.AddHours(2),
+                Reason = "Third time's the charm",
+            });
+            Assert.Equal(LeaveStatus.Pending, thirdTry.Status);
+        }
+
+        [Fact]
+        public async Task CancelLeave_OwnPendingRequest_Succeeds()
+        {
+            var (_, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync();
+            var ops = CreateAcademicOpsService();
+            var leave = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = DateTime.UtcNow.AddDays(10),
+                EndAtUtc = DateTime.UtcNow.AddDays(10).AddHours(2),
+                Reason = "Changed my mind later",
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            await ops.CancelLeaveAsync(teacher.UserId, leave.Id);
+
+            var stored = await _db.Context.LeaveRequests.FindAsync(leave.Id);
+            Assert.Equal(LeaveStatus.Cancelled, stored!.Status);
+        }
+
+        [Fact]
+        public async Task CancelLeave_AlreadyReviewed_Throws()
+        {
+            var (_, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync();
+            var ops = CreateAcademicOpsService();
+            var leave = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = DateTime.UtcNow.AddDays(10),
+                EndAtUtc = DateTime.UtcNow.AddDays(10).AddHours(2),
+                Reason = "x",
+            });
+            _db.Context.ChangeTracker.Clear();
+            await ops.ReviewLeaveAsync(leave.Id, new ReviewLeaveRequest { Approve = true });
+
+            _db.Context.ChangeTracker.Clear();
+            await Assert.ThrowsAsync<DomainValidationException>(() => ops.CancelLeaveAsync(teacher.UserId, leave.Id));
+        }
+
+        [Fact]
+        public async Task CancelLeave_AnotherTeachersRequest_ThrowsNotFound()
+        {
+            var (_, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var owner = await _db.Context.TeacherProfiles.FirstAsync();
+            var ops = CreateAcademicOpsService();
+            var leave = await ops.SubmitLeaveAsync(owner.UserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = DateTime.UtcNow.AddDays(10),
+                EndAtUtc = DateTime.UtcNow.AddDays(10).AddHours(2),
+                Reason = "x",
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            var otherTeacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            _db.Context.TeacherProfiles.Add(new TeacherProfile { UserId = otherTeacherUser.Id });
+            await _db.Context.SaveChangesAsync();
+
+            _db.Context.ChangeTracker.Clear();
+            await Assert.ThrowsAsync<NotFoundException>(() => ops.CancelLeaveAsync(otherTeacherUser.Id, leave.Id));
         }
 
         [Fact]
@@ -2405,7 +2548,7 @@ namespace iucs.readernest.tests
                 new domain.Entities.Navigation.MenuItem
                 {
                     Portal = "subadmin", Label = "Billing", Path = "/subadmin/billing", Icon = "Receipt",
-                    SectionOrder = 1, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.BillingFinance,
+                    SectionOrder = 1, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.BillingFinance.ToString(),
                 });
             await _db.Context.SaveChangesAsync();
 
@@ -2417,7 +2560,7 @@ namespace iucs.readernest.tests
             Assert.DoesNotContain(withoutBilling, m => m.Path == "/subadmin/billing");
 
             // Grant BillingFinance view → the gated item appears.
-            var withBilling = await service.GetForUserAsync(subAdmin.Id, UserRole.SubAdmin, [PermissionModule.BillingFinance]);
+            var withBilling = await service.GetForUserAsync(subAdmin.Id, UserRole.SubAdmin, [PermissionModule.BillingFinance.ToString()]);
             Assert.Contains(withBilling, m => m.Path == "/subadmin/billing");
 
             // Admin bypasses the gate entirely.
@@ -2425,7 +2568,7 @@ namespace iucs.readernest.tests
             _db.Context.MenuItems.Add(new domain.Entities.Navigation.MenuItem
             {
                 Portal = "admin", Label = "Billing", Path = "/admin/billing", Icon = "Receipt",
-                SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.BillingFinance,
+                SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.BillingFinance.ToString(),
             });
             await _db.Context.SaveChangesAsync();
             var adminMenu = await service.GetForUserAsync(adminUser.Id, UserRole.Admin, []);
@@ -2511,7 +2654,7 @@ namespace iucs.readernest.tests
 
             var submitted = await access.SubmitAsync(subAdmin.Id, new SubmitAccessRequestRequest
             {
-                RequestedModules = [PermissionModule.CourseBatchManagement, PermissionModule.SessionCalendarManagement],
+                RequestedModules = [PermissionModule.CourseBatchManagement.ToString(), PermissionModule.SessionCalendarManagement.ToString()],
             });
 
             await access.ReviewAsync(submitted.Id, admin.Id, new ReviewAccessRequestRequest { Approve = true });
@@ -2519,8 +2662,8 @@ namespace iucs.readernest.tests
             var grants = await _db.Context.SubAdminPermissions.AsNoTracking()
                 .Where(p => p.UserId == subAdmin.Id)
                 .ToDictionaryAsync(p => p.Module);
-            Assert.True(grants[PermissionModule.CourseBatchManagement].CanView);
-            Assert.True(grants[PermissionModule.SessionCalendarManagement].CanView);
+            Assert.True(grants[PermissionModule.CourseBatchManagement.ToString()].CanView);
+            Assert.True(grants[PermissionModule.SessionCalendarManagement.ToString()].CanView);
         }
 
         [Fact]
@@ -2530,7 +2673,7 @@ namespace iucs.readernest.tests
             var admin = await _db.SeedUserAsync($"admin-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
             _db.Context.SubAdminPermissions.Add(new SubAdminPermission
             {
-                UserId = subAdmin.Id, Module = PermissionModule.CourseBatchManagement,
+                UserId = subAdmin.Id, Module = PermissionModule.CourseBatchManagement.ToString(),
                 CanView = true, CanCreate = true, CanEdit = true,
             });
             await _db.Context.SaveChangesAsync();
@@ -2538,12 +2681,12 @@ namespace iucs.readernest.tests
             var access = CreateAccessRequestService();
             var submitted = await access.SubmitAsync(subAdmin.Id, new SubmitAccessRequestRequest
             {
-                RequestedModules = [PermissionModule.CourseBatchManagement],
+                RequestedModules = [PermissionModule.CourseBatchManagement.ToString()],
             });
             await access.ReviewAsync(submitted.Id, admin.Id, new ReviewAccessRequestRequest { Approve = true });
 
             var grant = await _db.Context.SubAdminPermissions.AsNoTracking()
-                .SingleAsync(p => p.UserId == subAdmin.Id && p.Module == PermissionModule.CourseBatchManagement);
+                .SingleAsync(p => p.UserId == subAdmin.Id && p.Module == PermissionModule.CourseBatchManagement.ToString());
             Assert.True(grant.CanCreate); // untouched, not reset to View-only
             Assert.True(grant.CanEdit);
         }
@@ -2557,7 +2700,7 @@ namespace iucs.readernest.tests
 
             var submitted = await access.SubmitAsync(subAdmin.Id, new SubmitAccessRequestRequest
             {
-                RequestedModules = [PermissionModule.CourseBatchManagement],
+                RequestedModules = [PermissionModule.CourseBatchManagement.ToString()],
             });
             await access.ReviewAsync(submitted.Id, admin.Id, new ReviewAccessRequestRequest { Approve = false });
 
@@ -2577,7 +2720,7 @@ namespace iucs.readernest.tests
             _db.Context.SubAdminPermissions.Add(new SubAdminPermission
             {
                 UserId = subAdminUser.Id,
-                Module = PermissionModule.BillingFinance,
+                Module = PermissionModule.BillingFinance.ToString(),
                 CanView = true,
             });
             await _db.Context.SaveChangesAsync();
@@ -2588,13 +2731,13 @@ namespace iucs.readernest.tests
 
             var auth = CreateAuthService();
             var beforeRevoke = await auth.GetCurrentAccessAsync(subAdminUser.Id);
-            Assert.Contains($"{PermissionModule.BillingFinance}:{PermissionAction.View}", beforeRevoke!.Permissions);
+            Assert.Contains($"{PermissionModule.BillingFinance.ToString()}:{PermissionAction.View}", beforeRevoke!.Permissions);
 
             // Revoke it — the same "replace-all" path the real Permissions screen uses.
             await CreateUserService().SetPermissionsAsync(subAdminUser.Id, otherAdmin.Id, []);
 
             var afterRevoke = await auth.GetCurrentAccessAsync(subAdminUser.Id);
-            Assert.DoesNotContain($"{PermissionModule.BillingFinance}:{PermissionAction.View}", afterRevoke!.Permissions);
+            Assert.DoesNotContain($"{PermissionModule.BillingFinance.ToString()}:{PermissionAction.View}", afterRevoke!.Permissions);
         }
 
         [Fact]
@@ -6195,12 +6338,12 @@ namespace iucs.readernest.tests
             var users = CreateUserService();
 
             await users.SetPermissionsAsync(sub.Id, admin.Id,
-                [new PermissionDto { Module = PermissionModule.Admission, CanView = true }]);
+                [new PermissionDto { Module = PermissionModule.Admission.ToString(), CanView = true }]);
 
             await Assert.ThrowsAsync<DomainValidationException>(() => users.SetPermissionsAsync(sub.Id, admin.Id,
             [
-                new PermissionDto { Module = PermissionModule.Settings, CanView = true },
-                new PermissionDto { Module = PermissionModule.Settings, CanEdit = true },
+                new PermissionDto { Module = PermissionModule.Settings.ToString(), CanView = true },
+                new PermissionDto { Module = PermissionModule.Settings.ToString(), CanEdit = true },
             ]));
 
             // SetPermissionsAsync is replace-all: rejecting late (at SaveChanges) would have
@@ -6211,7 +6354,7 @@ namespace iucs.readernest.tests
             {
                 var grants = await context.SubAdminPermissions.Where(p => p.UserId == sub.Id).ToListAsync();
                 Assert.Single(grants);
-                Assert.Equal(PermissionModule.Admission, grants[0].Module);
+                Assert.Equal(PermissionModule.Admission.ToString(), grants[0].Module);
                 Assert.True(grants[0].CanView);
             }
         }
@@ -6493,7 +6636,7 @@ namespace iucs.readernest.tests
             _db.Context.SubAdminPermissions.Add(new SubAdminPermission
             {
                 UserId = caller.Id,
-                Module = PermissionModule.UserManagement,
+                Module = PermissionModule.UserManagement.ToString(),
                 CanView = true,
                 CanEdit = true,
             });
@@ -6503,7 +6646,7 @@ namespace iucs.readernest.tests
             var service = CreateUserService();
             await Assert.ThrowsAsync<ForbiddenException>(() => service.SetPermissionsAsync(
                 target.Id, caller.Id,
-                [new PermissionDto { Module = PermissionModule.BillingFinance, CanApprove = true }]));
+                [new PermissionDto { Module = PermissionModule.BillingFinance.ToString(), CanApprove = true }]));
 
             // Nothing was granted — the target's permission set is untouched.
             Assert.Empty(await _db.Context.SubAdminPermissions.Where(p => p.UserId == target.Id).ToListAsync());
@@ -6511,9 +6654,9 @@ namespace iucs.readernest.tests
             // Granting exactly what the caller already holds (or less) still works.
             await service.SetPermissionsAsync(
                 target.Id, caller.Id,
-                [new PermissionDto { Module = PermissionModule.UserManagement, CanView = true }]);
+                [new PermissionDto { Module = PermissionModule.UserManagement.ToString(), CanView = true }]);
             Assert.True(await _db.Context.SubAdminPermissions.AnyAsync(
-                p => p.UserId == target.Id && p.Module == PermissionModule.UserManagement && p.CanView));
+                p => p.UserId == target.Id && p.Module == PermissionModule.UserManagement.ToString() && p.CanView));
             // Production hands each request its own DbContext; this test's shared one still
             // tracks the row SetPermissionsAsync just added above, so the next call's own
             // Query()/Remove() on that same row needs a clean slate (mirrors the established
@@ -6524,9 +6667,9 @@ namespace iucs.readernest.tests
             var admin = await _db.SeedUserAsync($"admin-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
             await service.SetPermissionsAsync(
                 target.Id, admin.Id,
-                [new PermissionDto { Module = PermissionModule.BillingFinance, CanApprove = true }]);
+                [new PermissionDto { Module = PermissionModule.BillingFinance.ToString(), CanApprove = true }]);
             Assert.True(await _db.Context.SubAdminPermissions.AnyAsync(
-                p => p.UserId == target.Id && p.Module == PermissionModule.BillingFinance && p.CanApprove));
+                p => p.UserId == target.Id && p.Module == PermissionModule.BillingFinance.ToString() && p.CanApprove));
         }
 
         /// <summary>
@@ -6841,7 +6984,7 @@ namespace iucs.readernest.tests
                 Name = name,
                 DisplayName = "Academic Coordinator",
                 DefaultRoute = route,
-                Permissions = [new PermissionDto { Module = PermissionModule.Admission, CanView = true }],
+                Permissions = [new PermissionDto { Module = PermissionModule.Admission.ToString(), CanView = true }],
             };
 
             // Each call stands for its own HTTP request, so each gets a clean tracker.
@@ -6870,8 +7013,8 @@ namespace iucs.readernest.tests
                 DisplayName = "Academic Coordinator",
                 Permissions =
                 [
-                    new PermissionDto { Module = PermissionModule.Admission, CanView = true },
-                    new PermissionDto { Module = PermissionModule.Admission, CanEdit = true },
+                    new PermissionDto { Module = PermissionModule.Admission.ToString(), CanView = true },
+                    new PermissionDto { Module = PermissionModule.Admission.ToString(), CanEdit = true },
                 ],
             }));
             _db.Context.ChangeTracker.Clear();
@@ -6925,12 +7068,12 @@ namespace iucs.readernest.tests
                 Name = "management",
                 DisplayName = "Management",
                 DefaultRoute = "/management",
-                Permissions = [new PermissionDto { Module = PermissionModule.ReportsAnalytics, CanView = true }],
+                Permissions = [new PermissionDto { Module = PermissionModule.ReportsAnalytics.ToString(), CanView = true }],
             });
 
-            var coursesGrant = Assert.Single(updated.Permissions, p => p.Module == PermissionModule.CourseBatchManagement);
+            var coursesGrant = Assert.Single(updated.Permissions, p => p.Module == PermissionModule.CourseBatchManagement.ToString());
             Assert.True(coursesGrant.CanView);
-            Assert.Contains(updated.Permissions, p => p.Module == PermissionModule.ReportsAnalytics && p.CanView);
+            Assert.Contains(updated.Permissions, p => p.Module == PermissionModule.ReportsAnalytics.ToString() && p.CanView);
         }
 
         /// <summary>
@@ -7041,6 +7184,7 @@ namespace iucs.readernest.tests
         {
             var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 2);
             var reports = new ReportsService(_db.UnitOfWork, _notifications);
+            var sender = await _db.SeedUserAsync($"sender-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
 
             async Task<ParentProfile> SeedParentWithChildAsync(bool enrol, UserStatus status = UserStatus.Active)
             {
@@ -7066,7 +7210,7 @@ namespace iucs.readernest.tests
             Assert.Equal(2, batchPreview.RecipientCount);
 
             _emailSender.Sent.Clear();
-            var batchSend = await reports.SendBulkEmailAsync(new BulkEmailRequest
+            var batchSend = await reports.SendBulkEmailAsync(sender.Id, new BulkEmailRequest
             {
                 Subject = "Class update",
                 Body = "<p>See you Monday.</p>",
@@ -7081,7 +7225,7 @@ namespace iucs.readernest.tests
             Assert.Equal(3, allPreview.RecipientCount);
 
             _emailSender.Sent.Clear();
-            var allSend = await reports.SendBulkEmailAsync(new BulkEmailRequest
+            var allSend = await reports.SendBulkEmailAsync(sender.Id, new BulkEmailRequest
             {
                 Subject = "Newsletter",
                 Body = "<p>Hello</p>",
@@ -7239,6 +7383,117 @@ namespace iucs.readernest.tests
                 "some/stored/path.txt", "text/plain", 100);
             Assert.Equal(course.Id, dto.CourseId);
             Assert.Equal(batch.Id, dto.BatchId);
+        }
+
+        [Fact]
+        public async Task CreatePermissionModule_ThenGrantOnARole_ThenGateAMenuItem_EndToEnd()
+        {
+            var modules = CreatePermissionModuleService();
+            var created = await modules.CreateAsync(new SavePermissionModuleDefinitionRequest
+            {
+                Key = "MarketingContent",
+                Label = "Marketing Content",
+                Description = "Blog posts and landing pages.",
+            });
+            Assert.False(created.IsSystem);
+
+            var all = await modules.ListAsync();
+            Assert.Contains(all, m => m.Key == "MarketingContent" && m.Label == "Marketing Content");
+            // Built-ins are seeded rows too, not a separate hardcoded list.
+            Assert.Contains(all, m => m.Key == nameof(PermissionModule.CourseBatchManagement) && m.IsSystem);
+
+            var roles = new RoleService(_db.UnitOfWork, _auditLog);
+            var role = await roles.CreateAsync(new SaveRoleRequest
+            {
+                Name = "marketing-editor",
+                DisplayName = "Marketing Editor",
+                Permissions = [new PermissionDto { Module = "MarketingContent", CanView = true, CanEdit = true }],
+            });
+            Assert.Contains(role.Permissions, p => p.Module == "MarketingContent" && p.CanEdit);
+
+            var menus = CreateMenuService();
+            await menus.CreateAsync(new SaveMenuItemRequest
+            {
+                Portal = "subadmin",
+                Label = "Marketing",
+                Path = "/subadmin/marketing",
+                Icon = "Megaphone",
+                RequiredModule = "MarketingContent",
+            });
+
+            var subAdmin = await _db.SeedUserAsync($"mkt-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+            var withoutGrant = await menus.GetForUserAsync(subAdmin.Id, UserRole.SubAdmin, []);
+            Assert.DoesNotContain(withoutGrant, m => m.Path == "/subadmin/marketing");
+
+            var withGrant = await menus.GetForUserAsync(subAdmin.Id, UserRole.SubAdmin, ["MarketingContent"]);
+            Assert.Contains(withGrant, m => m.Path == "/subadmin/marketing");
+        }
+
+        [Fact]
+        public async Task DeletePermissionModule_BlockedWhileReferencedByARole()
+        {
+            var modules = CreatePermissionModuleService();
+            var created = await modules.CreateAsync(new SavePermissionModuleDefinitionRequest { Key = "TempModule", Label = "Temp Module" });
+
+            var roles = new RoleService(_db.UnitOfWork, _auditLog);
+            await roles.CreateAsync(new SaveRoleRequest
+            {
+                Name = "temp-role",
+                DisplayName = "Temp Role",
+                Permissions = [new PermissionDto { Module = "TempModule", CanView = true }],
+            });
+
+            var ex = await Assert.ThrowsAsync<ConflictException>(() => modules.DeleteAsync(created.Id));
+            Assert.Contains("referenced", ex.Message);
+        }
+
+        [Fact]
+        public async Task DeletePermissionModule_UnreferencedCustomModule_Succeeds()
+        {
+            var modules = CreatePermissionModuleService();
+            var created = await modules.CreateAsync(new SavePermissionModuleDefinitionRequest { Key = "UnusedModule", Label = "Unused Module" });
+
+            await modules.DeleteAsync(created.Id);
+
+            var all = await modules.ListAsync();
+            Assert.DoesNotContain(all, m => m.Key == "UnusedModule");
+        }
+
+        [Fact]
+        public async Task DeletePermissionModule_ABuiltInModule_IsRejected()
+        {
+            var modules = CreatePermissionModuleService();
+            var all = await modules.ListAsync();
+            var builtIn = all.First(m => m.IsSystem);
+
+            var ex = await Assert.ThrowsAsync<DomainValidationException>(() => modules.DeleteAsync(builtIn.Id));
+            Assert.Contains("built-in", ex.Message);
+        }
+
+        [Fact]
+        public async Task CreatePermissionModule_DuplicateKey_IsRejected()
+        {
+            var modules = CreatePermissionModuleService();
+            await modules.CreateAsync(new SavePermissionModuleDefinitionRequest { Key = "DupeModule", Label = "Dupe Module" });
+
+            // Case-insensitive: a built-in's exact-case name is also off-limits (already seeded).
+            await Assert.ThrowsAsync<ConflictException>(() =>
+                modules.CreateAsync(new SavePermissionModuleDefinitionRequest { Key = "dupemodule", Label = "Again" }));
+            await Assert.ThrowsAsync<ConflictException>(() =>
+                modules.CreateAsync(new SavePermissionModuleDefinitionRequest { Key = nameof(PermissionModule.Settings), Label = "Fake Settings" }));
+        }
+
+        [Fact]
+        public async Task SaveRole_WithAnUnknownModuleKey_IsRejected()
+        {
+            var roles = new RoleService(_db.UnitOfWork, _auditLog);
+            var ex = await Assert.ThrowsAsync<DomainValidationException>(() => roles.CreateAsync(new SaveRoleRequest
+            {
+                Name = "bogus-role",
+                DisplayName = "Bogus Role",
+                Permissions = [new PermissionDto { Module = "DoesNotExist", CanView = true }],
+            }));
+            Assert.Contains("Unknown permission module", ex.Message);
         }
 
         public void Dispose() => _db.Dispose();

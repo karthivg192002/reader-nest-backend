@@ -103,8 +103,14 @@ namespace iucs.readernest.application.Services
             var permissions = await LoadPermissionClaimsAsync(user, cancellationToken);
             var defaultRoute = await ResolveDefaultRouteAsync(user, cancellationToken);
 
-            // No new token on refresh-of-self; caller keeps using its current one.
-            return BuildResponse(user, permissions, null, defaultRoute);
+            // Re-mints a fresh token carrying these just-recomputed permission claims — the
+            // original login token's claims are frozen at issue time, so without this, a
+            // Relationship Manager whose access an Admin just approved would keep hitting 403s
+            // (and a stale sidebar) on every permission-gated call until they logged out and
+            // back in. The frontend swaps its stored token for this one on every call here
+            // (SessionProvider already polls this endpoint on load and periodically).
+            var token = _tokenService.CreateToken(user, permissions);
+            return BuildResponse(user, permissions, token, defaultRoute);
         }
 
         public async Task<CurrentAccessSnapshot?> GetCurrentAccessAsync(Guid userId, CancellationToken cancellationToken = default)
@@ -257,7 +263,7 @@ namespace iucs.readernest.application.Services
         }
 
         private static List<string> ToClaims(
-            IEnumerable<(PermissionModule Module, bool CanView, bool CanCreate, bool CanEdit, bool CanDelete, bool CanApprove)> grants)
+            IEnumerable<(string Module, bool CanView, bool CanCreate, bool CanEdit, bool CanDelete, bool CanApprove)> grants)
         {
             var claims = new List<string>();
             foreach (var grant in grants)

@@ -99,6 +99,21 @@ namespace iucs.readernest.application.Common
                     """,
                     "ChildName", "WhenLocal", "JoinUrl"),
 
+                // Caught live: the teacher a demo is auto-assigned (or explicitly booked) to
+                // never got any email at all -- they'd only find out by checking their dashboard,
+                // and had no join link of their own even then. Uses the same fixed room (and
+                // therefore the same JoinUrl-worthy link) the parent's demo-confirmed email gets.
+                New("demo-scheduled-teacher", "Demo Class Scheduled (Teacher)",
+                    "Sent to the assigned teacher when a demo class is booked, with their join link for the parent's fixed meeting room.",
+                    NotificationType.BookingConfirmation, "You have a demo class scheduled",
+                    """
+                    <p>A demo class for <strong>{{ChildName}}</strong> (parent: {{ParentName}}) is scheduled for you:</p>
+                    <p style="font-weight:600;">{{WhenLocal}}</p>
+                    <p><a href="{{JoinUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">Join Demo Class</a></p>
+                    <p style="font-size:12px;color:#6b7280;">This is your permanent meeting link — the same one the parent received, and the same one in your Teacher Portal.</p>
+                    """,
+                    "ChildName", "ParentName", "WhenLocal", "JoinUrl"),
+
                 // Caught live: overriding a demo's assigned teacher (e.g. the original one calls
                 // in sick) had no notification path at all -- the newly-assigned teacher would
                 // only find out by checking their dashboard, and the displaced teacher would keep
@@ -110,8 +125,9 @@ namespace iucs.readernest.application.Common
                     <p>You've been assigned to a demo class for <strong>{{ChildName}}</strong>:</p>
                     <p style="font-weight:600;">{{StartAtLocal}} &ndash; {{EndAtLocal}}</p>
                     <p>{{Reason}}</p>
+                    <p><a href="{{JoinUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">Join Demo Class</a></p>
                     """,
-                    "ChildName", "StartAtLocal", "EndAtLocal", "Reason"),
+                    "ChildName", "StartAtLocal", "EndAtLocal", "Reason", "JoinUrl"),
 
                 New("demo-teacher-unassigned", "Demo Teacher Unassigned (Override)",
                     "Sent to the teacher when they are manually removed from a demo they were assigned to.",

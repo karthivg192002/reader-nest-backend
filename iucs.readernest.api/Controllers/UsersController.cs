@@ -5,6 +5,7 @@ using iucs.readernest.application.Dto.Users;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -37,9 +38,16 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _userService.ListAsync(role, search, page, pageSize, cancellationToken));
         }
 
-        /// <summary>Teacher options for assignment dropdowns; visible to any module that schedules.</summary>
+        /// <summary>
+        /// Teacher options (name/department only, nothing sensitive) for assignment dropdowns.
+        /// [Authorize]-only, not UserManagement-gated -- Batches, Calendar, Availability and
+        /// Demo Scheduling all populate a teacher picker from this and only need
+        /// CourseBatchManagement/SessionCalendarManagement/Admission respectively, not
+        /// UserManagement. Confirmed live: a role granted only those modules got a 403 here
+        /// on pages that have nothing to do with user management.
+        /// </summary>
         [HttpGet("teachers")]
-        [HasPermission(PermissionModule.UserManagement, PermissionAction.View)]
+        [Authorize]
         public async Task<ActionResult<IReadOnlyList<TeacherOptionDto>>> ListTeachers(CancellationToken cancellationToken)
         {
             return Ok(await _userService.ListTeachersAsync(cancellationToken));
@@ -62,6 +70,15 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             await _enrollmentService.UpdateChildNotesAsync(childId, request.Notes, cancellationToken);
+            return NoContent();
+        }
+
+        /// <summary>Removes a mistaken/test child record. Refused if it still has an active enrolment or unpaid invoice.</summary>
+        [HttpDelete("students/{childId:guid}")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.Delete)]
+        public async Task<IActionResult> RemoveStudent(Guid childId, CancellationToken cancellationToken)
+        {
+            await _enrollmentService.RemoveChildAsync(childId, cancellationToken);
             return NoContent();
         }
 
@@ -125,6 +142,50 @@ namespace iucs.readernest.api.Controllers
                 user.Email, moderator: true, DateTime.UtcNow.AddHours(6));
 
             return Ok(new { roomId = user.PersonalMeetingRoomId, domain, token });
+        }
+
+        /// <summary>
+        /// A short, shareable link to the same room MyMeetingRoom builds -- the long form
+        /// (domain/room#jwt=&lt;huge signed token&gt;) reads as broken/suspicious pasted into
+        /// WhatsApp or email. Expires with the token it wraps (6h), same as the direct link.
+        /// </summary>
+        [HttpGet("me/meeting-room/short-link")]
+        [Microsoft.AspNetCore.Authorization.Authorize]
+        public async Task<ActionResult<object>> MyMeetingRoomShortLink(
+            [FromServices] iucs.readernest.domain.Repository.IUnitOfWork unitOfWork,
+            [FromServices] application.Common.Interfaces.IJitsiTokenService jitsiTokenService,
+            [FromServices] IShortLinkService shortLinks,
+            CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value);
+            var user = await unitOfWork.Repository<domain.Entities.Users.User>()
+                .FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+            if (user is null)
+            {
+                return NotFound();
+            }
+
+            if (string.IsNullOrEmpty(user.PersonalMeetingRoomId))
+            {
+                user.PersonalMeetingRoomId = $"trn-personal-{Guid.NewGuid():N}";
+                unitOfWork.Repository<domain.Entities.Users.User>().Update(user);
+                await unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+
+            var jitsiConfigJson = await unitOfWork.Repository<domain.Entities.Integrations.Integration>().Query()
+                .Where(i => i.Key == "jitsi")
+                .Select(i => i.ConfigJson)
+                .FirstOrDefaultAsync(cancellationToken);
+            var domain = application.Helper.JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
+            var expiresAtUtc = DateTime.UtcNow.AddHours(6);
+            var token = jitsiTokenService.CreateToken(
+                domain, jitsiConfigJson, user.PersonalMeetingRoomId, $"{user.FirstName} {user.LastName}".Trim(),
+                user.Email, moderator: true, expiresAtUtc);
+            var targetUrl = application.Helper.JitsiLinkBuilder.BuildJoinUrl(user.PersonalMeetingRoomId, jitsiConfigJson, token)!;
+
+            var slug = await shortLinks.CreateAsync(targetUrl, expiresAtUtc, userId, cancellationToken);
+            var apiBaseUrl = $"{Request.Scheme}://{Request.Host}";
+            return Ok(new { url = $"{apiBaseUrl}/m/{slug}", expiresAtUtc });
         }
 
         [HttpGet("{id:guid}")]

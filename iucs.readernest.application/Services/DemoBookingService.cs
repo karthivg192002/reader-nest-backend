@@ -93,7 +93,7 @@ namespace iucs.readernest.application.Services
             // so this runs SERIALIZABLE and lets PostgreSQL's SSI arbitrate, retrying from the
             // top on a serialization failure. Nothing irreversible — emails, the CRM push —
             // happens inside; a retry must be free to redo the whole thing.
-            var (session, booking) = await _unitOfWork.ExecuteInSerializableTransactionAsync(async ct =>
+            var (session, booking, teacher) = await _unitOfWork.ExecuteInSerializableTransactionAsync(async ct =>
             {
                 Guid teacherProfileId;
                 if (request.TeacherProfileId.HasValue)
@@ -127,6 +127,12 @@ namespace iucs.readernest.application.Services
                     teacherProfileId = await AutoAssignTeacherAsync(request, ct);
                 }
 
+                // Every teacher gets one fixed, permanent room (the same one backing
+                // GET /api/users/me/meeting-room) reused for every demo they run, instead of a
+                // fresh random room per booking — so the link in this email never goes stale
+                // and is identical to the one the teacher already sees in their own portal.
+                var teacher = await EnsureTeacherMeetingRoomAsync(teacherProfileId, ct);
+
                 // Demos are always one-time sessions, never recurring, and have no batch
                 var newSession = new ClassSession
                 {
@@ -134,7 +140,7 @@ namespace iucs.readernest.application.Services
                     Type = SessionType.Demo,
                     ScheduledStartAtUtc = request.ScheduledStartAtUtc,
                     ScheduledEndAtUtc = request.ScheduledEndAtUtc,
-                    MeetingRoomId = $"trn-demo-{Guid.NewGuid():N}",
+                    MeetingRoomId = teacher.User.PersonalMeetingRoomId,
                 };
                 await _unitOfWork.Repository<ClassSession>().AddAsync(newSession, ct);
 
@@ -171,66 +177,22 @@ namespace iucs.readernest.application.Services
                 await _auditLog.StageAsync(AuditAction.Create, nameof(DemoBooking), newBooking.Id.ToString(), cancellationToken: ct);
                 await _unitOfWork.SaveChangesAsync(ct);
 
-                return (Session: newSession, Booking: newBooking);
+                return (Session: newSession, Booking: newBooking, Teacher: teacher);
             }, cancellationToken);
 
-            // Booking confirmation to the parent and every extra invitee (they may not
-            // have accounts yet, so this bypasses the user-bound notification log).
-            // The booking itself is already committed at this point — a template-render
-            // glitch or an SMTP failure (e.g. the sender account's own daily limit) must not
-            // turn an already-successful booking into a 500 response, the same reasoning
+            // Booking confirmation to the parent, every extra invitee, and the teacher (they may
+            // not have accounts yet, so this bypasses the user-bound notification log). The
+            // booking itself is already committed at this point — a template-render glitch or an
+            // SMTP failure (e.g. the sender account's own daily limit) must not turn an
+            // already-successful booking into a 500 response, the same reasoning
             // NotificationService.SendRenderedEmailAsync already applies to every other email
             // this app sends. Confirmed via production logs: this exact path was throwing an
             // uncaught SmtpException after the booking had already been saved.
-            try
-            {
-                var jitsiConfigJson = await _unitOfWork.Repository<Integration>().Query()
-                    .Where(i => i.Key == "jitsi")
-                    .Select(i => i.ConfigJson)
-                    .FirstOrDefaultAsync(cancellationToken);
-                var domain = JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
-
-                // No account exists yet for a demo lead, so each invitee gets their own token
-                // (name + email baked in, expiring a couple of hours past the demo) instead of
-                // a bare room name that would work forever for anyone who ever saw the email.
-                string JoinUrlFor(string participantName, string participantEmail) =>
-                    JitsiLinkBuilder.BuildJoinUrl(
-                        session.MeetingRoomId,
-                        jitsiConfigJson,
-                        _jitsiTokenService.CreateToken(
-                            domain, jitsiConfigJson, session.MeetingRoomId!, participantName, participantEmail,
-                            moderator: false, request.ScheduledEndAtUtc.AddHours(2)),
-                        participantName)
-                    ?? "#";
-
-                var (parentSubject, parentHtml) = await _emailTemplateService.RenderAsync(
-                    "demo-confirmed",
-                    new Dictionary<string, string>
-                    {
-                        ["ChildName"] = booking.ChildName,
-                        ["WhenLocal"] = DateTimeDisplay.ToLocal(request.ScheduledStartAtUtc),
-                        ["JoinUrl"] = JoinUrlFor(booking.ParentName, booking.ParentEmail),
-                    },
-                    cancellationToken);
-                await _emailSender.SendAsync(booking.ParentEmail, parentSubject, parentHtml, cancellationToken);
-                foreach (var participant in booking.Participants.Where(p => !string.IsNullOrWhiteSpace(p.Email)))
-                {
-                    var (participantSubject, participantHtml) = await _emailTemplateService.RenderAsync(
-                        "demo-confirmed",
-                        new Dictionary<string, string>
-                        {
-                            ["ChildName"] = booking.ChildName,
-                            ["WhenLocal"] = DateTimeDisplay.ToLocal(request.ScheduledStartAtUtc),
-                            ["JoinUrl"] = JoinUrlFor(participant.Name, participant.Email!),
-                        },
-                        cancellationToken);
-                    await _emailSender.SendAsync(participant.Email!, participantSubject, participantHtml, cancellationToken);
-                }
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogError(ex, "Demo confirmation email delivery failed for booking {BookingId}", booking.Id);
-            }
+            await SendParentDemoLinkEmailsAsync(session, booking, cancellationToken);
+            await SendTeacherDemoLinkEmailAsync(
+                session, booking, teacher, "demo-scheduled-teacher",
+                new Dictionary<string, string> { ["ParentName"] = booking.ParentName },
+                cancellationToken);
 
             // New lead lands in the client's CRM (no-op when no webhook is configured)
             await _crmNotifier.PushLeadEventAsync("lead.created", new
@@ -585,6 +547,7 @@ namespace iucs.readernest.application.Services
             var result = await _unitOfWork.ExecuteInSerializableTransactionAsync(async ct =>
             {
                 var booking = await _unitOfWork.Repository<DemoBooking>().Query()
+                    .Include(b => b.Participants)
                     .FirstOrDefaultAsync(b => b.Id == bookingId, ct)
                     ?? throw new NotFoundException(nameof(DemoBooking), bookingId);
 
@@ -609,10 +572,7 @@ namespace iucs.readernest.application.Services
                     .FirstOrDefaultAsync(s => s.Id == classSessionId, ct)
                     ?? throw new NotFoundException(nameof(ClassSession), classSessionId);
 
-                var newTeacher = await _unitOfWork.Repository<TeacherProfile>().Query()
-                    .Include(t => t.User)
-                    .FirstOrDefaultAsync(t => t.Id == request.TeacherProfileId, ct)
-                    ?? throw new NotFoundException(nameof(TeacherProfile), request.TeacherProfileId);
+                var newTeacher = await EnsureTeacherMeetingRoomAsync(request.TeacherProfileId, ct);
 
                 if (newTeacher.User.Status != UserStatus.Active)
                 {
@@ -644,6 +604,11 @@ namespace iucs.readernest.application.Services
                     .FirstOrDefaultAsync(t => t.Id == demoSession.TeacherProfileId, ct);
 
                 demoSession.TeacherProfileId = newTeacher.Id;
+                // The room is the teacher's fixed personal room, so it must follow them --
+                // otherwise the parent's already-sent link keeps pointing at the old teacher's
+                // room. SendDemoLinkEmailsAsync below re-sends the parent/participants their
+                // demo-confirmed email with the new room's link so they're never left stale.
+                demoSession.MeetingRoomId = newTeacher.User.PersonalMeetingRoomId;
 
                 await _auditLog.StageAsync(
                     AuditAction.Update,
@@ -678,6 +643,12 @@ namespace iucs.readernest.application.Services
                         ["StartAtLocal"] = DateTimeDisplay.ToLocal(result.Session.ScheduledStartAtUtc, result.NewTeacher.User.TimeZoneId),
                         ["EndAtLocal"] = DateTimeDisplay.ToLocal(result.Session.ScheduledEndAtUtc, result.NewTeacher.User.TimeZoneId),
                         ["Reason"] = string.IsNullOrWhiteSpace(request.Reason) ? string.Empty : $"Reason: {request.Reason}",
+                        ["JoinUrl"] = await BuildDemoJoinUrlAsync(
+                            result.Session,
+                            $"{result.NewTeacher.User.FirstName} {result.NewTeacher.User.LastName}".Trim(),
+                            result.NewTeacher.User.Email,
+                            moderator: true,
+                            cancellationToken),
                     },
                     cancellationToken);
 
@@ -702,7 +673,77 @@ namespace iucs.readernest.application.Services
                 _logger.LogError(ex, "Teacher reassignment notification failed for booking {BookingId}", bookingId);
             }
 
+            // The room moved to the new teacher's fixed room -- the parent (and every extra
+            // invitee) already has a link to the old room, so re-send the demo-confirmed email
+            // with the new one or they'd be locked out at demo time.
+            await SendParentDemoLinkEmailsAsync(result.Session, result.Booking, cancellationToken);
+
             return await GetAsync(bookingId, cancellationToken);
+        }
+
+        /// <summary>
+        /// Manually re-sends the demo's join link to the parent, every extra invitee, and the
+        /// assigned teacher -- for when a parent reports never getting (or losing) the original
+        /// confirmation email. Always uses the teacher's current fixed room: if this booking
+        /// still carries a pre-fixed-link random room (created before this feature shipped), it
+        /// is corrected to the teacher's permanent room here, same as CreateAsync/ReassignTeacherAsync.
+        /// </summary>
+        public async Task<DemoBookingDto> ResendLinkAsync(Guid bookingId, CancellationToken cancellationToken = default)
+        {
+            var (session, booking, teacher) = await _unitOfWork.ExecuteInSerializableTransactionAsync(async ct =>
+            {
+                var demoBooking = await _unitOfWork.Repository<DemoBooking>().Query()
+                    .Include(b => b.Participants)
+                    .FirstOrDefaultAsync(b => b.Id == bookingId, ct)
+                    ?? throw new NotFoundException(nameof(DemoBooking), bookingId);
+
+                if (demoBooking.ClassSessionId is not { } sessionId)
+                {
+                    throw new DomainValidationException("This booking has no linked class session to send a link for.");
+                }
+
+                var demoSession = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                    .FirstOrDefaultAsync(s => s.Id == sessionId, ct)
+                    ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+
+                var teacherProfile = await EnsureTeacherMeetingRoomAsync(demoSession.TeacherProfileId, ct);
+                demoSession.MeetingRoomId = teacherProfile.User.PersonalMeetingRoomId;
+                await _unitOfWork.SaveChangesAsync(ct);
+
+                return (Session: demoSession, Booking: demoBooking, Teacher: teacherProfile);
+            }, cancellationToken);
+
+            await SendParentDemoLinkEmailsAsync(session, booking, cancellationToken);
+            await SendTeacherDemoLinkEmailAsync(
+                session, booking, teacher, "demo-scheduled-teacher",
+                new Dictionary<string, string> { ["ParentName"] = booking.ParentName },
+                cancellationToken);
+
+            return await GetAsync(bookingId, cancellationToken);
+        }
+
+        /// <summary>
+        /// The parent's join link for this demo (plus the moment it stops working), for staff to
+        /// copy and share manually (WhatsApp, SMS) instead of relying on the email actually
+        /// landing. Same room and link-building as the email; does not mutate anything, so unlike
+        /// ResendLinkAsync it does not self-heal a pre-fixed-link booking's room -- call
+        /// ResendLinkAsync first if that matters here.
+        /// </summary>
+        public async Task<(string JoinUrl, DateTime ExpiresAtUtc)> GetJoinLinkAsync(Guid bookingId, CancellationToken cancellationToken = default)
+        {
+            var booking = await _unitOfWork.Repository<DemoBooking>().Query()
+                .Include(b => b.ClassSession)
+                .FirstOrDefaultAsync(b => b.Id == bookingId, cancellationToken)
+                ?? throw new NotFoundException(nameof(DemoBooking), bookingId);
+
+            if (booking.ClassSession is not { } session)
+            {
+                throw new DomainValidationException("This booking has no linked class session to build a link for.");
+            }
+
+            var expiresAtUtc = session.ScheduledEndAtUtc.AddHours(2);
+            var joinUrl = await BuildDemoJoinUrlAsync(session, booking.ParentName, booking.ParentEmail, moderator: false, cancellationToken);
+            return (joinUrl, expiresAtUtc);
         }
 
         public async Task<IReadOnlyList<TeacherWorkloadDto>> GetTeacherWorkloadAsync(
@@ -885,6 +926,138 @@ namespace iucs.readernest.application.Services
         }
 
         private sealed record FollowUpAuditPayload(string? Note, DateOnly? NextFollowUpOn);
+
+        /// <summary>
+        /// Every teacher's fixed demo room: their permanent personal meeting room (the same
+        /// one GET /api/users/me/meeting-room mints), so a demo's join link is stable across
+        /// every booking, reassignment and resend rather than a new random room each time.
+        /// Mints the room on first use, same convention as UsersController.MyMeetingRoom.
+        /// Caller is responsible for SaveChangesAsync (this may run inside a larger transaction).
+        /// </summary>
+        private async Task<TeacherProfile> EnsureTeacherMeetingRoomAsync(Guid teacherProfileId, CancellationToken cancellationToken)
+        {
+            var teacher = await _unitOfWork.Repository<TeacherProfile>().TrackedQuery()
+                .Include(t => t.User)
+                .FirstOrDefaultAsync(t => t.Id == teacherProfileId, cancellationToken)
+                ?? throw new NotFoundException(nameof(TeacherProfile), teacherProfileId);
+
+            if (string.IsNullOrEmpty(teacher.User.PersonalMeetingRoomId))
+            {
+                teacher.User.PersonalMeetingRoomId = $"trn-personal-{Guid.NewGuid():N}";
+                _unitOfWork.Repository<User>().Update(teacher.User);
+            }
+
+            return teacher;
+        }
+
+        /// <summary>
+        /// Builds one recipient's signed join URL for a demo, against the demo's fixed room
+        /// (session.MeetingRoomId — the teacher's permanent personal room). No account exists
+        /// yet for a demo lead, so each invitee gets their own token (name + email baked in,
+        /// expiring a couple of hours past the demo) instead of a bare room name that would
+        /// work forever for anyone who ever saw the email.
+        /// </summary>
+        private async Task<string> BuildDemoJoinUrlAsync(
+            ClassSession session, string participantName, string participantEmail, bool moderator, CancellationToken cancellationToken)
+        {
+            var jitsiConfigJson = await _unitOfWork.Repository<Integration>().Query()
+                .Where(i => i.Key == "jitsi")
+                .Select(i => i.ConfigJson)
+                .FirstOrDefaultAsync(cancellationToken);
+            var domain = JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
+            return JitsiLinkBuilder.BuildJoinUrl(
+                session.MeetingRoomId,
+                jitsiConfigJson,
+                _jitsiTokenService.CreateToken(
+                    domain, jitsiConfigJson, session.MeetingRoomId!, participantName, participantEmail,
+                    moderator, session.ScheduledEndAtUtc.AddHours(2)),
+                participantName)
+                ?? "#";
+        }
+
+        /// <summary>
+        /// Sends (or re-sends) the demo's join link to the parent and every extra invitee —
+        /// always the same room (session.MeetingRoomId, the teacher's fixed personal room).
+        /// Used by CreateAsync, ReassignTeacherAsync (the room changes with the teacher, so the
+        /// parent's earlier link goes stale) and ResendLinkAsync, so the three call sites can't
+        /// drift. Swallows delivery failures: the write this follows is already committed, and a
+        /// template-render glitch or SMTP hiccup must not turn an already-successful write into a
+        /// 500 (confirmed via production logs — this exact path once threw an uncaught
+        /// SmtpException after the booking had already saved).
+        /// </summary>
+        private async Task SendParentDemoLinkEmailsAsync(ClassSession session, DemoBooking booking, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var (parentSubject, parentHtml) = await _emailTemplateService.RenderAsync(
+                    "demo-confirmed",
+                    new Dictionary<string, string>
+                    {
+                        ["ChildName"] = booking.ChildName,
+                        ["WhenLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc),
+                        ["JoinUrl"] = await BuildDemoJoinUrlAsync(session, booking.ParentName, booking.ParentEmail, moderator: false, cancellationToken),
+                    },
+                    cancellationToken);
+                await _emailSender.SendAsync(booking.ParentEmail, parentSubject, parentHtml, cancellationToken);
+                foreach (var participant in booking.Participants.Where(p => !string.IsNullOrWhiteSpace(p.Email)))
+                {
+                    var (participantSubject, participantHtml) = await _emailTemplateService.RenderAsync(
+                        "demo-confirmed",
+                        new Dictionary<string, string>
+                        {
+                            ["ChildName"] = booking.ChildName,
+                            ["WhenLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc),
+                            ["JoinUrl"] = await BuildDemoJoinUrlAsync(session, participant.Name, participant.Email!, moderator: false, cancellationToken),
+                        },
+                        cancellationToken);
+                    await _emailSender.SendAsync(participant.Email!, participantSubject, participantHtml, cancellationToken);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "Demo link email delivery to parent/participants failed for booking {BookingId}", booking.Id);
+            }
+        }
+
+        /// <summary>
+        /// Sends the assigned teacher their copy of the demo's join link (same room as the
+        /// parent, a moderator token) using the given template plus whatever extra placeholders
+        /// that template needs beyond ChildName/WhenLocal/JoinUrl. Swallows delivery failures for
+        /// the same reason as SendParentDemoLinkEmailsAsync.
+        /// </summary>
+        private async Task SendTeacherDemoLinkEmailAsync(
+            ClassSession session,
+            DemoBooking booking,
+            TeacherProfile teacher,
+            string templateKey,
+            Dictionary<string, string>? extraPlaceholders,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                var teacherName = $"{teacher.User.FirstName} {teacher.User.LastName}".Trim();
+                var placeholders = new Dictionary<string, string>
+                {
+                    ["ChildName"] = booking.ChildName,
+                    ["WhenLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc, teacher.User.TimeZoneId),
+                    ["JoinUrl"] = await BuildDemoJoinUrlAsync(session, teacherName, teacher.User.Email, moderator: true, cancellationToken),
+                };
+                if (extraPlaceholders is not null)
+                {
+                    foreach (var (key, value) in extraPlaceholders)
+                    {
+                        placeholders[key] = value;
+                    }
+                }
+
+                var (subject, html) = await _emailTemplateService.RenderAsync(templateKey, placeholders, cancellationToken);
+                await _emailSender.SendAsync(teacher.User.Email, subject, html, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "Demo link email delivery to teacher failed for booking {BookingId}", booking.Id);
+            }
+        }
 
         private IQueryable<DemoBooking> BaseQuery()
         {

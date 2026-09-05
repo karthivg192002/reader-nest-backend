@@ -34,7 +34,8 @@ namespace iucs.readernest.api.Controllers
             [FromQuery] Guid? batchId,
             CancellationToken cancellationToken)
         {
-            return Ok(await _sessionService.ListAsync(fromUtc, toUtc, teacherProfileId, batchId, cancellationToken));
+            return Ok(await _sessionService.ListAsync(
+                AsUtc(fromUtc), AsUtc(toUtc), teacherProfileId, batchId, cancellationToken));
         }
 
         /// <summary>Teacher dashboard agenda: the caller's own sessions.</summary>
@@ -46,8 +47,16 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-            return Ok(await _sessionService.ListForTeacherUserAsync(userId, fromUtc, toUtc, cancellationToken));
+            return Ok(await _sessionService.ListForTeacherUserAsync(userId, AsUtc(fromUtc), AsUtc(toUtc), cancellationToken));
         }
+
+        // Model binding parses a bare date/no-offset query value (e.g. "2026-01-01") as
+        // Kind=Unspecified, which Npgsql then refuses to compare against a timestamptz
+        // column (a 500, not a friendly 400). The frontend always sends a full ISO instant
+        // via toISOString(), which binds as Kind=Utc already, so this is a no-op for real
+        // traffic and only hardens the endpoint against a malformed/hand-built query string.
+        private static DateTime AsUtc(DateTime value) =>
+            value.Kind == DateTimeKind.Utc ? value : DateTime.SpecifyKind(value, DateTimeKind.Utc);
 
         /// <summary>Any session by id — staff-scoped for the same reason as the list above.</summary>
         [HttpGet("{id:guid}")]
@@ -176,13 +185,25 @@ namespace iucs.readernest.api.Controllers
             return recording is null ? NoContent() : Ok(recording);
         }
 
-        /// <summary>Parents see their own child's recordings only via the scoped parent-portal resources endpoint.</summary>
+        /// <summary>
+        /// Parents see their own child's recordings only via the scoped parent-portal resources
+        /// endpoint. Admin/Teacher pass unconditionally; a Sub Admin (e.g. Coordinator) additionally
+        /// needs SessionCalendarManagement:View — the same grant their preset already carries for
+        /// calendar work — checked manually here rather than via [HasPermission], which would deny
+        /// Teacher (Teacher has no permission claims at all; see AuthService.LoadPermissionClaimsAsync).
+        /// </summary>
         [HttpGet("{id:guid}/recordings")]
-        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)},{nameof(UserRole.SubAdmin)}")]
         public async Task<ActionResult<IReadOnlyList<SessionRecordingDto>>> ListRecordings(
             Guid id,
             CancellationToken cancellationToken)
         {
+            if (User.IsInRole(nameof(UserRole.SubAdmin)) &&
+                !User.HasClaim(JwtTokenService.PermissionClaimType, $"{PermissionModule.SessionCalendarManagement}:{PermissionAction.View}"))
+            {
+                return Forbid();
+            }
+
             return Ok(await _sessionService.ListRecordingsAsync(id, cancellationToken));
         }
 

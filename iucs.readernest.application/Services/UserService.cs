@@ -521,6 +521,23 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException($"Module '{duplicateModule.Key}' appears more than once.");
             }
 
+            // Module was a compile-time-checked enum on the wire until it became a plain
+            // string key (to allow Admin-defined custom modules) — model binding no longer
+            // rejects a bogus value on its own.
+            var requestedKeys = permissions.Select(p => p.Module).Distinct().ToList();
+            if (requestedKeys.Count > 0)
+            {
+                var validKeys = (await _unitOfWork.Repository<PermissionModuleDefinition>().Query()
+                    .Select(m => m.Key)
+                    .ToListAsync(cancellationToken))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var unknown = requestedKeys.Where(k => !validKeys.Contains(k)).ToList();
+                if (unknown.Count > 0)
+                {
+                    throw new DomainValidationException($"Unknown permission module(s): {string.Join(", ", unknown)}.");
+                }
+            }
+
             // Only an explicit role assignment (apply-preset) stamps the user's
             // named role; hand-editing individual checkboxes leaves it as-is.
             if (roleDefinitionId.HasValue)
@@ -658,6 +675,11 @@ namespace iucs.readernest.application.Services
             user.PinHash = _passwordHasher.Hash(temporaryPin);
             _unitOfWork.Repository<User>().Update(user);
 
+            // The original welcome notification (and any earlier resend) still shows the
+            // now-invalid PIN in plaintext in the parent's persistent Notifications feed —
+            // redact those before adding this send's own (PIN-free) confirmation row below.
+            await RedactStalePinNotificationsAsync(user.Id, cancellationToken);
+
             await _unitOfWork.Repository<Notification>().AddAsync(
                 new Notification
                 {
@@ -701,6 +723,10 @@ namespace iucs.readernest.application.Services
             user.PinHash = _passwordHasher.Hash(temporaryPin);
             _unitOfWork.Repository<User>().Update(user);
 
+            // Same staleness problem as ResendCredentialsAsync: the original welcome
+            // notification still shows the PIN this reset just invalidated.
+            await RedactStalePinNotificationsAsync(user.Id, cancellationToken);
+
             // Logged as an admin-visible action, distinct from ResendCredentialsAsync's audit
             // entry, since this one was never sent anywhere and only the viewing admin ever
             // saw the plaintext PIN.
@@ -713,6 +739,22 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return temporaryPin;
+        }
+
+        // The welcome-credentials notification (and, in principle, any future template that
+        // embeds a plaintext PIN) is a permanent row in the recipient's Notifications feed —
+        // once the PIN it shows has been superseded by a reset or resend, leaving the old
+        // plaintext value on screen is actively misleading, not just stale. Blank it out in
+        // place rather than deleting the row, so the feed still shows that onboarding happened.
+        private async Task RedactStalePinNotificationsAsync(Guid userId, CancellationToken cancellationToken)
+        {
+            const string redactedBody =
+                "Your login PIN was reset after this message was sent, so it no longer shows your current PIN. Contact your admin if you need it resent.";
+
+            await _unitOfWork.Repository<Notification>().ExecuteUpdateAsync(
+                n => n.RecipientUserId == userId && n.TemplateKey == "welcome-credentials" && n.Body != redactedBody,
+                setters => setters.SetProperty(n => n.Body, redactedBody),
+                cancellationToken);
         }
 
         public async Task<CredentialChannelsDto> GetCredentialChannelsAsync(CancellationToken cancellationToken = default)

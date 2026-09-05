@@ -263,6 +263,19 @@ namespace iucs.readernest.tests
                 new Department { Id = WellKnownDepartments.Phonics, Name = "Phonics", IsActive = true },
                 new Department { Id = WellKnownDepartments.Maths, Name = "Maths", IsActive = true });
 
+            // Mirrors DatabaseInitializer.SeedPermissionModulesAsync — RoleService/UserService/
+            // AccessRequestService/MenuService all now validate an incoming module key against
+            // this table (it stopped being a compile-time-checked enum on the wire once custom
+            // modules became possible), so every smoke test using a built-in module needs it seeded.
+            Context.PermissionModuleDefinitions.AddRange(
+                Enum.GetValues<PermissionModule>().Select((m, i) => new PermissionModuleDefinition
+                {
+                    Key = m.ToString(),
+                    Label = m.ToString(),
+                    IsSystem = true,
+                    SortOrder = i,
+                }));
+
             // Same catalog production seeds, so smoke tests exercise real templated
             // content (Subject/HtmlBody) instead of EmailTemplateService's fallback text.
             Context.EmailTemplates.AddRange(EmailTemplateSeedData.All.Select(seed => new EmailTemplate

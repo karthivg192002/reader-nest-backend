@@ -131,6 +131,7 @@ namespace iucs.readernest.api.Services
 
                     subscription.NextBillingAtUtc = subscription.PackagePlan.BillingCycle switch
                     {
+                        BillingCycle.Biweekly => subscription.NextBillingAtUtc!.Value.AddDays(14),
                         BillingCycle.Monthly => subscription.NextBillingAtUtc!.Value.AddMonths(1),
                         BillingCycle.Quarterly => subscription.NextBillingAtUtc!.Value.AddMonths(3),
                         BillingCycle.Yearly => subscription.NextBillingAtUtc!.Value.AddYears(1),
@@ -190,32 +191,42 @@ namespace iucs.readernest.api.Services
                 await unitOfWork.SaveChangesAsync(cancellationToken);
             }
 
-            // Account suspension: any parent left with an overdue invoice and no active
-            // suspension gets one; the parent portal blocks sessions/content while Active
+            // Suspension: any (parent, child) pair left with an invoice overdue by at least the
+            // configured grace period (Settings → Notifications, BillingSettings) and no active
+            // suspension gets one. Grouped by child, not just parent -- an invoice tied to one
+            // child (ChildId set) only ever blocks that child; a family-level invoice (ChildId
+            // null, e.g. a manually-created one not tied to a subscription) blocks every child
+            // on the account. See FeeSuspension's own doc comment.
             var suspendedCount = 0;
-            var overdueParents = await unitOfWork.Repository<Invoice>().Query()
-                .Where(i => i.Status == InvoiceStatus.Overdue)
-                .Select(i => new { i.ParentProfileId, i.Id, i.InvoiceNumber })
+            var graceDays = await BillingSettings.GetSuspensionGraceDaysAsync(unitOfWork, cancellationToken);
+            var suspensionCutoff = today.AddDays(-graceDays);
+            var overdueInvoices = await unitOfWork.Repository<Invoice>().Query()
+                .Where(i => i.Status == InvoiceStatus.Overdue && i.DueDate <= suspensionCutoff)
+                .Select(i => new { i.ParentProfileId, i.ChildId, i.Id, i.InvoiceNumber })
                 .ToListAsync(cancellationToken);
 
             // One query for every already-suspended parent, instead of an ExistsAsync per
-            // overdue parent — that loop scaled its round trips with the size of the overdue
-            // book, which is exactly the population that grows when collections are going badly.
-            var overdueParentIds = overdueParents.Select(o => o.ParentProfileId).Distinct().ToList();
-            var alreadySuspendedParentIds = (await unitOfWork.Repository<FeeSuspension>().Query()
-                    .Where(s => s.Status == SuspensionStatus.Active
-                                && overdueParentIds.Contains(s.ParentProfileId))
-                    .Select(s => s.ParentProfileId)
-                    .ToListAsync(cancellationToken))
-                .ToHashSet();
+            // overdue (parent, child) pair — that loop scaled its round trips with the size of
+            // the overdue book, which is exactly the population that grows when collections are
+            // going badly. Loaded once per parent and matched in memory below since a single
+            // parent can appear in several groups (one per child).
+            var overdueParentIds = overdueInvoices.Select(o => o.ParentProfileId).Distinct().ToList();
+            var existingActiveSuspensions = await unitOfWork.Repository<FeeSuspension>().Query()
+                .Where(s => s.Status == SuspensionStatus.Active && overdueParentIds.Contains(s.ParentProfileId))
+                .Select(s => new { s.ParentProfileId, s.ChildId })
+                .ToListAsync(cancellationToken);
 
             // Caught live: NotificationType.FeeSuspension existed in the enum with zero templates
             // using it -- a parent's access got cut off here with no warning or explanation at
             // all; they'd only find out by trying to access something and being blocked.
             var newlySuspended = new List<(Guid ParentProfileId, string InvoiceNumber)>();
-            foreach (var group in overdueParents.GroupBy(o => o.ParentProfileId))
+            foreach (var group in overdueInvoices.GroupBy(o => new { o.ParentProfileId, o.ChildId }))
             {
-                if (alreadySuspendedParentIds.Contains(group.Key))
+                // An account-wide (ChildId null) suspension already covers this pair regardless
+                // of which child it's for; a same-child suspension only covers an exact match.
+                var alreadyCovered = existingActiveSuspensions.Any(s =>
+                    s.ParentProfileId == group.Key.ParentProfileId && (s.ChildId == null || s.ChildId == group.Key.ChildId));
+                if (alreadyCovered)
                 {
                     continue;
                 }
@@ -224,13 +235,14 @@ namespace iucs.readernest.api.Services
                 await unitOfWork.Repository<FeeSuspension>().AddAsync(
                     new FeeSuspension
                     {
-                        ParentProfileId = group.Key,
+                        ParentProfileId = group.Key.ParentProfileId,
+                        ChildId = group.Key.ChildId,
                         InvoiceId = first.Id,
                         Reason = "Automatic suspension: invoice overdue.",
                         SuspendedAtUtc = now,
                     },
                     cancellationToken);
-                newlySuspended.Add((group.Key, first.InvoiceNumber));
+                newlySuspended.Add((group.Key.ParentProfileId, first.InvoiceNumber));
                 suspendedCount++;
             }
 
@@ -356,7 +368,8 @@ namespace iucs.readernest.api.Services
             }
 
             var notifications = services.GetRequiredService<INotificationService>();
-            var reminderWindow = today.AddDays(3);
+            var reminderDays = await BillingSettings.GetReminderDaysBeforeDueAsync(unitOfWork, cancellationToken);
+            var reminderWindow = today.AddDays(reminderDays);
 
             var dueInvoices = await unitOfWork.Repository<Invoice>().Query()
                 .Include(i => i.ParentProfile).ThenInclude(p => p.User)

@@ -13,7 +13,7 @@ namespace iucs.readernest.application.Services
         Task<IReadOnlyList<MenuItemDto>> GetForUserAsync(
             Guid userId,
             UserRole role,
-            IReadOnlyCollection<PermissionModule> viewableModules,
+            IReadOnlyCollection<string> viewableModules,
             CancellationToken cancellationToken = default);
 
         /// <summary>All items (including inactive), optionally filtered by portal, for the admin menu manager.</summary>

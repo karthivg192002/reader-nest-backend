@@ -33,6 +33,14 @@ namespace iucs.readernest.application.Services
         Task UpdateChildNotesAsync(Guid childId, string? notes, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Soft-deletes a child (e.g. a mistaken or test enrolment). Refuses if the child has
+        /// any Active batch enrolment or any not-yet-settled invoice, since removing the child
+        /// while those still reference it would strand real academic/billing history rather
+        /// than clean it up — withdraw the enrolment / cancel the invoice first.
+        /// </summary>
+        Task RemoveChildAsync(Guid childId, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Row-by-row: each Child is created directly as active (an admin-operated bulk data
         /// path, so this deliberately skips the parent-submitted EnrollmentForm approval step —
         /// see UsersController.BulkImportStudents). Columns: ParentEmail (must match an existing

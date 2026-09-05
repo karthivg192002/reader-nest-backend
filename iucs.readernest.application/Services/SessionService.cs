@@ -817,11 +817,29 @@ namespace iucs.readernest.application.Services
                 // access — mirrors AcademicOpsService.CaptureJoinAttendanceAsync's own filter,
                 // which this check used to be looser than (attendance wasn't captured for a
                 // non-active enrollment even though the room let them in).
-                return await _unitOfWork.Repository<BatchEnrollment>().Query()
+                var enrolledChildren = await _unitOfWork.Repository<BatchEnrollment>().Query()
                     .Where(e => e.BatchId == session.BatchId.Value && e.Status == EnrollmentStatus.Active)
-                    .Join(_unitOfWork.Repository<Child>().Query(), e => e.ChildId, c => c.Id, (e, c) => c.ParentProfileId)
-                    .Join(_unitOfWork.Repository<ParentProfile>().Query(), parentProfileId => parentProfileId, p => p.Id, (parentProfileId, p) => p.UserId)
-                    .AnyAsync(u => u == userId, cancellationToken);
+                    .Join(_unitOfWork.Repository<Child>().Query(), e => e.ChildId, c => c.Id, (e, c) => new { c.Id, c.ParentProfileId, ParentUserId = c.ParentProfile.UserId })
+                    .Where(c => c.ParentUserId == userId)
+                    .ToListAsync(cancellationToken);
+                if (enrolledChildren.Count == 0)
+                {
+                    return false;
+                }
+
+                // FeeSuspension existed but nothing here ever checked it -- a suspended parent
+                // could already join their child's live class via this exact path despite the
+                // entity's own doc comment ("cannot join live sessions"). Blocked only when
+                // EVERY one of this parent's enrolled children in this specific batch is
+                // suspended -- a sibling sharing the batch with fees current still gets in.
+                foreach (var child in enrolledChildren)
+                {
+                    if (!await SuspensionCheck.IsChildBlockedAsync(_unitOfWork, child.ParentProfileId, child.Id, cancellationToken))
+                    {
+                        return true;
+                    }
+                }
+                return false;
             }
 
             // A demo session has no batch — the lead is a DemoBooking (parent may not have
@@ -846,7 +864,7 @@ namespace iucs.readernest.application.Services
             if (user.Role == UserRole.SubAdmin)
             {
                 return await _unitOfWork.Repository<SubAdminPermission>().ExistsAsync(
-                    p => p.UserId == userId && p.Module == PermissionModule.SessionCalendarManagement && p.CanEdit,
+                    p => p.UserId == userId && p.Module == nameof(PermissionModule.SessionCalendarManagement) && p.CanEdit,
                     cancellationToken);
             }
 
@@ -903,7 +921,7 @@ namespace iucs.readernest.application.Services
                 // token that's valid indefinitely — it dies with the class, not with the link.
                 session.ScheduledEndAtUtc.AddHours(2));
 
-            return new JitsiJoinDto { Room = session.MeetingRoomId, Domain = domain, Token = token };
+            return new JitsiJoinDto { Room = session.MeetingRoomId, Domain = domain, Token = token, ScheduledEndAtUtc = session.ScheduledEndAtUtc };
         }
 
         public async Task<ClassroomSettingsDto> GetClassroomSettingsAsync(CancellationToken cancellationToken = default)

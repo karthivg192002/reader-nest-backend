@@ -14,10 +14,22 @@ namespace iucs.readernest.application.Dto.Portal
 
         public int ClassesRemaining { get; set; }
 
-        public double AttendancePercent { get; set; }
+        /// <summary>Null when this child has no attendance-marked sessions yet -- distinct from
+        /// a real 0%. Render as "no data yet", not as a default percentage.</summary>
+        public double? AttendancePercent { get; set; }
 
-        /// <summary>paid | due | overdue | suspended</summary>
+        /// <summary>paid | due | overdue | suspended -- genuinely this child's own status; a
+        /// sibling's unrelated overdue invoice never marks another child suspended.</summary>
         public string FeeStatus { get; set; } = "paid";
+
+        /// <summary>True when this specific child's access is blocked (their own suspension,
+        /// or an account-wide one) -- see FeeSuspension's doc comment on the two scopes.</summary>
+        public bool IsSuspended { get; set; }
+
+        /// <summary>The invoice that must be paid to unlock this child specifically. Null when
+        /// not suspended, or when blocked only by an account-wide suspension with no single
+        /// invoice to point at (see ParentDashboardDto.SuspendedInvoiceId for that case).</summary>
+        public Guid? SuspendedInvoiceId { get; set; }
     }
 
     public class ParentDashboardDto
@@ -26,9 +38,21 @@ namespace iucs.readernest.application.Dto.Portal
 
         public bool EnrollmentFormCompleted { get; set; }
 
-        /// <summary>Active fee suspension blocks session/content access and triggers the Pay Now popup.</summary>
+        /// <summary>True when at least one child is suspended -- see each child's own
+        /// IsSuspended for which. Kept for callers that only need "is anything blocked".</summary>
         public bool IsSuspended { get; set; }
 
+        /// <summary>True only when EVERY child on the account is currently suspended -- nothing
+        /// on the account is reachable, so the whole portal can be replaced with a single block
+        /// screen instead of a per-child one. False whenever at least one child still has full
+        /// access, even if others don't.</summary>
+        public bool AllChildrenSuspended { get; set; }
+
+        /// <summary>The invoice to pay to fully unblock the account when AllChildrenSuspended is
+        /// true and every affected child shares one common family-level (ChildId-null) invoice.
+        /// Null otherwise -- with multiple children, resolve each one's own
+        /// ParentChildSummaryDto.SuspendedInvoiceId instead of assuming a single invoice fixes
+        /// everything.</summary>
         public Guid? SuspendedInvoiceId { get; set; }
 
         public IReadOnlyList<ParentChildSummaryDto> Children { get; set; } = [];
@@ -152,7 +176,12 @@ namespace iucs.readernest.application.Dto.Reports
 
         public int UpcomingSessions { get; set; }
 
-        public double StudentAttendancePercent { get; set; }
+        /// <summary>Null when the teacher has no completed, attendance-marked sessions yet —
+        /// distinct from a real 0%. A vacuous "100" here used to make an idle teacher with zero
+        /// sessions delivered look fully utilized on the Management "Teacher Utilization" chart,
+        /// which reads this field as delivery-vs-capacity. Consumers should render null as
+        /// "No data" rather than defaulting it to any percentage.</summary>
+        public double? StudentAttendancePercent { get; set; }
 
         public int SummariesWritten { get; set; }
 
@@ -183,7 +212,9 @@ namespace iucs.readernest.application.Dto.Reports
 
         public string ChildName { get; set; } = null!;
 
-        public double AttendancePercent { get; set; }
+        /// <summary>Null when this child has no attendance-marked sessions yet -- distinct
+        /// from a real 0%.</summary>
+        public double? AttendancePercent { get; set; }
 
         public int SessionsAttended { get; set; }
 
@@ -224,5 +255,74 @@ namespace iucs.readernest.application.Dto.Reports
     public class BulkEmailResultDto
     {
         public int RecipientCount { get; set; }
+    }
+
+    /// <summary>One past Bulk Email send, for the admin History list.</summary>
+    public class BulkEmailHistoryItemDto
+    {
+        public Guid Id { get; set; }
+
+        public string Subject { get; set; } = null!;
+
+        public string SentByName { get; set; } = null!;
+
+        public BulkEmailScope Scope { get; set; }
+
+        public string? BatchName { get; set; }
+
+        public DateTime SentAtUtc { get; set; }
+
+        public int TotalRecipients { get; set; }
+
+        public int SuccessCount { get; set; }
+
+        public int FailureCount { get; set; }
+    }
+
+    /// <summary>One blast's full recipient list with delivery status and any reply, for the
+    /// admin History detail view.</summary>
+    public class BulkEmailBlastDetailDto
+    {
+        public Guid Id { get; set; }
+
+        public string Subject { get; set; } = null!;
+
+        public string Body { get; set; } = null!;
+
+        public string SentByName { get; set; } = null!;
+
+        public BulkEmailScope Scope { get; set; }
+
+        public string? BatchName { get; set; }
+
+        public DateTime SentAtUtc { get; set; }
+
+        public IReadOnlyList<BulkEmailRecipientDto> Recipients { get; set; } = [];
+    }
+
+    public class BulkEmailRecipientDto
+    {
+        public Guid Id { get; set; }
+
+        public string RecipientName { get; set; } = null!;
+
+        public string Email { get; set; } = null!;
+
+        public NotificationStatus Status { get; set; }
+
+        public string? ErrorMessage { get; set; }
+
+        public DateTime? SentAtUtc { get; set; }
+
+        public string? ReplyMessage { get; set; }
+
+        public DateTime? ReplyAtUtc { get; set; }
+    }
+
+    public class ReplyToBulkEmailRequest
+    {
+        [System.ComponentModel.DataAnnotations.Required]
+        [System.ComponentModel.DataAnnotations.MaxLength(4000)]
+        public string Message { get; set; } = null!;
     }
 }

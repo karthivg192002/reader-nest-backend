@@ -5,6 +5,7 @@ using iucs.readernest.application.Helper;
 using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Admission;
 using iucs.readernest.domain.Entities.Billing;
+using iucs.readernest.domain.Entities.Communication;
 using iucs.readernest.domain.Entities.Payouts;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
@@ -85,8 +86,11 @@ namespace iucs.readernest.application.Services
                     SessionsCompleted = teacherCompletedIds.Count,
                     TeacherNoShows = teacherSessions.Count(s => s.Status == SessionStatus.TeacherNoShow),
                     UpcomingSessions = teacherSessions.Count(s => s.Status == SessionStatus.Scheduled && s.ScheduledStartAtUtc > now),
+                    // Null (not a vacuous 100%) when there's no attendance data yet — a teacher
+                    // with zero completed sessions hasn't earned a perfect score, they just
+                    // haven't been measured. See the DTO's doc comment.
                     StudentAttendancePercent = teacherAttendance.Count == 0
-                        ? 100
+                        ? null
                         : Math.Round(100.0 * teacherAttendance.Count(a => a != AttendanceStatus.Absent) / teacherAttendance.Count, 1),
                     SummariesWritten = teacherSessions.Count(s => s.HasSummary),
                     LatestPayoutPeriodYear = latestPayout?.PeriodYear,
@@ -109,7 +113,9 @@ namespace iucs.readernest.application.Services
                 .Select(a => a.Status)
                 .ToListAsync(cancellationToken);
             var attended = attendance.Count(a => a != AttendanceStatus.Absent);
-            var attendancePercent = attendance.Count == 0 ? 100 : Math.Round(100.0 * attended / attendance.Count, 1);
+            // Null (not a vacuous 100%) when there's no attendance data yet -- same fix as
+            // ParentPortalService.GetDashboardAsync and TeacherPerformanceDto.
+            double? attendancePercent = attendance.Count == 0 ? null : Math.Round(100.0 * attended / attendance.Count, 1);
 
             var events = await _unitOfWork.Repository<EngagementEvent>().Query()
                 .Where(e => e.ChildId == childId)
@@ -140,11 +146,13 @@ namespace iucs.readernest.application.Services
             // Generated progress insights: rule-based narrative from the captured signals
             var name = child.FirstName;
             var insights = new List<string>();
-            insights.Add(attendancePercent >= 90
-                ? $"{name} attends consistently ({attendancePercent}%) — a strong routine is in place."
-                : attendancePercent >= 75
-                    ? $"{name}'s attendance is {attendancePercent}%; a steadier routine would compound progress."
-                    : $"Attendance is {attendancePercent}% — missed classes are the biggest lever for {name} right now.");
+            insights.Add(attendancePercent is null
+                ? $"No completed sessions yet for {name} — attendance insights will appear after their first class."
+                : attendancePercent >= 90
+                    ? $"{name} attends consistently ({attendancePercent}%) — a strong routine is in place."
+                    : attendancePercent >= 75
+                        ? $"{name}'s attendance is {attendancePercent}%; a steadier routine would compound progress."
+                        : $"Attendance is {attendancePercent}% — missed classes are the biggest lever for {name} right now.");
             if (quizAttempts > 0)
             {
                 var accuracy = Math.Round(100.0 * quizCorrect / Math.Max(1, quizAttempts));
@@ -411,15 +419,59 @@ namespace iucs.readernest.application.Services
             };
         }
 
-        public async Task<BulkEmailResultDto> SendBulkEmailAsync(BulkEmailRequest request, CancellationToken cancellationToken = default)
+        public async Task<BulkEmailResultDto> SendBulkEmailAsync(
+            Guid sentByUserId, BulkEmailRequest request, CancellationToken cancellationToken = default)
         {
             var recipients = await ResolveBulkEmailRecipientsAsync(request.BatchId, cancellationToken);
 
+            var blast = new BulkEmailBlast
+            {
+                SentByUserId = sentByUserId,
+                Subject = request.Subject,
+                Body = request.Body,
+                Scope = request.BatchId.HasValue ? BulkEmailScope.Batch : BulkEmailScope.AllActiveParents,
+                BatchId = request.BatchId,
+                SentAtUtc = DateTime.UtcNow,
+                TotalRecipients = recipients.Count,
+            };
+            await _unitOfWork.Repository<BulkEmailBlast>().AddAsync(blast, cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            // One recipient's failed delivery (bad address, transport hiccup) must never abort
+            // the rest of the batch — SendEmailAsync already swallows its own delivery error and
+            // reports the resulting status here instead of throwing.
             foreach (var user in recipients)
             {
-                await _notificationService.SendEmailAsync(
-                    user.Id, user.Email, NotificationType.General, request.Subject, request.Body, cancellationToken);
+                var recipient = new BulkEmailRecipient
+                {
+                    BulkEmailBlastId = blast.Id,
+                    RecipientUserId = user.Id,
+                    Email = user.Email,
+                };
+                await _unitOfWork.Repository<BulkEmailRecipient>().AddAsync(recipient, cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+                var status = await _notificationService.SendEmailAsync(
+                    user.Id, user.Email, NotificationType.General, request.Subject, request.Body,
+                    recipient.Id, cancellationToken);
+
+                recipient.Status = status;
+                recipient.SentAtUtc = status == NotificationStatus.Sent ? DateTime.UtcNow : null;
+                if (status == NotificationStatus.Failed)
+                {
+                    recipient.ErrorMessage = "Email delivery failed.";
+                    blast.FailureCount++;
+                }
+                else
+                {
+                    blast.SuccessCount++;
+                }
+
+                _unitOfWork.Repository<BulkEmailRecipient>().Update(recipient);
             }
+
+            _unitOfWork.Repository<BulkEmailBlast>().Update(blast);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return new BulkEmailResultDto { RecipientCount = recipients.Count };
         }
@@ -428,6 +480,93 @@ namespace iucs.readernest.application.Services
         {
             var recipients = await ResolveBulkEmailRecipientsAsync(batchId, cancellationToken);
             return new BulkEmailResultDto { RecipientCount = recipients.Count };
+        }
+
+        public async Task<IReadOnlyList<BulkEmailHistoryItemDto>> GetBulkEmailHistoryAsync(CancellationToken cancellationToken = default)
+        {
+            return await _unitOfWork.Repository<BulkEmailBlast>().Query()
+                .Include(b => b.SentByUser)
+                .Include(b => b.Batch)
+                .OrderByDescending(b => b.SentAtUtc)
+                .Select(b => new BulkEmailHistoryItemDto
+                {
+                    Id = b.Id,
+                    Subject = b.Subject,
+                    SentByName = (b.SentByUser.FirstName + " " + b.SentByUser.LastName).Trim(),
+                    Scope = b.Scope,
+                    BatchName = b.Batch != null ? b.Batch.Name : null,
+                    SentAtUtc = b.SentAtUtc,
+                    TotalRecipients = b.TotalRecipients,
+                    SuccessCount = b.SuccessCount,
+                    FailureCount = b.FailureCount,
+                })
+                .ToListAsync(cancellationToken);
+        }
+
+        public async Task<BulkEmailBlastDetailDto> GetBulkEmailBlastDetailAsync(Guid blastId, CancellationToken cancellationToken = default)
+        {
+            var blast = await _unitOfWork.Repository<BulkEmailBlast>().Query()
+                .Include(b => b.SentByUser)
+                .Include(b => b.Batch)
+                .Include(b => b.Recipients).ThenInclude(r => r.RecipientUser)
+                .Include(b => b.Recipients).ThenInclude(r => r.Reply)
+                .FirstOrDefaultAsync(b => b.Id == blastId, cancellationToken)
+                ?? throw new NotFoundException(nameof(BulkEmailBlast), blastId);
+
+            return new BulkEmailBlastDetailDto
+            {
+                Id = blast.Id,
+                Subject = blast.Subject,
+                Body = blast.Body,
+                SentByName = $"{blast.SentByUser.FirstName} {blast.SentByUser.LastName}".Trim(),
+                Scope = blast.Scope,
+                BatchName = blast.Batch?.Name,
+                SentAtUtc = blast.SentAtUtc,
+                Recipients = blast.Recipients
+                    .OrderBy(r => r.RecipientUser.FirstName)
+                    .Select(r => new BulkEmailRecipientDto
+                    {
+                        Id = r.Id,
+                        RecipientName = $"{r.RecipientUser.FirstName} {r.RecipientUser.LastName}".Trim(),
+                        Email = r.Email,
+                        Status = r.Status,
+                        ErrorMessage = r.ErrorMessage,
+                        SentAtUtc = r.SentAtUtc,
+                        ReplyMessage = r.Reply?.Message,
+                        ReplyAtUtc = r.Reply?.RepliedAtUtc,
+                    })
+                    .ToList(),
+            };
+        }
+
+        public async Task ReplyToBulkEmailAsync(
+            Guid parentUserId, Guid bulkEmailRecipientId, ReplyToBulkEmailRequest request, CancellationToken cancellationToken = default)
+        {
+            var recipient = await _unitOfWork.Repository<BulkEmailRecipient>().Query()
+                .Include(r => r.Reply)
+                .FirstOrDefaultAsync(r => r.Id == bulkEmailRecipientId, cancellationToken)
+                ?? throw new NotFoundException(nameof(BulkEmailRecipient), bulkEmailRecipientId);
+
+            if (recipient.RecipientUserId != parentUserId)
+            {
+                throw new DomainValidationException("This Bulk Email wasn't sent to you.");
+            }
+
+            if (recipient.Reply is not null)
+            {
+                throw new DomainValidationException("You've already replied to this email.");
+            }
+
+            await _unitOfWork.Repository<BulkEmailReply>().AddAsync(
+                new BulkEmailReply
+                {
+                    BulkEmailRecipientId = bulkEmailRecipientId,
+                    ParentUserId = parentUserId,
+                    Message = request.Message.Trim(),
+                    RepliedAtUtc = DateTime.UtcNow,
+                },
+                cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
         /// <summary>

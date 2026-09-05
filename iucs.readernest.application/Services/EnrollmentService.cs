@@ -422,6 +422,34 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
+        public async Task RemoveChildAsync(Guid childId, CancellationToken cancellationToken = default)
+        {
+            var child = await _unitOfWork.Repository<Child>().FirstOrDefaultAsync(c => c.Id == childId, cancellationToken)
+                ?? throw new NotFoundException(nameof(Child), childId);
+
+            var hasActiveEnrollment = await _unitOfWork.Repository<BatchEnrollment>()
+                .ExistsAsync(e => e.ChildId == childId && e.Status == EnrollmentStatus.Active, cancellationToken);
+            if (hasActiveEnrollment)
+            {
+                throw new DomainValidationException(
+                    "This child has an active batch enrolment. Withdraw them from every batch first.");
+            }
+
+            var hasOutstandingInvoice = await _unitOfWork.Repository<Invoice>().ExistsAsync(
+                i => i.ChildId == childId
+                    && (i.Status == InvoiceStatus.Pending || i.Status == InvoiceStatus.PartiallyPaid || i.Status == InvoiceStatus.Overdue),
+                cancellationToken);
+            if (hasOutstandingInvoice)
+            {
+                throw new DomainValidationException(
+                    "This child has an unpaid or overdue invoice. Settle or cancel it first.");
+            }
+
+            _unitOfWork.Repository<Child>().Remove(child);
+            await _auditLog.StageAsync(AuditAction.Delete, nameof(Child), child.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
         public async Task<BulkImportResult> BulkImportStudentsAsync(
             Stream file, string fileName, CancellationToken cancellationToken = default)
         {
