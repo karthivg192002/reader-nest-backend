@@ -10,8 +10,15 @@ namespace iucs.readernest.application.Dto.Batches
 
         public string CourseName { get; set; } = null!;
 
-        /// <summary>The course's configured class length, so every session in this batch runs at this length.</summary>
+        /// <summary>The course's own configured class length — unaffected by this batch's own override, if any.</summary>
         public int CourseDurationMinutes { get; set; }
+
+        /// <summary>This batch's own class length if set (e.g. a shorter paired-batch session);
+        /// null means it follows CourseDurationMinutes.</summary>
+        public int? DurationMinutesOverride { get; set; }
+
+        /// <summary>What every session in this batch is actually scheduled at: DurationMinutesOverride if set, else CourseDurationMinutes.</summary>
+        public int EffectiveDurationMinutes { get; set; }
 
         public Guid TeacherProfileId { get; set; }
 

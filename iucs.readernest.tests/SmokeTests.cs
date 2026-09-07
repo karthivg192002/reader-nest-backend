@@ -4167,6 +4167,43 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task GenerateSchedule_SessionCountOverride_PlacesOnlyThatManySessions_NotTheCoursesFull()
+        {
+            // A course's own TotalSessions (48) is the default, but a batch continuing
+            // mid-course under this portal (migrated from elsewhere, some sessions already
+            // delivered there) should be able to generate only what it actually still owes.
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 48, includeSession: false);
+
+            var sessions = await CreateSessionService().GenerateScheduleAsync(batch.Id, new GenerateScheduleRequest
+            {
+                StartDate = new DateOnly(2026, 8, 3),
+                DaysOfWeek = [DayOfWeek.Monday],
+                StartTimeUtc = new TimeOnly(4, 30),
+                SessionCount = 14,
+            });
+
+            Assert.Equal(14, sessions.Count);
+        }
+
+        [Fact]
+        public async Task GenerateSchedule_UsesBatchsOwnDurationOverride_NotTheCoursesDuration()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            batch.DurationMinutesOverride = 35;
+            await _db.Context.SaveChangesAsync();
+
+            var sessions = await CreateSessionService().GenerateScheduleAsync(batch.Id, new GenerateScheduleRequest
+            {
+                StartDate = new DateOnly(2026, 8, 3),
+                DaysOfWeek = [DayOfWeek.Monday],
+                StartTimeUtc = new TimeOnly(4, 30),
+            });
+
+            var session = Assert.Single(sessions);
+            Assert.Equal(35, (session.ScheduledEndAtUtc - session.ScheduledStartAtUtc).TotalMinutes);
+        }
+
+        [Fact]
         public async Task CompleteSession_AccruesPayoutEarning_AtConfiguredRate()
         {
             var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);

@@ -61,6 +61,7 @@ namespace iucs.readernest.application.Services
                 Capacity = course.Type == CourseType.Individual ? 1 : request.Capacity,
                 StartDate = request.StartDate,
                 EndDate = request.EndDate,
+                DurationMinutesOverride = request.DurationMinutesOverride,
             };
             await _unitOfWork.Repository<Batch>().AddAsync(batch, cancellationToken);
             await _auditLog.StageAsync(AuditAction.Create, nameof(Batch), batch.Id.ToString(), cancellationToken: cancellationToken);
@@ -92,6 +93,7 @@ namespace iucs.readernest.application.Services
             batch.Capacity = newCapacity;
             batch.StartDate = request.StartDate;
             batch.EndDate = request.EndDate;
+            batch.DurationMinutesOverride = request.DurationMinutesOverride;
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(Batch), batch.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);

@@ -29,6 +29,11 @@ namespace iucs.readernest.domain.Entities.Academics
 
         public DateOnly? EndDate { get; set; }
 
+        /// <summary>Overrides the course's own class length for this batch only (e.g. a
+        /// paired/small-group batch running shorter sessions than the course default). Null
+        /// means "use the course's DurationMinutes", the previous, only behaviour.</summary>
+        public int? DurationMinutesOverride { get; set; }
+
         /// <summary>Set when all course sessions finish; anchors the 15-day recording access window.</summary>
         public DateTime? CompletedAtUtc { get; set; }
 

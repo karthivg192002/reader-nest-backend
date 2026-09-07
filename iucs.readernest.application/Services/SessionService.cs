@@ -572,24 +572,31 @@ namespace iucs.readernest.application.Services
             var date = request.StartDate;
             var created = 0;
             DateOnly? lastDate = null;
+            var durationMinutes = batch.DurationMinutesOverride ?? course.DurationMinutes;
 
-            // Walk the calendar until every course session is placed; hard cap
+            // Defaults to every session of the course (the only behaviour before SessionCount
+            // existed); overridable for a batch that's continuing mid-course under this portal
+            // (e.g. migrated from another system with some sessions already delivered there) —
+            // there was previously no way to generate only the sessions actually still owed.
+            var targetSessionCount = request.SessionCount ?? course.TotalSessions;
+
+            // Walk the calendar until every target session is placed; hard cap
             // of two years guards against a weekday set that never matches.
             var safetyLimit = request.StartDate.AddYears(2);
-            while (created < course.TotalSessions && date < safetyLimit)
+            while (created < targetSessionCount && date < safetyLimit)
             {
                 if (weekdays.Contains(date.DayOfWeek) && !holidays.Contains(date))
                 {
                     var startUtc = date.ToDateTime(request.StartTimeUtc, DateTimeKind.Utc);
                     await EnsureTeacherIsFreeAsync(
-                        batch.TeacherProfileId, startUtc, startUtc.AddMinutes(course.DurationMinutes), cancellationToken);
+                        batch.TeacherProfileId, startUtc, startUtc.AddMinutes(durationMinutes), cancellationToken);
                     await sessionRepository.AddAsync(
                         new ClassSession
                         {
                             BatchId = batch.Id,
                             TeacherProfileId = batch.TeacherProfileId,
                             ScheduledStartAtUtc = startUtc,
-                            ScheduledEndAtUtc = startUtc.AddMinutes(course.DurationMinutes),
+                            ScheduledEndAtUtc = startUtc.AddMinutes(durationMinutes),
                             MeetingRoomId = $"trn-{Guid.NewGuid():N}",
                         },
                         cancellationToken);
@@ -600,7 +607,7 @@ namespace iucs.readernest.application.Services
                 date = date.AddDays(1);
             }
 
-            if (created < course.TotalSessions)
+            if (created < targetSessionCount)
             {
                 throw new DomainValidationException("Could not place all sessions within two years; check the selected weekdays.");
             }

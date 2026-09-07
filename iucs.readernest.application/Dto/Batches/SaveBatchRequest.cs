@@ -22,5 +22,10 @@ namespace iucs.readernest.application.Dto.Batches
         public DateOnly? StartDate { get; set; }
 
         public DateOnly? EndDate { get; set; }
+
+        /// <summary>Overrides the course's own class length for this batch only. Null (the
+        /// default) leaves the batch following the course's own duration.</summary>
+        [Range(1, 500)]
+        public int? DurationMinutesOverride { get; set; }
     }
 }
