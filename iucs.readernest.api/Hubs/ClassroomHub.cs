@@ -212,6 +212,23 @@ namespace iucs.readernest.api.Hubs
             await Clients.OthersInGroup(Group(sessionId)).SendAsync("Board", opJson);
         }
 
+        // ---- live annotation overlay (marking on top of the screen share) ----
+
+        /// <summary>Relays one annotation stroke/clear op drawn over the video stage, live only —
+        /// teacher-only (unlike the whiteboard, no student-grant path) and deliberately not kept
+        /// in any history: it's meant for pointing things out while a child reads on a shared
+        /// screen, not a durable record, so a student joining mid-class simply sees nothing until
+        /// the teacher draws again.</summary>
+        public async Task SendAnnotation(string sessionId, string opJson)
+        {
+            if (!IsTeacherInRoom(sessionId))
+            {
+                return;
+            }
+
+            await Clients.OthersInGroup(Group(sessionId)).SendAsync("Annotation", opJson);
+        }
+
         // ---- chat (interactive panel) ----
 
         public async Task SendChat(string sessionId, string text)
