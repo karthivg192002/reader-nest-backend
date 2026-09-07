@@ -4158,8 +4158,7 @@ namespace iucs.readernest.tests
             var sessions = await CreateSessionService().GenerateScheduleAsync(batch.Id, new GenerateScheduleRequest
             {
                 StartDate = new DateOnly(2026, 8, 3), // a Monday that is a holiday
-                DaysOfWeek = [DayOfWeek.Monday],
-                StartTimeUtc = new TimeOnly(4, 30),
+                Slots = [new GenerateScheduleSlot { DayOfWeek = DayOfWeek.Monday, StartTimeUtc = new TimeOnly(4, 30) }],
             });
 
             Assert.Equal(4, sessions.Count);
@@ -4177,8 +4176,7 @@ namespace iucs.readernest.tests
             var sessions = await CreateSessionService().GenerateScheduleAsync(batch.Id, new GenerateScheduleRequest
             {
                 StartDate = new DateOnly(2026, 8, 3),
-                DaysOfWeek = [DayOfWeek.Monday],
-                StartTimeUtc = new TimeOnly(4, 30),
+                Slots = [new GenerateScheduleSlot { DayOfWeek = DayOfWeek.Monday, StartTimeUtc = new TimeOnly(4, 30) }],
                 SessionCount = 14,
             });
 
@@ -4195,12 +4193,52 @@ namespace iucs.readernest.tests
             var sessions = await CreateSessionService().GenerateScheduleAsync(batch.Id, new GenerateScheduleRequest
             {
                 StartDate = new DateOnly(2026, 8, 3),
-                DaysOfWeek = [DayOfWeek.Monday],
-                StartTimeUtc = new TimeOnly(4, 30),
+                Slots = [new GenerateScheduleSlot { DayOfWeek = DayOfWeek.Monday, StartTimeUtc = new TimeOnly(4, 30) }],
             });
 
             var session = Assert.Single(sessions);
             Assert.Equal(35, (session.ScheduledEndAtUtc - session.ScheduledStartAtUtc).TotalMinutes);
+        }
+
+        [Fact]
+        public async Task GenerateSchedule_EachWeekdayRunsAtItsOwnTime()
+        {
+            // e.g. Monday/Wednesday at 5 PM, Friday at noon -- a batch doesn't have to meet at
+            // the same time on every day it runs.
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 3, includeSession: false);
+
+            var sessions = await CreateSessionService().GenerateScheduleAsync(batch.Id, new GenerateScheduleRequest
+            {
+                StartDate = new DateOnly(2026, 8, 3), // a Monday
+                Slots =
+                [
+                    new GenerateScheduleSlot { DayOfWeek = DayOfWeek.Monday, StartTimeUtc = new TimeOnly(11, 30) }, // 5 PM IST
+                    new GenerateScheduleSlot { DayOfWeek = DayOfWeek.Wednesday, StartTimeUtc = new TimeOnly(11, 30) },
+                    new GenerateScheduleSlot { DayOfWeek = DayOfWeek.Friday, StartTimeUtc = new TimeOnly(6, 30) }, // 12 PM IST
+                ],
+            });
+
+            Assert.Equal(3, sessions.Count);
+            var byDay = sessions.ToDictionary(s => s.ScheduledStartAtUtc.DayOfWeek);
+            Assert.Equal(new TimeOnly(11, 30), TimeOnly.FromDateTime(byDay[DayOfWeek.Monday].ScheduledStartAtUtc));
+            Assert.Equal(new TimeOnly(11, 30), TimeOnly.FromDateTime(byDay[DayOfWeek.Wednesday].ScheduledStartAtUtc));
+            Assert.Equal(new TimeOnly(6, 30), TimeOnly.FromDateTime(byDay[DayOfWeek.Friday].ScheduledStartAtUtc));
+        }
+
+        [Fact]
+        public async Task GenerateSchedule_RejectsADuplicateWeekday()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 4, includeSession: false);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => CreateSessionService().GenerateScheduleAsync(batch.Id, new GenerateScheduleRequest
+            {
+                StartDate = new DateOnly(2026, 8, 3),
+                Slots =
+                [
+                    new GenerateScheduleSlot { DayOfWeek = DayOfWeek.Monday, StartTimeUtc = new TimeOnly(11, 30) },
+                    new GenerateScheduleSlot { DayOfWeek = DayOfWeek.Monday, StartTimeUtc = new TimeOnly(6, 30) },
+                ],
+            }));
         }
 
         [Fact]

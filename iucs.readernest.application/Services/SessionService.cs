@@ -562,7 +562,14 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("This batch already has scheduled sessions; reschedule or cancel them individually.");
             }
 
-            var weekdays = request.DaysOfWeek.Distinct().ToHashSet();
+            var slotDays = request.Slots.Select(s => s.DayOfWeek).ToList();
+            if (slotDays.Count != slotDays.Distinct().Count())
+            {
+                throw new DomainValidationException("Each weekday can only have one time — remove the duplicate before generating.");
+            }
+            // Each weekday runs at its own time — e.g. Monday/Wednesday at 5 PM but Friday at
+            // noon — rather than one time applying to every selected day.
+            var timeByDay = request.Slots.ToDictionary(s => s.DayOfWeek, s => s.StartTimeUtc);
             var holidays = (await _unitOfWork.Repository<Holiday>().Query()
                     .Select(h => h.Date)
                     .ToListAsync(cancellationToken))
@@ -585,9 +592,9 @@ namespace iucs.readernest.application.Services
             var safetyLimit = request.StartDate.AddYears(2);
             while (created < targetSessionCount && date < safetyLimit)
             {
-                if (weekdays.Contains(date.DayOfWeek) && !holidays.Contains(date))
+                if (timeByDay.TryGetValue(date.DayOfWeek, out var timeForDay) && !holidays.Contains(date))
                 {
-                    var startUtc = date.ToDateTime(request.StartTimeUtc, DateTimeKind.Utc);
+                    var startUtc = date.ToDateTime(timeForDay, DateTimeKind.Utc);
                     await EnsureTeacherIsFreeAsync(
                         batch.TeacherProfileId, startUtc, startUtc.AddMinutes(durationMinutes), cancellationToken);
                     await sessionRepository.AddAsync(
