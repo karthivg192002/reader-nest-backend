@@ -395,11 +395,23 @@ namespace iucs.readernest.application.Services
                 .GroupBy(e => e.ChildId)
                 .ToDictionary(g => g.Key, g => g.First().Batch.Course.Name);
 
+            // Paid total per child — surfaced so the delete/withdraw flow can warn admin/
+            // coordinator staff that money was actually collected before they remove the record.
+            // Only Paid invoices count: Pending/PartiallyPaid/Overdue already block deletion
+            // outright in RemoveChildAsync, so by the time this total is shown, only Paid (and
+            // Cancelled, which collected nothing) invoices can exist for a deletable child.
+            var paidTotalByChild = await _unitOfWork.Repository<Invoice>().Query()
+                .Where(i => i.ChildId != null && childIds.Contains(i.ChildId.Value) && i.Status == InvoiceStatus.Paid)
+                .GroupBy(i => i.ChildId!.Value)
+                .Select(g => new { ChildId = g.Key, Total = g.Sum(i => i.AmountPaid) })
+                .ToDictionaryAsync(g => g.ChildId, g => g.Total, cancellationToken);
+
             var today = DateOnly.FromDateTime(DateTime.UtcNow);
             return children.Select(c => new StudentDto
             {
                 Id = c.Id,
                 ParentProfileId = c.ParentProfileId,
+                ParentUserId = c.ParentProfile?.UserId ?? Guid.Empty,
                 FullName = $"{c.FirstName} {c.LastName}".Trim(),
                 Age = c.DateOfBirth is { } dob ? Math.Max(0, (today.DayNumber - dob.DayNumber) / 365) : null,
                 AcademicLevel = c.AcademicLevel,
@@ -407,6 +419,7 @@ namespace iucs.readernest.application.Services
                 CourseName = courseByChild.TryGetValue(c.Id, out var name) ? name : null,
                 RmNotes = c.RmNotes,
                 IsActive = c.IsActive,
+                PaidInvoiceTotal = paidTotalByChild.GetValueOrDefault(c.Id),
             }).ToList();
         }
 
