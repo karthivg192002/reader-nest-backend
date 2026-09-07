@@ -422,17 +422,40 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
-        public async Task RemoveChildAsync(Guid childId, CancellationToken cancellationToken = default)
+        public async Task RemoveChildAsync(Guid childId, bool withdrawFromBatches = false, CancellationToken cancellationToken = default)
         {
             var child = await _unitOfWork.Repository<Child>().FirstOrDefaultAsync(c => c.Id == childId, cancellationToken)
                 ?? throw new NotFoundException(nameof(Child), childId);
 
-            var hasActiveEnrollment = await _unitOfWork.Repository<BatchEnrollment>()
-                .ExistsAsync(e => e.ChildId == childId && e.Status == EnrollmentStatus.Active, cancellationToken);
-            if (hasActiveEnrollment)
+            var activeEnrollmentIds = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.ChildId == childId && e.Status == EnrollmentStatus.Active)
+                .Select(e => e.Id)
+                .ToListAsync(cancellationToken);
+            if (activeEnrollmentIds.Count > 0)
             {
-                throw new DomainValidationException(
-                    "This child has an active batch enrolment. Withdraw them from every batch first.");
+                if (!withdrawFromBatches)
+                {
+                    throw new DomainValidationException(
+                        "This child has an active batch enrolment. Withdraw them from every batch first.");
+                }
+
+                // Set-based update (no entities attached to the tracker) rather than the usual
+                // load-mutate-save pattern: a tracked BatchEnrollment still pointing (by its
+                // required FK) at a Child the same call is about to Remove() a few lines down
+                // makes EF throw ("association... has been severed") the instant Remove() runs,
+                // even though the FK is Restrict, not cascading — Child has no inverse
+                // BatchEnrollments navigation to .Include() and fix up the graph with. Same
+                // effect as BatchService.RemoveStudentAsync (withdraw one batch at a time), just
+                // done for every active enrolment here instead of requiring the admin to
+                // separately visit each batch's own roster first.
+                await _unitOfWork.Repository<BatchEnrollment>().Query()
+                    .Where(e => e.ChildId == childId && e.Status == EnrollmentStatus.Active)
+                    .ExecuteUpdateAsync(s => s.SetProperty(e => e.Status, EnrollmentStatus.Withdrawn), cancellationToken);
+                foreach (var enrollmentId in activeEnrollmentIds)
+                {
+                    await _auditLog.StageAsync(AuditAction.Update, nameof(BatchEnrollment), enrollmentId.ToString(),
+                        changesJson: "{\"status\":\"Withdrawn\"}", cancellationToken: cancellationToken);
+                }
             }
 
             var hasOutstandingInvoice = await _unitOfWork.Repository<Invoice>().ExistsAsync(

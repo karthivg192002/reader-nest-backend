@@ -4520,6 +4520,50 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task RemoveChild_RefusesByDefault_WhenAnActiveBatchEnrolmentExists()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var parentProfile = new ParentProfile { UserId = (await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent)).Id };
+            var child = new Child { ParentProfile = parentProfile, FirstName = "Kid", LastName = "One", IsActive = true };
+            _db.Context.AddRange(parentProfile, child);
+            await _db.Context.SaveChangesAsync();
+
+            await CreateBatchService().AssignStudentAsync(batch.Id, child.Id);
+
+            var enrollmentService = CreateEnrollmentService();
+            await Assert.ThrowsAsync<DomainValidationException>(() => enrollmentService.RemoveChildAsync(child.Id));
+
+            // Still there, still active — a refused delete must not have touched the enrolment.
+            var enrollment = Assert.Single(_db.Context.BatchEnrollments.ToList());
+            Assert.Equal(EnrollmentStatus.Active, enrollment.Status);
+        }
+
+        [Fact]
+        public async Task RemoveChild_WithdrawFromBatches_ClearsEveryActiveEnrolmentThenDeletes()
+        {
+            var (batchA, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var (batchB, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var parentProfile = new ParentProfile { UserId = (await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent)).Id };
+            var child = new Child { ParentProfile = parentProfile, FirstName = "Kid", LastName = "Two", IsActive = true };
+            _db.Context.AddRange(parentProfile, child);
+            await _db.Context.SaveChangesAsync();
+
+            var batchService = CreateBatchService();
+            await batchService.AssignStudentAsync(batchA.Id, child.Id);
+            await batchService.AssignStudentAsync(batchB.Id, child.Id);
+
+            // A real request gets its own fresh DbContext -- RemoveChildAsync only ever loads
+            // the Child itself and bulk-updates enrolments without tracking them, so this never
+            // happens in production. Clearing here just matches that isolation instead of
+            // artificially carrying over this test's own AssignStudentAsync-tracked entities.
+            _db.Context.ChangeTracker.Clear();
+            await CreateEnrollmentService().RemoveChildAsync(child.Id, withdrawFromBatches: true);
+
+            Assert.All(_db.Context.BatchEnrollments.ToList(), e => Assert.Equal(EnrollmentStatus.Withdrawn, e.Status));
+            Assert.Null(await _db.Context.Children.FirstOrDefaultAsync(c => c.Id == child.Id));
+        }
+
+        [Fact]
         public async Task ListUnassignedStudents_ExcludesAlreadyEnrolled_AndInactiveChildren()
         {
             var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);

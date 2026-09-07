@@ -73,12 +73,16 @@ namespace iucs.readernest.api.Controllers
             return NoContent();
         }
 
-        /// <summary>Removes a mistaken/test child record. Refused if it still has an active enrolment or unpaid invoice.</summary>
+        /// <summary>Removes a mistaken/test child record. Refused if it still has an unpaid invoice;
+        /// refused for an active batch enrolment too unless withdrawFromBatches withdraws it first.</summary>
         [HttpDelete("students/{childId:guid}")]
         [HasPermission(PermissionModule.UserManagement, PermissionAction.Delete)]
-        public async Task<IActionResult> RemoveStudent(Guid childId, CancellationToken cancellationToken)
+        public async Task<IActionResult> RemoveStudent(
+            Guid childId,
+            [FromQuery] bool withdrawFromBatches,
+            CancellationToken cancellationToken)
         {
-            await _enrollmentService.RemoveChildAsync(childId, cancellationToken);
+            await _enrollmentService.RemoveChildAsync(childId, withdrawFromBatches, cancellationToken);
             return NoContent();
         }
 
