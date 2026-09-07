@@ -158,6 +158,7 @@ namespace iucs.readernest.application.Services
         public async Task<CourseDto> CreateAsync(SaveCourseRequest request, CancellationToken cancellationToken = default)
         {
             var (category, department) = await ValidateAsync(request, cancellationToken);
+            await EnsureNameNotDuplicateAsync(request.Name, request.DepartmentId, excludingId: null, cancellationToken);
 
             var course = new Course
             {
@@ -183,6 +184,7 @@ namespace iucs.readernest.application.Services
         public async Task<CourseDto> UpdateAsync(Guid id, SaveCourseRequest request, CancellationToken cancellationToken = default)
         {
             var (category, department) = await ValidateAsync(request, cancellationToken);
+            await EnsureNameNotDuplicateAsync(request.Name, request.DepartmentId, excludingId: id, cancellationToken);
             var course = await _unitOfWork.Repository<Course>().GetByIdAsync(id, cancellationToken)
                 ?? throw new NotFoundException(nameof(Course), id);
 
@@ -334,6 +336,35 @@ namespace iucs.readernest.application.Services
                 c.TotalSessions.ToString(), c.IsActive ? "true" : "false",
             });
             return CsvWriter.BuildCsv(headers, rows);
+        }
+
+        /// <summary>
+        /// Case-insensitive uniqueness within a department — nothing previously stopped the
+        /// exact same course name being created twice (manually, or by re-running the same
+        /// bulk-import CSV), which is how the catalogue ended up with parallel entries like
+        /// "Abacus A1" and "Abacus Level A1 (4-8 Years)" for the same subject. Scoped to
+        /// department rather than global, matching CreateCategoryAsync's own precedent above —
+        /// two departments can legitimately reuse a name (e.g. a "Level 1" under both Hindi and
+        /// Maths). This only catches exact (trimmed, case-insensitive) repeats, not genuinely
+        /// different names for the same subject — that needs a manual catalogue cleanup, not a
+        /// validation rule.
+        /// </summary>
+        private async Task EnsureNameNotDuplicateAsync(
+            string name, Guid departmentId, Guid? excludingId, CancellationToken cancellationToken)
+        {
+            var trimmed = name.Trim();
+            var repository = _unitOfWork.Repository<Course>();
+            var duplicate = excludingId is { } id
+                ? await repository.ExistsAsync(
+                    c => c.DepartmentId == departmentId && c.Name.ToLower() == trimmed.ToLower() && c.Id != id,
+                    cancellationToken)
+                : await repository.ExistsAsync(
+                    c => c.DepartmentId == departmentId && c.Name.ToLower() == trimmed.ToLower(),
+                    cancellationToken);
+            if (duplicate)
+            {
+                throw new ConflictException($"A course named '{trimmed}' already exists in this department.");
+            }
         }
 
         private async Task<(CourseCategory Category, Department Department)> ValidateAsync(

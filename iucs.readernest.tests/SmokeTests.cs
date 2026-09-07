@@ -3433,6 +3433,62 @@ namespace iucs.readernest.tests
         }
 
         /// <summary>
+        /// Regression: neither CreateAsync nor UpdateAsync checked for an existing course with
+        /// the same name before inserting/renaming — this is how the live catalogue ended up
+        /// with parallel entries like "Abacus A1" and "Abacus Level A1 (4-8 Years)" for the same
+        /// subject (a client bulk-imported courses twice under two different naming schemes,
+        /// and nothing stopped it). Scoped per-department, case-insensitive, trimmed; a course
+        /// keeping its own unchanged name on Update must not trip over itself.
+        /// </summary>
+        [Fact]
+        public async Task CreateAndUpdateCourse_RejectDuplicateNameWithinADepartment_ButAllowReuseAcrossDepartments()
+        {
+            var courseService = CreateCourseService();
+            var phonicsCategory = await courseService.CreateCategoryAsync(
+                new CreateCourseCategoryRequest { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics });
+            var mathsCategory = await courseService.CreateCategoryAsync(
+                new CreateCourseCategoryRequest { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Maths });
+
+            SaveCourseRequest Request(string name, Guid categoryId, Guid departmentId) => new()
+            {
+                CourseCategoryId = categoryId,
+                Name = name,
+                Type = CourseType.Group,
+                DurationMinutes = 30,
+                Price = 100,
+                TotalSessions = 12,
+                DepartmentId = departmentId,
+            };
+
+            var original = await courseService.CreateAsync(
+                Request("Advance Phonics", phonicsCategory.Id, WellKnownDepartments.Phonics));
+
+            // Exact repeat, and a case/whitespace variant of it, both rejected in the same department.
+            await Assert.ThrowsAsync<ConflictException>(() => courseService.CreateAsync(
+                Request("Advance Phonics", phonicsCategory.Id, WellKnownDepartments.Phonics)));
+            await Assert.ThrowsAsync<ConflictException>(() => courseService.CreateAsync(
+                Request("  advance phonics  ", phonicsCategory.Id, WellKnownDepartments.Phonics)));
+
+            // The same name is fine in a different department — matches CreateCategoryAsync's
+            // own department-scoped precedent just above.
+            var mathsCourse = await courseService.CreateAsync(
+                Request("Advance Phonics", mathsCategory.Id, WellKnownDepartments.Maths));
+            Assert.Equal("Advance Phonics", mathsCourse.Name);
+
+            // Saving a course with its own unchanged name must not trip over itself.
+            var resaved = await courseService.UpdateAsync(original.Id,
+                Request("Advance Phonics", phonicsCategory.Id, WellKnownDepartments.Phonics));
+            Assert.Equal("Advance Phonics", resaved.Name);
+
+            // Renaming one course to collide with a different, existing course in the same
+            // department is rejected the same way a create would be.
+            var other = await courseService.CreateAsync(
+                Request("Advanced Phonics", phonicsCategory.Id, WellKnownDepartments.Phonics));
+            await Assert.ThrowsAsync<ConflictException>(() => courseService.UpdateAsync(
+                other.Id, Request("Advance Phonics", phonicsCategory.Id, WellKnownDepartments.Phonics)));
+        }
+
+        /// <summary>
         /// Regression test: CreateCategoryAsync only checked the department existed
         /// (ExistsAsync) instead of fetching it, so the new CourseCategory's Department
         /// navigation was never set — ToDto() reads Department.Name, so the create response
