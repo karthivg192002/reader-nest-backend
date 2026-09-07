@@ -28,6 +28,15 @@ namespace iucs.readernest.api.Hubs
         // participant from calling SendBoard directly (visible and callable from the browser's
         // own dev tools) regardless of whether they'd actually been granted access.
         private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> BoardAccessGrants = new();
+        // Every board op sent so far this session, replayed (in order) to a connection that
+        // joins after some were already drawn. SendBoard only ever relayed live to whoever was
+        // ALREADY connected — a student who joined the call after the teacher started drawing
+        // saw a blank board for the rest of the class, while a student who joined earlier kept
+        // seeing everything correctly. Confirmed live: two students in the same class, one
+        // could see the whiteboard and the other couldn't. Each list is mutated under its own
+        // lock — ConcurrentDictionary makes GetOrAdd/TryRemove on the outer map safe, but a
+        // plain List<T> itself isn't safe against two students' SendBoard calls landing at once.
+        private static readonly ConcurrentDictionary<string, List<string>> BoardHistory = new();
 
         private readonly ISessionService _sessionService;
         private readonly IGamificationService _gamificationService;
@@ -136,6 +145,24 @@ namespace iucs.readernest.api.Hubs
             await BroadcastRosterAsync(sessionId);
             await SendLeaderboardAsync(sessionId);
 
+            // Catch this connection up on whatever's already been drawn — see BoardHistory's
+            // own doc comment. Sent one op at a time through the same "Board" event a live op
+            // arrives on (SignalR preserves per-connection delivery order), so the client-side
+            // handler that already knows how to apply a Board op needs no separate code path
+            // for a replayed one.
+            if (BoardHistory.TryGetValue(sessionId, out var boardHistory))
+            {
+                string[] snapshot;
+                lock (boardHistory)
+                {
+                    snapshot = boardHistory.ToArray();
+                }
+                foreach (var op in snapshot)
+                {
+                    await Clients.Caller.SendAsync("Board", op);
+                }
+            }
+
             // PDF's "System Marks Attendance" — join-based capture, fired now that the caller
             // is confirmed to genuinely belong to this session. Best-effort by design (see the
             // method's own doc comment); never allowed to affect the join that already succeeded.
@@ -174,6 +201,12 @@ namespace iucs.readernest.api.Hubs
             if (!hasAccess)
             {
                 return;
+            }
+
+            var history = BoardHistory.GetOrAdd(sessionId, _ => new List<string>());
+            lock (history)
+            {
+                history.Add(opJson);
             }
 
             await Clients.OthersInGroup(Group(sessionId)).SendAsync("Board", opJson);
@@ -375,6 +408,7 @@ namespace iucs.readernest.api.Hubs
                     Rooms.TryRemove(sessionId, out _);
                     Scores.TryRemove(sessionId, out _); // class over — scoreboard resets
                     BoardAccessGrants.TryRemove(sessionId, out _);
+                    BoardHistory.TryRemove(sessionId, out _);
                     foreach (var key in AnsweredQuestions.Keys.Where(k => k.StartsWith($"{sessionId}:", StringComparison.Ordinal)))
                     {
                         AnsweredQuestions.TryRemove(key, out _);
