@@ -195,7 +195,16 @@ namespace iucs.readernest.application.Services
 
             if (await users.ExistsAsync(u => u.Email == email, cancellationToken))
             {
-                throw new ConflictException($"A user with email '{email}' already exists.");
+                // Accounts aren't only created from this dialog — e.g. Admission marking a demo
+                // booking "Ready for Enrollment" auto-provisions a parent account (see
+                // DemoBookingService.EnsureParentAccountAsync) — so an admin hitting this on a
+                // genuinely "first" attempt is a real, recurring source of confusion, not
+                // necessarily a duplicate entry mistake. Point them at where to look instead of
+                // leaving them to assume the check itself is wrong.
+                throw new ConflictException(
+                    $"A user with email '{email}' already exists. Search Users by this email to find the " +
+                    "existing account — it may have been created automatically (e.g. from a demo booking " +
+                    "marked Ready for Enrollment) rather than added manually before.");
             }
 
             RoleDefinition? assignedRole = null;

@@ -72,6 +72,7 @@ namespace iucs.readernest.api.Data
             await EnsureTeacherAssignmentMenuAsync(context);
             await EnsureParentRecordingsMenuAsync(context);
             await EnsureChatbotMenusAsync(context);
+            await EnsureSearchUsersMenuAsync(context);
             await SeedChatFaqsAsync(context);
             await EnsureAdditionalChatFaqsAsync(context);
             await BackfillPlainTextNotificationBodiesAsync(context);
@@ -536,6 +537,7 @@ namespace iucs.readernest.api.Data
             ("admin", "Academics", "Sessions", "/admin/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
             ("admin", "Academics", "Quiz Bank", "/admin/quiz-bank", "Sparkles", PermissionModule.CourseBatchManagement.ToString()),
             ("admin", "People", "Users", "/admin/users", "Users", PermissionModule.UserManagement.ToString()),
+            ("admin", "People", "Search Users", "/admin/search-users", "UserSearch", PermissionModule.UserManagement.ToString()),
             ("admin", "People", "Roles & Permissions", "/admin/permissions", "ShieldCheck", PermissionModule.UserManagement.ToString()),
             ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck", PermissionModule.Admission.ToString()),
             ("admin", "People", "Store Inquiries", "/admin/store-inquiries", "ShoppingBag", PermissionModule.Admission.ToString()),
@@ -576,6 +578,7 @@ namespace iucs.readernest.api.Data
             ("subadmin", "Access", "Integrations", "/subadmin/integrations", "Plug", PermissionModule.Settings.ToString()),
             ("subadmin", "Delegated Work", "Batches", "/subadmin/batches", "Layers", PermissionModule.CourseBatchManagement.ToString()),
             ("subadmin", "Delegated Work", "Users", "/subadmin/users", "Users", PermissionModule.UserManagement.ToString()),
+            ("subadmin", "Delegated Work", "Search Users", "/subadmin/search-users", "UserSearch", PermissionModule.UserManagement.ToString()),
             ("subadmin", "Delegated Work", "Assigned Reports", "/subadmin/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
             ("subadmin", "Delegated Work", "Audit Log", "/subadmin/audit-log", "History", null),
             ("admission", null, "Dashboard", "/admission", "LayoutDashboard", null),
@@ -584,6 +587,7 @@ namespace iucs.readernest.api.Data
             ("admission", "Pipeline", "Demo Feedback", "/admission/demo-feedback", "ClipboardCheck", PermissionModule.Admission.ToString()),
             ("admission", "Pipeline", "Conversion Board", "/admission/conversion", "KanbanSquare", PermissionModule.Admission.ToString()),
             ("admission", "CRM", "Leads & Parents", "/admission/leads", "UserSearch", PermissionModule.Admission.ToString()),
+            ("admission", "CRM", "Search Users", "/admission/search-users", "UserSearch", PermissionModule.UserManagement.ToString()),
             ("admission", "CRM", "Payment Tracking", "/admission/payments", "Link2", PermissionModule.BillingFinance.ToString()),
             ("admission", "Insights", "Reports", "/admission/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
             ("coordinator", null, "Dashboard", "/coordinator", "LayoutDashboard", null),
@@ -1433,6 +1437,54 @@ namespace iucs.readernest.api.Data
                 IsActive = true,
                 RequiredModule = PermissionModule.Admission.ToString(),
             });
+        }
+
+        /// <summary>
+        /// Retrofits the "Search Users" menu item into a database that was seeded before this
+        /// method existed. Fresh databases already get it from MenuSeedItems() for admin,
+        /// subadmin and admission -- one cross-role lookup (any User: Admin/SubAdmin/
+        /// AdmissionTeam/Teacher/Parent, plus students by client-side name match) so staff can
+        /// answer "does an account already exist for this email" in one place instead of
+        /// hunting per-tab on the Users screen, or assuming a "user already exists" conflict
+        /// on Add User is a bug rather than an account auto-provisioned earlier by Admission
+        /// marking a demo booking Ready for Enrollment (see DemoBookingService.
+        /// EnsureParentAccountAsync).
+        /// </summary>
+        private static async Task EnsureSearchUsersMenuAsync(ReaderNestDbContext context)
+        {
+            var targets = new (string Portal, string Section, string AnchorPath)[]
+            {
+                ("admin", "People", "/admin/users"),
+                ("subadmin", "Delegated Work", "/subadmin/users"),
+                ("admission", "CRM", "/admission/leads"),
+            };
+
+            foreach (var target in targets)
+            {
+                var path = $"/{target.Portal}/search-users";
+
+                if (context.MenuItems.Local.Any(m => m.Portal == target.Portal && m.Path == path) ||
+                    await context.MenuItems.AnyAsync(m => m.Portal == target.Portal && m.Path == path))
+                {
+                    continue;
+                }
+
+                var anchor = await context.MenuItems
+                    .FirstOrDefaultAsync(m => m.Portal == target.Portal && m.Path == target.AnchorPath);
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = target.Portal,
+                    Section = target.Section,
+                    SectionOrder = anchor?.SectionOrder ?? 2,
+                    Label = "Search Users",
+                    Path = path,
+                    Icon = "UserSearch",
+                    SortOrder = (anchor?.SortOrder ?? 0) + 1,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.UserManagement.ToString(),
+                });
+            }
         }
 
         /// <summary>
