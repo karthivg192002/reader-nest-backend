@@ -44,6 +44,7 @@ namespace iucs.readernest.api.Data
             await RemoveRetiredMenusAsync(context);
             await EnsureSubAdminIntegrationsMenuAsync(context);
             await EnsureSubAdminBatchesAndUsersMenusAsync(context);
+            await EnsureDelegatedPortalSessionsMenuAsync(context);
             await EnsurePackagesAndStudentViewMenusAsync(context);
             await EnsureAdminDepartmentsMenuAsync(context);
             await EnsureAdminQuizBankMenuAsync(context);
@@ -575,6 +576,7 @@ namespace iucs.readernest.api.Data
             ("subadmin", "Access", "My Permissions", "/subadmin/permissions", "ShieldCheck", null),
             ("subadmin", "Access", "Integrations", "/subadmin/integrations", "Plug", PermissionModule.Settings.ToString()),
             ("subadmin", "Delegated Work", "Batches", "/subadmin/batches", "Layers", PermissionModule.CourseBatchManagement.ToString()),
+            ("subadmin", "Delegated Work", "Sessions", "/subadmin/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
             ("subadmin", "Delegated Work", "Users", "/subadmin/users", "Users", PermissionModule.UserManagement.ToString()),
             ("subadmin", "Delegated Work", "Assigned Reports", "/subadmin/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
             ("subadmin", "Delegated Work", "Audit Log", "/subadmin/audit-log", "History", null),
@@ -583,15 +585,18 @@ namespace iucs.readernest.api.Data
             ("admission", "Pipeline", "Teacher Assignment", "/admission/demo-teacher-assignment", "UserCog", PermissionModule.Admission.ToString()),
             ("admission", "Pipeline", "Demo Feedback", "/admission/demo-feedback", "ClipboardCheck", PermissionModule.Admission.ToString()),
             ("admission", "Pipeline", "Conversion Board", "/admission/conversion", "KanbanSquare", PermissionModule.Admission.ToString()),
+            ("admission", "Pipeline", "Sessions", "/admission/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
             ("admission", "CRM", "Leads & Parents", "/admission/leads", "UserSearch", PermissionModule.Admission.ToString()),
             ("admission", "CRM", "Payment Tracking", "/admission/payments", "Link2", PermissionModule.BillingFinance.ToString()),
             ("admission", "Insights", "Reports", "/admission/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
             ("coordinator", null, "Dashboard", "/coordinator", "LayoutDashboard", null),
             ("coordinator", "Monitoring", "Academic Calendar", "/coordinator/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement.ToString()),
             ("coordinator", "Monitoring", "Teacher Availability", "/coordinator/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
+            ("coordinator", "Monitoring", "Sessions", "/coordinator/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
             ("management", null, "Executive Overview", "/management", "LayoutDashboard", null),
             ("management", "Performance", "Revenue & Courses", "/management/revenue", "TrendingUp", PermissionModule.ReportsAnalytics.ToString()),
             ("management", "Performance", "Teacher & Batch Performance", "/management/performance", "Gauge", PermissionModule.ReportsAnalytics.ToString()),
+            ("management", "Performance", "Sessions", "/management/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
             ("management", "Insights", "Reports", "/management/reports", "FileBarChart", PermissionModule.ReportsAnalytics.ToString()),
             ("student", null, "My Learning", "/student", "Sparkles", null),
         ];
@@ -717,6 +722,59 @@ namespace iucs.readernest.api.Data
                     SortOrder = 1,
                     IsActive = true,
                     RequiredModule = PermissionModule.UserManagement.ToString(),
+                });
+            }
+        }
+
+        /// <summary>
+        /// Inserts a "Sessions" menu item (gated on SessionCalendarManagement, same module the
+        /// backend's SessionsController already authorizes SubAdmin against) into each of the
+        /// delegated portals a Sub Admin's preset can route to — subadmin itself, plus the
+        /// Admission/Coordinator/Management display portals (see AppShell.tsx's
+        /// SUBADMIN_PRESET_PORTALS comment: these aren't separate backend roles, just different
+        /// presets of the same account). Appends after the last item in each portal's most
+        /// scheduling-relevant existing section, same idiom as EnsureAdminQuizBankMenuAsync —
+        /// nothing else in that section needs to shift. Idempotent per portal.
+        /// </summary>
+        private static async Task EnsureDelegatedPortalSessionsMenuAsync(ReaderNestDbContext context)
+        {
+            var targets = new[]
+            {
+                (Portal: "subadmin", Section: "Delegated Work", Path: "/subadmin/sessions"),
+                (Portal: "admission", Section: "Pipeline", Path: "/admission/sessions"),
+                (Portal: "coordinator", Section: "Monitoring", Path: "/coordinator/sessions"),
+                (Portal: "management", Section: "Performance", Path: "/management/sessions"),
+            };
+
+            foreach (var (portal, section, path) in targets)
+            {
+                if (context.MenuItems.Local.Any(m => m.Portal == portal && m.Path == path) ||
+                    await context.MenuItems.AnyAsync(m => m.Portal == portal && m.Path == path))
+                {
+                    continue;
+                }
+
+                var sectionItems = await context.MenuItems
+                    .Where(m => m.Portal == portal && m.Section == section)
+                    .ToListAsync();
+                if (sectionItems.Count == 0)
+                {
+                    continue; // that section doesn't exist on this database yet — nothing sensible to append after
+                }
+
+                var last = sectionItems.OrderByDescending(m => m.SortOrder).First();
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = portal,
+                    Section = section,
+                    SectionOrder = last.SectionOrder,
+                    Label = "Sessions",
+                    Path = path,
+                    Icon = "CalendarClock",
+                    SortOrder = last.SortOrder + 1,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.SessionCalendarManagement.ToString(),
                 });
             }
         }
