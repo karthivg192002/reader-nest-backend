@@ -14,6 +14,19 @@ namespace iucs.readernest.application.Dto.Monitoring
         public int TotalParticipants { get; set; }
     }
 
+    /// <summary>
+    /// Jibri (recording) fleet status, populated only for the Jitsi server. Jibri handles one
+    /// recording per instance, so <see cref="BusyInstances"/> == <see cref="TotalInstances"/>
+    /// means the next concurrent recording request will fail with "all Jibris were busy" until
+    /// the autoscaler (see /opt/rn-monitoring/jibri-autoscale.sh on the Jitsi box) adds capacity.
+    /// </summary>
+    public class RecorderStatusDto
+    {
+        public int TotalInstances { get; set; }
+        public int BusyInstances { get; set; }
+        public int IdleInstances => Math.Max(0, TotalInstances - BusyInstances);
+    }
+
     /// <summary>One sample of a Prometheus range query (a trend chart data point).</summary>
     public class TimeSeriesPointDto
     {
@@ -67,6 +80,7 @@ namespace iucs.readernest.application.Dto.Monitoring
         /// <summary>How long ago the agent itself last wrote its status file — a stale reading (agent stuck/cron dead) still reports <see cref="Reachable"/> true, so the UI needs this to flag it separately.</summary>
         public double AgentDataAgeSeconds { get; set; }
         public LiveCallSummaryDto? LiveCalls { get; set; }
+        public RecorderStatusDto? RecorderStatus { get; set; }
         /// <summary>Last hour of CPU/memory usage, ~2-minute steps — populated only when Reachable.</summary>
         public List<TimeSeriesPointDto> CpuHistory { get; set; } = new();
         public List<TimeSeriesPointDto> MemoryHistory { get; set; } = new();

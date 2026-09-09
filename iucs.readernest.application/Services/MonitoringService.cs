@@ -157,6 +157,16 @@ namespace iucs.readernest.application.Services
                 ? _prometheus.QueryScalarAsync(baseUrl, $"jitsi_jvb_current_endpoints{{instance=\"{instanceLabel}\"}}", cancellationToken)
                 : Task.FromResult<double?>(null);
 
+            // rn_jibri_instances_total/busy come from the textfile-collector autoscaler script
+            // on the Jitsi box (/opt/rn-monitoring/jibri-autoscale.sh) -- same publishing pattern
+            // as rn_service_active above, not a native Jibri Prometheus endpoint.
+            var jibriTotalTask = server.TracksLiveCalls
+                ? _prometheus.QueryScalarAsync(baseUrl, $"rn_jibri_instances_total{{instance=\"{instanceLabel}\"}}", cancellationToken)
+                : Task.FromResult<double?>(null);
+            var jibriBusyTask = server.TracksLiveCalls
+                ? _prometheus.QueryScalarAsync(baseUrl, $"rn_jibri_instances_busy{{instance=\"{instanceLabel}\"}}", cancellationToken)
+                : Task.FromResult<double?>(null);
+
             // Same JVB endpoint as above -- call quality, not just up/down.
             Task<double?> jvbMetric(string name) => server.TracksLiveCalls
                 ? _prometheus.QueryScalarAsync(baseUrl, $"{name}{{instance=\"{instanceLabel}\"}}", cancellationToken)
@@ -175,7 +185,8 @@ namespace iucs.readernest.application.Services
                 upTask, freshnessTask, cpuCoresTask, cpuUsageTask, memUsedPercentTask, memTotalTask,
                 diskUsedPercentTask, diskTotalTask, loadTask, uptimeTask, servicesTask, conferencesTask, participantsTask,
                 netRxTask, netTxTask, diskReadTask, diskWriteTask,
-                rttTask, lossInTask, lossOutTask, bitrateInTask, bitrateOutTask, sendingAudioTask, sendingVideoTask, stressTask, jvbHealthyTask);
+                rttTask, lossInTask, lossOutTask, bitrateInTask, bitrateOutTask, sendingAudioTask, sendingVideoTask, stressTask, jvbHealthyTask,
+                jibriTotalTask, jibriBusyTask);
 
             var up = await upTask;
             if (up is not 1)
@@ -203,6 +214,7 @@ namespace iucs.readernest.application.Services
             var conferences = await conferencesTask;
             var participants = await participantsTask;
             var jvbHealthy = await jvbHealthyTask;
+            var jibriTotal = await jibriTotalTask;
             CallQualityDto? callQuality = server.TracksLiveCalls && jvbHealthy is not null
                 ? new CallQualityDto
                 {
@@ -275,6 +287,15 @@ namespace iucs.readernest.application.Services
                     {
                         ActiveConferences = (int)(conferences ?? 0),
                         TotalParticipants = (int)(participants ?? 0),
+                    }
+                    : null,
+                // No data (jibriTotal null) means the autoscaler script hasn't published a
+                // metrics file yet on this box -- surface as absent, not "0 recorders".
+                RecorderStatus = server.TracksLiveCalls && jibriTotal is not null
+                    ? new RecorderStatusDto
+                    {
+                        TotalInstances = (int)jibriTotal.Value,
+                        BusyInstances = (int)(await jibriBusyTask ?? 0),
                     }
                     : null,
             };
