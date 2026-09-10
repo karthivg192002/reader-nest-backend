@@ -7,6 +7,20 @@ namespace iucs.readernest.application.Dto.Monitoring
         public bool Active { get; set; }
     }
 
+    /// <summary>
+    /// A point-in-time `docker stats` sample for one container, published by the
+    /// rn-container-stats.sh textfile-collector script (chosen over cAdvisor, which hit an
+    /// unresolved Docker overlay2 layer-ID lookup bug in this environment). Not a Prometheus
+    /// counter, so it can't be rate()'d over time -- it's "what is this container using right
+    /// now," refreshed every minute.
+    /// </summary>
+    public class ContainerMetricDto
+    {
+        public string Name { get; set; } = string.Empty;
+        public double CpuPercent { get; set; }
+        public double MemoryMb { get; set; }
+    }
+
     /// <summary>Live conference/participant counts, populated only for the Jitsi server.</summary>
     public class LiveCallSummaryDto
     {
@@ -25,6 +39,10 @@ namespace iucs.readernest.application.Dto.Monitoring
         public int TotalInstances { get; set; }
         public int BusyInstances { get; set; }
         public int IdleInstances => Math.Max(0, TotalInstances - BusyInstances);
+        /// <summary>Configured floor of always-warm instances -- the one admin-adjustable knob (see IServerControlService).</summary>
+        public int MinInstances { get; set; }
+        /// <summary>Ceiling derived from the Jitsi box's actual CPU/RAM, not a fixed number -- grows on its own if the box is resized.</summary>
+        public int MaxInstances { get; set; }
     }
 
     /// <summary>One sample of a Prometheus range query (a trend chart data point).</summary>
@@ -70,6 +88,9 @@ namespace iucs.readernest.application.Dto.Monitoring
         public double CpuUsagePercent { get; set; }
         public double MemoryUsedPercent { get; set; }
         public double MemoryTotalMb { get; set; }
+        /// <summary>0 when the server has no swap configured -- the UI should hide the gauge rather than show a meaningless 0%.</summary>
+        public double SwapUsedPercent { get; set; }
+        public double SwapTotalMb { get; set; }
         public double DiskUsedPercent { get; set; }
         public double DiskTotalGb { get; set; }
         public double NetworkRxMbps { get; set; }
@@ -86,6 +107,33 @@ namespace iucs.readernest.application.Dto.Monitoring
         public List<TimeSeriesPointDto> MemoryHistory { get; set; } = new();
         public CallQualityDto? CallQuality { get; set; }
         public CapacityForecastDto? DiskForecast { get; set; }
+        /// <summary>Per-container CPU/memory snapshot, sorted by CPU descending — empty if the rn-container-stats.sh script hasn't published on this box yet.</summary>
+        public List<ContainerMetricDto> ContainerMetrics { get; set; } = new();
+        /// <summary>Week-over-week load trend — null while there isn't yet 14 days of Prometheus history to compare against.</summary>
+        public CapacityTrendDto? CapacityTrend { get; set; }
+    }
+
+    /// <summary>
+    /// Honest load-trend reporting instead of a fake day-countdown: CPU and (for the Jitsi
+    /// server) recording load are bursty, real-time signals, not the smoothly-accumulating
+    /// kind deriv() forecasts well (unlike disk fill -- see CapacityForecastDto). This reports
+    /// direction and how close to the ceiling things got, not a projected "days until full."
+    /// </summary>
+    public class CapacityTrendDto
+    {
+        public double CpuAvg7dPercent { get; set; }
+        public double CpuPeak7dPercent { get; set; }
+        /// <summary>Positive = busier than the prior 7 days, negative = quieter.</summary>
+        public double CpuWeekOverWeekChangePercent { get; set; }
+        /// <summary>Percent of the last 7 days spent with every Jibri instance busy (i.e. the next recording would have failed) -- null for a server with no Jibri fleet.</summary>
+        public double? RecordingAtCapacityPercent7d { get; set; }
+    }
+
+    /// <summary>Historical CPU/memory usage for one server over an admin-selected window (see GetHistoryAsync).</summary>
+    public class HistoryRangeDto
+    {
+        public List<TimeSeriesPointDto> CpuHistory { get; set; } = new();
+        public List<TimeSeriesPointDto> MemoryHistory { get; set; } = new();
     }
 
     /// <summary>
@@ -130,6 +178,30 @@ namespace iucs.readernest.application.Dto.Monitoring
         public string State { get; set; } = string.Empty;
         public DateTime ActiveSince { get; set; }
         public string? Instance { get; set; }
+    }
+
+    /// <summary>Request body for POST .../jibri/min-replicas.</summary>
+    public class SetJibriMinReplicasRequest
+    {
+        public int MinReplicas { get; set; }
+    }
+
+    /// <summary>Result of an on-demand Jibri fleet action (rescale-now, or a min-replicas change) -- see IServerControlService.</summary>
+    public class JibriControlResultDto
+    {
+        public string Server { get; set; } = string.Empty;
+        public string Action { get; set; } = string.Empty;
+        /// <summary>Tail of the autoscaler's own log right after the action ran, so the admin sees what it actually did.</summary>
+        public List<string> LogTail { get; set; } = new();
+        public DateTime PerformedAtUtc { get; set; }
+    }
+
+    /// <summary>Result of restarting one container on one monitored server (see IServerControlService).</summary>
+    public class ServiceRestartResultDto
+    {
+        public string Server { get; set; } = string.Empty;
+        public string Container { get; set; } = string.Empty;
+        public DateTime PerformedAtUtc { get; set; }
     }
 
     /// <summary>Error-filtered `docker logs` tail for one container on one monitored server (see IServerLogService).</summary>
