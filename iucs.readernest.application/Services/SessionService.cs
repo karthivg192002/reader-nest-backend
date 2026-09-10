@@ -949,6 +949,7 @@ namespace iucs.readernest.application.Services
             {
                 Domain = JitsiLinkBuilder.ResolveDomain(configJson),
                 AutoRecordEnabled = ReadAutoRecordEnabled(configJson),
+                DefaultLobbyEnabled = ReadDefaultLobbyEnabled(configJson),
             };
         }
 
@@ -1058,6 +1059,32 @@ namespace iucs.readernest.application.Services
             {
                 var config = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(configJson);
                 if (config is not null && config.TryGetValue("autoRecord", out var value) && bool.TryParse(value, out var parsed))
+                {
+                    return parsed;
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Malformed config — keep the safe default.
+            }
+
+            return true;
+        }
+
+        /// <summary>Defaults to on: a student joining before the teacher shouldn't land straight in an
+        /// empty, unattended room by default — an admin can turn this off if a centre prefers the old
+        /// always-open behaviour. See DefaultLobbyEnabled's own doc comment.</summary>
+        private static bool ReadDefaultLobbyEnabled(string? configJson)
+        {
+            if (string.IsNullOrWhiteSpace(configJson))
+            {
+                return true;
+            }
+
+            try
+            {
+                var config = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(configJson);
+                if (config is not null && config.TryGetValue("defaultLobby", out var value) && bool.TryParse(value, out var parsed))
                 {
                     return parsed;
                 }

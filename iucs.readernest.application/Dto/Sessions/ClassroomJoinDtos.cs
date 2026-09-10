@@ -22,5 +22,11 @@ namespace iucs.readernest.application.Dto.Sessions
         public string Domain { get; set; } = null!;
 
         public bool AutoRecordEnabled { get; set; }
+
+        /// <summary>Whether a class should start with Jitsi's lobby (waiting room) already on, so a
+        /// student can't land straight in an unattended room before the teacher's even joined —
+        /// admin-configurable (Settings → Integrations) rather than always off, which is what a
+        /// teacher had to remember to turn on by hand, every single class, for it to apply at all.</summary>
+        public bool DefaultLobbyEnabled { get; set; }
     }
 }
