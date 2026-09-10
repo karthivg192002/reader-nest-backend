@@ -2,8 +2,11 @@ using System.Diagnostics;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Common.Options;
 using iucs.readernest.application.Dto.Monitoring;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Settings;
+using iucs.readernest.domain.Entities.Users;
+using iucs.readernest.domain.Enums;
 using iucs.readernest.domain.Repository;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -132,10 +135,44 @@ namespace iucs.readernest.application.Services
                 .ToListAsync(cancellationToken);
             var sessionsById = sessions.ToDictionary(s => s.Id);
 
+            // Present/Late attendance rows already recorded for these sessions -- teacher rows
+            // keyed by (session, teacherProfile), student rows keyed by (session, child). A
+            // parent's own login has no direct row (see AttendanceRecorded's doc comment), so
+            // parent connections are resolved via activeChildrenByBatchAndParent below instead.
+            var attendance = await _unitOfWork.Repository<SessionAttendance>().Query()
+                .Where(a => sessionIds.Contains(a.ClassSessionId) && a.Status != AttendanceStatus.Absent)
+                .ToListAsync(cancellationToken);
+            var presentTeacherSessions = attendance
+                .Where(a => a.TeacherProfileId.HasValue)
+                .Select(a => a.ClassSessionId)
+                .ToHashSet();
+            var presentChildKeys = attendance
+                .Where(a => a.ChildId.HasValue)
+                .Select(a => (a.ClassSessionId, ChildId: a.ChildId!.Value))
+                .ToHashSet();
+
+            var batchIds = sessions.Where(s => s.BatchId.HasValue).Select(s => s.BatchId!.Value).Distinct().ToList();
+            // Same resolution AcademicOpsService.CaptureJoinAttendanceAsync uses: a parent's
+            // login maps to every actively-enrolled child of theirs in the session's batch.
+            var activeChildrenByBatchAndParent = batchIds.Count == 0
+                ? new Dictionary<(Guid BatchId, Guid ParentUserId), List<Guid>>()
+                : (await _unitOfWork.Repository<BatchEnrollment>().Query()
+                    .Where(e => batchIds.Contains(e.BatchId) && e.Status == EnrollmentStatus.Active)
+                    .Join(_unitOfWork.Repository<Child>().Query(), e => e.ChildId, c => c.Id, (e, c) => new { e.BatchId, c.Id, c.ParentProfileId })
+                    .Join(_unitOfWork.Repository<ParentProfile>().Query(), x => x.ParentProfileId, p => p.Id, (x, p) => new { x.BatchId, x.Id, ParentUserId = p.UserId })
+                    .ToListAsync(cancellationToken))
+                    .GroupBy(x => (x.BatchId, x.ParentUserId))
+                    .ToDictionary(g => g.Key, g => g.Select(x => x.Id).ToList());
+
             return connections
                 .GroupBy(c => c.SessionId)
                 .Select(group =>
                 {
+                    ClassSession? session = Guid.TryParse(group.Key, out var sessionGuid) && sessionsById.TryGetValue(sessionGuid, out var resolvedSession)
+                        ? resolvedSession
+                        : null;
+                    var sessionResolved = session is not null;
+
                     var dto = new LiveClassSessionDto
                     {
                         SessionId = group.Key,
@@ -144,18 +181,31 @@ namespace iucs.readernest.application.Services
                         // time shown is when they actually first arrived, not their latest tab.
                         Participants = group
                             .GroupBy(p => p.UserId)
-                            .Select(g => g.OrderBy(p => p.JoinedAtUtc).First())
-                            .OrderBy(p => p.JoinedAtUtc)
-                            .Select(p => new LiveParticipantDto { UserId = p.UserId, Name = p.Name, Role = p.Role, JoinedAtUtc = p.JoinedAtUtc })
+                            .Select(g => new { Entry = g.OrderBy(p => p.JoinedAtUtc).First(), ConnectionCount = g.Count() })
+                            .OrderBy(x => x.Entry.JoinedAtUtc)
+                            .Select(x => new LiveParticipantDto
+                            {
+                                UserId = x.Entry.UserId,
+                                Name = x.Entry.Name,
+                                Role = x.Entry.Role,
+                                JoinedAtUtc = x.Entry.JoinedAtUtc,
+                                ConnectionCount = x.ConnectionCount,
+                                AttendanceRecorded = !sessionResolved ? false
+                                    : x.Entry.Role == "teacher" ? presentTeacherSessions.Contains(session!.Id)
+                                    : session!.BatchId.HasValue
+                                        && activeChildrenByBatchAndParent.TryGetValue((session.BatchId.Value, x.Entry.UserId), out var childIds)
+                                        && childIds.Any(childId => presentChildKeys.Contains((session.Id, childId))),
+                            })
                             .ToList(),
                     };
 
-                    if (Guid.TryParse(group.Key, out var sessionGuid) && sessionsById.TryGetValue(sessionGuid, out var session))
+                    if (sessionResolved)
                     {
-                        dto.CourseName = session.Batch?.Course.Name ?? "Demo session";
+                        dto.CourseName = session!.Batch?.Course.Name ?? "Demo session";
                         dto.BatchName = session.Batch?.Name;
                         dto.TeacherName = $"{session.TeacherProfile.User.FirstName} {session.TeacherProfile.User.LastName}".Trim();
                         dto.StartedAtUtc = session.ActualStartAtUtc ?? session.ScheduledStartAtUtc;
+                        dto.ScheduledEndAtUtc = session.ScheduledEndAtUtc;
                     }
                     else
                     {
@@ -169,6 +219,55 @@ namespace iucs.readernest.application.Services
                 })
                 .OrderByDescending(s => s.StartedAtUtc)
                 .ToList();
+        }
+
+        public async Task<List<SessionHistoryEntryDto>> GetTodaySessionsAsync(CancellationToken cancellationToken = default)
+        {
+            // "Today" in IST (Asia/Kolkata, this platform's primary timezone -- see User.TimeZoneId's
+            // own default) rather than UTC, so a 7pm-11pm IST class doesn't get split across two
+            // different "days" from an admin's perspective just because UTC's midnight fell in the
+            // middle of it.
+            var istNow = DateTime.UtcNow.AddHours(5).AddMinutes(30);
+            var istDayStart = istNow.Date;
+            var dayStartUtc = istDayStart.AddHours(-5).AddMinutes(-30);
+            var dayEndUtc = dayStartUtc.AddDays(1);
+
+            var sessions = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.ScheduledStartAtUtc >= dayStartUtc && s.ScheduledStartAtUtc < dayEndUtc)
+                .Include(s => s.Batch!).ThenInclude(b => b.Course)
+                .Include(s => s.Batch!).ThenInclude(b => b.Enrollments)
+                .Include(s => s.TeacherProfile).ThenInclude(t => t.User)
+                .OrderBy(s => s.ScheduledStartAtUtc)
+                .ToListAsync(cancellationToken);
+
+            if (sessions.Count == 0)
+            {
+                return new List<SessionHistoryEntryDto>();
+            }
+
+            var sessionIds = sessions.Select(s => s.Id).ToList();
+            var attendedCounts = (await _unitOfWork.Repository<SessionAttendance>().Query()
+                .Where(a => sessionIds.Contains(a.ClassSessionId) && a.Status != AttendanceStatus.Absent)
+                .Select(a => new { a.ClassSessionId, Key = a.TeacherProfileId.HasValue ? $"t:{a.TeacherProfileId}" : $"c:{a.ChildId}" })
+                .Distinct()
+                .ToListAsync(cancellationToken))
+                .GroupBy(a => a.ClassSessionId)
+                .ToDictionary(g => g.Key, g => g.Count());
+
+            return sessions.Select(s => new SessionHistoryEntryDto
+            {
+                SessionId = s.Id,
+                CourseName = s.Batch?.Course.Name ?? "Demo session",
+                BatchName = s.Batch?.Name,
+                TeacherName = $"{s.TeacherProfile.User.FirstName} {s.TeacherProfile.User.LastName}".Trim(),
+                ScheduledStartAtUtc = s.ScheduledStartAtUtc,
+                ScheduledEndAtUtc = s.ScheduledEndAtUtc,
+                ActualStartAtUtc = s.ActualStartAtUtc,
+                ActualEndAtUtc = s.ActualEndAtUtc,
+                Status = s.Status.ToString(),
+                AttendedCount = attendedCounts.TryGetValue(s.Id, out var count) ? count : 0,
+                ExpectedCount = 1 + (s.Batch?.Enrollments.Count(e => e.Status == EnrollmentStatus.Active) ?? 0),
+            }).ToList();
         }
 
         private async Task<DatabaseInsightsDto?> GetDatabaseInsightsAsync(CancellationToken cancellationToken)
