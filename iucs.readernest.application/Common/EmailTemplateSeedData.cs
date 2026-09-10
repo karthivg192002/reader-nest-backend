@@ -186,6 +186,18 @@ namespace iucs.readernest.application.Common
                     """,
                     "StartAtLocal", "CarryForwardCount"),
 
+                New("recording-missing-alert", "Recording Missing After Class (Admin)",
+                    "Sent to Admins when a completed class never received a recording — auto-record can start with no error yet still fail later in the pipeline (upload, finalize), which nothing else catches.",
+                    NotificationType.NoShowAlert, "No recording ever arrived for a completed class",
+                    """
+                    <p>The class with <strong>{{TeacherName}}</strong> scheduled at <strong>{{StartAtLocal}}</strong>
+                    completed, but no recording was ever registered for it.</p>
+                    <p>This usually means recording started but failed somewhere in the pipeline (upload,
+                    processing) rather than never starting at all — worth checking with the teacher whether they
+                    have a local copy, and letting the parent know it isn't available if not.</p>
+                    """,
+                    "TeacherName", "StartAtLocal"),
+
                 New("class-summary", "Class Summary (Parent)",
                     "Sent to the parent after the teacher writes a class summary for a completed session.",
                     NotificationType.PerformanceSummary, "Class summary — {{SessionDate}}",

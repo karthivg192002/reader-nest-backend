@@ -59,5 +59,12 @@ namespace iucs.readernest.domain.Entities.Sessions
 
         [MaxLength(2000)]
         public string? Summary { get; set; }
+
+        /// <summary>Set once RecordingReconciliationBackgroundService has alerted admins that this
+        /// completed session never got a recording — auto-record can succeed at *starting* with
+        /// no error yet still fail later in the pipeline (Jibri crashing mid-capture, an upload
+        /// failure, the finalize webhook never reaching this app), which nothing else catches;
+        /// this both de-duplicates the alert and marks the gap as already investigated.</summary>
+        public DateTime? RecordingMissingAlertSentAtUtc { get; set; }
     }
 }
