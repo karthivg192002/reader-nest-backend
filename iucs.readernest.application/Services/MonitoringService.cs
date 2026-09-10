@@ -2,6 +2,7 @@ using System.Diagnostics;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Common.Options;
 using iucs.readernest.application.Dto.Monitoring;
+using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Settings;
 using iucs.readernest.domain.Repository;
 using Microsoft.EntityFrameworkCore;
@@ -106,6 +107,63 @@ namespace iucs.readernest.application.Services
                 CpuHistory = (await cpuTask).Select(p => new TimeSeriesPointDto { Timestamp = p.Timestamp, Value = Clamp(p.Value) }).ToList(),
                 MemoryHistory = (await memTask).Select(p => new TimeSeriesPointDto { Timestamp = p.Timestamp, Value = Clamp(p.Value) }).ToList(),
             };
+        }
+
+        public async Task<List<LiveClassSessionDto>> GetLiveUsersAsync(CancellationToken cancellationToken = default)
+        {
+            var connections = _presenceTracker.GetLiveConnections();
+            if (connections.Count == 0)
+            {
+                return new List<LiveClassSessionDto>();
+            }
+
+            var sessionIds = connections
+                .Select(c => c.SessionId)
+                .Distinct()
+                .Select(id => Guid.TryParse(id, out var guid) ? guid : (Guid?)null)
+                .Where(guid => guid is not null)
+                .Select(guid => guid!.Value)
+                .ToList();
+
+            var sessions = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => sessionIds.Contains(s.Id))
+                .Include(s => s.Batch!).ThenInclude(b => b.Course)
+                .Include(s => s.TeacherProfile).ThenInclude(t => t.User)
+                .ToListAsync(cancellationToken);
+            var sessionsById = sessions.ToDictionary(s => s.Id);
+
+            return connections
+                .GroupBy(c => c.SessionId)
+                .Select(group =>
+                {
+                    var dto = new LiveClassSessionDto
+                    {
+                        SessionId = group.Key,
+                        Participants = group
+                            .OrderBy(p => p.JoinedAtUtc)
+                            .Select(p => new LiveParticipantDto { UserId = p.UserId, Name = p.Name, Role = p.Role, JoinedAtUtc = p.JoinedAtUtc })
+                            .ToList(),
+                    };
+
+                    if (Guid.TryParse(group.Key, out var sessionGuid) && sessionsById.TryGetValue(sessionGuid, out var session))
+                    {
+                        dto.CourseName = session.Batch?.Course.Name ?? "Demo session";
+                        dto.BatchName = session.Batch?.Name;
+                        dto.TeacherName = $"{session.TeacherProfile.User.FirstName} {session.TeacherProfile.User.LastName}".Trim();
+                        dto.StartedAtUtc = session.ActualStartAtUtc ?? session.ScheduledStartAtUtc;
+                    }
+                    else
+                    {
+                        // A session id that doesn't resolve to a ClassSession (deleted since, or a
+                        // room name that was never one) shouldn't hide the fact that people are
+                        // connected to it -- just without the enrichment a real session carries.
+                        dto.CourseName = "Unknown session";
+                    }
+
+                    return dto;
+                })
+                .OrderByDescending(s => s.StartedAtUtc)
+                .ToList();
         }
 
         private async Task<DatabaseInsightsDto?> GetDatabaseInsightsAsync(CancellationToken cancellationToken)

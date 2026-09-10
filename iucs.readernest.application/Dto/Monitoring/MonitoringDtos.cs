@@ -129,6 +129,27 @@ namespace iucs.readernest.application.Dto.Monitoring
         public double? RecordingAtCapacityPercent7d { get; set; }
     }
 
+    /// <summary>One connected user in a live class, for the admin "who's live right now" view.</summary>
+    public class LiveParticipantDto
+    {
+        public Guid UserId { get; set; } = Guid.Empty;
+        public string Name { get; set; } = string.Empty;
+        public string Role { get; set; } = string.Empty;
+        public DateTime JoinedAtUtc { get; set; }
+    }
+
+    /// <summary>One live class session with everyone currently connected to it, enriched with the human-readable context a raw session Guid doesn't carry on its own.</summary>
+    public class LiveClassSessionDto
+    {
+        public string SessionId { get; set; } = string.Empty;
+        public string CourseName { get; set; } = string.Empty;
+        /// <summary>Null for a demo session, which has no Batch.</summary>
+        public string? BatchName { get; set; }
+        public string TeacherName { get; set; } = string.Empty;
+        public DateTime? StartedAtUtc { get; set; }
+        public List<LiveParticipantDto> Participants { get; set; } = new();
+    }
+
     /// <summary>Historical CPU/memory usage for one server over an admin-selected window (see GetHistoryAsync).</summary>
     public class HistoryRangeDto
     {

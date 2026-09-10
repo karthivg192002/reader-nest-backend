@@ -29,6 +29,14 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _monitoringService.GetSummaryAsync(cancellationToken));
         }
 
+        /// <summary>Every live class session with a connected participant right now, and who's in it -- admin-only visibility into other users' real-time presence.</summary>
+        [HttpGet("live-users")]
+        [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.View)]
+        public async Task<ActionResult<List<LiveClassSessionDto>>> GetLiveUsers(CancellationToken cancellationToken)
+        {
+            return Ok(await _monitoringService.GetLiveUsersAsync(cancellationToken));
+        }
+
         /// <summary>CPU/memory history for one server over an admin-selected window ("1h", "24h", or "7d").</summary>
         [HttpGet("servers/{serverName}/history")]
         [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.View)]
