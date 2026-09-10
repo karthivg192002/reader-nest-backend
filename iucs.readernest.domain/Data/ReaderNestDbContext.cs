@@ -58,6 +58,7 @@ namespace iucs.readernest.domain.Data
         public DbSet<SessionPresentation> SessionPresentations => Set<SessionPresentation>();
         public DbSet<EngagementEvent> EngagementEvents => Set<EngagementEvent>();
         public DbSet<StudentAward> StudentAwards => Set<StudentAward>();
+        public DbSet<ClassSessionEventLog> ClassSessionEventLogs => Set<ClassSessionEventLog>();
 
         // Quizzes
         public DbSet<QuizQuestion> QuizQuestions => Set<QuizQuestion>();

@@ -66,5 +66,13 @@ namespace iucs.readernest.domain.Entities.Sessions
         /// failure, the finalize webhook never reaching this app), which nothing else catches;
         /// this both de-duplicates the alert and marks the gap as already investigated.</summary>
         public DateTime? RecordingMissingAlertSentAtUtc { get; set; }
+
+        /// <summary>Set once NoShowDetectionBackgroundService has alerted admins that this Demo
+        /// session has no DemoBooking linked to it at all (as opposed to one that exists but
+        /// nobody joined) — nobody was ever going to attend, so it is left running rather than
+        /// being auto-flagged a no-show. Same de-duplication role as
+        /// <see cref="RecordingMissingAlertSentAtUtc"/>: without it, an unresolved orphaned slot
+        /// would re-alert admins every 10-minute cycle forever instead of once.</summary>
+        public DateTime? OrphanedDemoAlertSentAtUtc { get; set; }
     }
 }

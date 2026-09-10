@@ -80,10 +80,13 @@ namespace iucs.readernest.tests
 
         private StoreService CreateStoreService() => new(_db.UnitOfWork, _auditLog, CreateDemoBookingService());
 
-        private SessionService CreateSessionService() => new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, new FakeJitsiTokenService());
+        private ClassSessionEventLogService CreateEventLogService() => new(_db.UnitOfWork);
+
+        private SessionService CreateSessionService() =>
+            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, new FakeJitsiTokenService(), CreateEventLogService());
 
         private SessionService CreateSessionService(FakeJitsiTokenService jitsiTokens) =>
-            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, jitsiTokens);
+            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, jitsiTokens, CreateEventLogService());
 
         private BillingService CreateBillingService() =>
             new(_db.UnitOfWork, _auditLog, new FakePaymentGateway(), _notifications, _db.CurrentUser, _bulkFileReader, _invoicePdfGenerator);
@@ -98,7 +101,7 @@ namespace iucs.readernest.tests
         private PermissionModuleService CreatePermissionModuleService() => new(_db.UnitOfWork, _auditLog);
 
         private AcademicOpsService CreateAcademicOpsService() =>
-            new(_db.UnitOfWork, _auditLog, _notifications, _db.CurrentUser, CreateSessionService());
+            new(_db.UnitOfWork, _auditLog, _notifications, _db.CurrentUser, CreateSessionService(), CreateEventLogService());
 
         private GamificationService CreateGamificationService() => new(_db.UnitOfWork, CreateSessionService());
 
@@ -1003,6 +1006,69 @@ namespace iucs.readernest.tests
             await CreateAcademicOpsService().CaptureJoinAttendanceAsync(session.Id, unrelatedParent.Id);
 
             Assert.Null((await _db.Context.DemoBookings.FindAsync(booking.Id))!.ParentJoinedAtUtc);
+        }
+
+        [Fact]
+        public async Task MarkNoShow_DemoSession_RelinksDemoBookingToTheCarriedForwardSession_AndResetsJoinFlags()
+        {
+            // Regression: the carried-forward session used to be created with no DemoBooking of
+            // its own — the booking stayed pointed at the old, now-terminal session, so the
+            // rescheduled demo slot looked exactly like a fresh no-show ("Teacher set, Type
+            // Demo, no student assigned") and NoShowDetectionBackgroundService flagged it a
+            // no-show again the following week regardless of who actually showed up, repeating
+            // indefinitely (until the carry-forward cap silently froze it).
+            var parentEmail = $"lead-{Guid.NewGuid():N}@test.com";
+            var participantEmail = $"guardian-{Guid.NewGuid():N}@test.com";
+            var (session, booking) = await SeedDemoSessionAsync(parentEmail, participantEmail);
+
+            // The student side already joined (this is a teacher no-show) — these flags describe
+            // attendance of the OLD session and must not leak onto the new one as if the parent/
+            // guardian had already joined a class they've never even been notified is happening.
+            booking.ParentJoinedAtUtc = DateTime.UtcNow;
+            booking.Participants.Single().HasJoined = true;
+            await _db.Context.SaveChangesAsync();
+
+            var carried = await CreateSessionService().MarkNoShowAsync(
+                session.Id, new MarkNoShowRequest { Party = NoShowParty.Teacher });
+
+            Assert.Equal(SessionStatus.CarriedForward, carried.Status);
+            var reloadedBooking = await _db.Context.DemoBookings.Include(b => b.Participants)
+                .FirstAsync(b => b.Id == booking.Id);
+            Assert.Equal(carried.Id, reloadedBooking.ClassSessionId);
+            Assert.Null(reloadedBooking.ParentJoinedAtUtc);
+            Assert.False(Assert.Single(reloadedBooking.Participants).HasJoined);
+        }
+
+        [Fact]
+        public async Task FlagOrphanedDemoSessionAsync_AlertsAdmins_WithoutTouchingStatusOrPayout()
+        {
+            // A Demo session with no DemoBooking linked to it at all (as opposed to one that
+            // exists but nobody joined) never had a student to begin with — flagging it a
+            // no-show would falsely dock the teacher and hide the real data problem behind a
+            // routine-looking no-show. This path must alert instead of touching status/payout.
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            var session = new ClassSession
+            {
+                BatchId = null,
+                TeacherProfile = teacher,
+                Type = SessionType.Demo,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-1),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-1).AddMinutes(30),
+            };
+            _db.Context.ClassSessions.Add(session);
+            await _db.Context.SaveChangesAsync();
+            var admin = await _db.SeedUserAsync($"admin-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+
+            await CreateSessionService().FlagOrphanedDemoSessionAsync(session.Id);
+
+            Assert.Contains(_emailSender.Sent, m => m.To == admin.Email && m.Subject.Contains("no student booked"));
+            var reloaded = await _db.Context.ClassSessions.FindAsync(session.Id);
+            Assert.Equal(SessionStatus.Scheduled, reloaded!.Status); // untouched — not a no-show
+            Assert.NotNull(reloaded.OrphanedDemoAlertSentAtUtc);
+            Assert.Empty(_db.Context.PayoutItems.ToList()); // no financial side effect
         }
 
         [Fact]

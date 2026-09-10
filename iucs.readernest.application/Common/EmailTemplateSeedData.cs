@@ -186,6 +186,17 @@ namespace iucs.readernest.application.Common
                     """,
                     "StartAtLocal", "CarryForwardCount"),
 
+                New("demo-orphaned-noshow-alert", "Demo Session Has No Student Booked (Admin)",
+                    "Sent to Admins when a Demo session's grace period elapses with no DemoBooking linked to it at all — nobody was ever going to attend, so it is left as-is rather than being auto-flagged a no-show.",
+                    NotificationType.NoShowAlert, "A demo class has no student booked into it",
+                    """
+                    <p>The demo session scheduled at <strong>{{StartAtLocal}}</strong> has no lead/booking linked to it,
+                    so no student was ever going to attend.</p>
+                    <p>It has <strong>not</strong> been marked a no-show or carried forward, since nobody was expected to
+                    show up. Please check the calendar and Close, Mark Holiday, or Reschedule it as appropriate.</p>
+                    """,
+                    "StartAtLocal"),
+
                 New("recording-missing-alert", "Recording Missing After Class (Admin)",
                     "Sent to Admins when a completed class never received a recording — auto-record can start with no error yet still fail later in the pipeline (upload, finalize), which nothing else catches.",
                     NotificationType.NoShowAlert, "No recording ever arrived for a completed class",

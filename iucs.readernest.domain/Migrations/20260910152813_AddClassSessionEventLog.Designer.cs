@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using iucs.readernest.domain.Data;
@@ -11,9 +12,11 @@ using iucs.readernest.domain.Data;
 namespace iucs.readernest.domain.Migrations
 {
     [DbContext(typeof(ReaderNestDbContext))]
-    partial class ReaderNestDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260910152813_AddClassSessionEventLog")]
+    partial class AddClassSessionEventLog
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -3206,10 +3209,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)")
                         .HasColumnName("meeting_room_id");
-
-                    b.Property<DateTime?>("OrphanedDemoAlertSentAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("orphaned_demo_alert_sent_at_utc");
 
                     b.Property<DateTime?>("RecordingMissingAlertSentAtUtc")
                         .HasColumnType("timestamp with time zone")

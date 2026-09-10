@@ -54,6 +54,16 @@ namespace iucs.readernest.application.Services
         /// </summary>
         Task<ClassSessionDto> MarkNoShowSystemAsync(Guid id, NoShowParty party, string note, CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// Called by <c>NoShowDetectionBackgroundService</c> for an overdue Demo session that has
+        /// no DemoBooking linked to it at all — as opposed to one that exists but nobody joined.
+        /// No student was ever going to attend such a slot, so it is a misconfigured/orphaned
+        /// booking, not a genuine no-show: this does not touch the session's status or accrue any
+        /// payout (which <see cref="MarkNoShowSystemAsync"/> would do), it only alerts an admin so
+        /// a human can Close/Mark Holiday/Reschedule it from the calendar.
+        /// </summary>
+        Task FlagOrphanedDemoSessionAsync(Guid id, CancellationToken cancellationToken = default);
+
         Task<SessionRecordingDto> AddRecordingAsync(
             Guid sessionId,
             RegisterRecordingRequest request,

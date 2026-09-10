@@ -50,6 +50,7 @@ namespace iucs.readernest.api.Data
             await EnsureAdminQuizBankMenuAsync(context);
             await EnsureAdminActivityBankMenuAsync(context);
             await EnsureAdminServerMonitoringMenuAsync(context);
+            await EnsureClassSessionLogsMenuAsync(context);
             await EnsureBulkEmailHistoryMenuAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
@@ -241,6 +242,7 @@ namespace iucs.readernest.api.Data
                 (PermissionModule.Communication, "Communication"),
                 (PermissionModule.Settings, "Settings"),
                 (PermissionModule.SystemMonitoring, "Server Monitoring"),
+                (PermissionModule.ClassSessionLogs, "Class Session Logs"),
             ];
 
             var existingKeys = await context.PermissionModuleDefinitions
@@ -995,6 +997,64 @@ namespace iucs.readernest.api.Data
                 IsActive = true,
                 RequiredModule = PermissionModule.SystemMonitoring.ToString(),
             });
+        }
+
+        /// <summary>
+        /// Inserts the "Class Session Logs" menu item — live/next class status plus the
+        /// durable teacher/student join-leave-end activity trail — into both the Admin
+        /// portal (System section, visible immediately since Admin bypasses module gating)
+        /// and the Sub Admin portal (Access section, gated on the new ClassSessionLogs
+        /// module — deliberately not auto-granted to any role here; an Admin grants it to
+        /// whichever persona, e.g. an "IT Admin" preset, needs it via Roles &amp; Permissions).
+        /// Same idiom as EnsureAdminServerMonitoringMenuAsync right above.
+        /// </summary>
+        private static async Task EnsureClassSessionLogsMenuAsync(ReaderNestDbContext context)
+        {
+            const string adminPath = "/admin/class-logs";
+            if (!context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == adminPath) &&
+                !await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == adminPath))
+            {
+                var systemItems = await context.MenuItems
+                    .Where(m => m.Portal == "admin" && m.Section == "System")
+                    .ToListAsync();
+                if (systemItems.Count > 0)
+                {
+                    var last = systemItems.OrderByDescending(m => m.SortOrder).First();
+                    context.MenuItems.Add(new MenuItem
+                    {
+                        Portal = "admin",
+                        Section = "System",
+                        SectionOrder = last.SectionOrder,
+                        Label = "Class Session Logs",
+                        Path = adminPath,
+                        Icon = "Radar",
+                        SortOrder = last.SortOrder + 1,
+                        IsActive = true,
+                        RequiredModule = PermissionModule.ClassSessionLogs.ToString(),
+                    });
+                }
+            }
+
+            const string subAdminPath = "/subadmin/class-logs";
+            if (!context.MenuItems.Local.Any(m => m.Portal == "subadmin" && m.Path == subAdminPath) &&
+                !await context.MenuItems.AnyAsync(m => m.Portal == "subadmin" && m.Path == subAdminPath))
+            {
+                var accessItems = await context.MenuItems
+                    .Where(m => m.Portal == "subadmin" && m.Section == "Access")
+                    .ToListAsync();
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "subadmin",
+                    Section = "Access",
+                    SectionOrder = accessItems.FirstOrDefault()?.SectionOrder ?? 0,
+                    Label = "Class Session Logs",
+                    Path = subAdminPath,
+                    Icon = "Radar",
+                    SortOrder = accessItems.Count == 0 ? 0 : accessItems.Max(m => m.SortOrder) + 1,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.ClassSessionLogs.ToString(),
+                });
+            }
         }
 
         private static async Task SeedMenusAsync(ReaderNestDbContext context)

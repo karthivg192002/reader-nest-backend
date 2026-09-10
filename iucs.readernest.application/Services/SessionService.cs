@@ -39,6 +39,7 @@ namespace iucs.readernest.application.Services
         private readonly INotificationService _notificationService;
         private readonly ICurrentUserService _currentUser;
         private readonly IJitsiTokenService _jitsiTokenService;
+        private readonly IClassSessionEventLogService _eventLog;
 
         public SessionService(
             IUnitOfWork unitOfWork,
@@ -46,7 +47,8 @@ namespace iucs.readernest.application.Services
             IPayoutService payoutService,
             INotificationService notificationService,
             ICurrentUserService currentUser,
-            IJitsiTokenService jitsiTokenService)
+            IJitsiTokenService jitsiTokenService,
+            IClassSessionEventLogService eventLog)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
@@ -54,6 +56,7 @@ namespace iucs.readernest.application.Services
             _notificationService = notificationService;
             _currentUser = currentUser;
             _jitsiTokenService = jitsiTokenService;
+            _eventLog = eventLog;
         }
 
         public async Task<IReadOnlyList<ClassSessionDto>> ListAsync(
@@ -268,6 +271,10 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
+            // The definitive "End Class" timestamp for the Class Session Logs screen — best
+            // effort, after the real completion has already durably saved.
+            await _eventLog.LogClassEndedAsync(session, cancellationToken);
+
             // Performance summary: the teacher's class notes go straight to the batch's parents
             if (!string.IsNullOrWhiteSpace(session.Summary) && session.BatchId.HasValue)
             {
@@ -343,6 +350,34 @@ namespace iucs.readernest.application.Services
             return await MarkNoShowCoreAsync(session, party, note, cancellationToken);
         }
 
+        public async Task FlagOrphanedDemoSessionAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(id, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), id);
+
+            var admins = await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.Role == UserRole.Admin && u.Status == UserStatus.Active)
+                .ToListAsync(cancellationToken);
+
+            foreach (var admin in admins)
+            {
+                await _notificationService.SendTemplatedEmailAsync(
+                    admin.Id,
+                    admin.Email,
+                    NotificationType.NoShowAlert,
+                    "demo-orphaned-noshow-alert",
+                    new Dictionary<string, string> { ["StartAtLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc, admin.TimeZoneId) },
+                    cancellationToken);
+            }
+
+            // De-duplicates like RecordingMissingAlertSentAtUtc does for the recording-gap alert:
+            // this session's status never changes (nobody was ever booked into it, so there is no
+            // no-show/carry-forward to apply), so without this it would keep matching the
+            // background service's query and re-alert admins every 10-minute cycle forever.
+            session.OrphanedDemoAlertSentAtUtc = DateTime.UtcNow;
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
         private async Task<ClassSessionDto> MarkNoShowCoreAsync(
             ClassSession session,
             NoShowParty party,
@@ -357,6 +392,9 @@ namespace iucs.readernest.application.Services
             session.Status = party == NoShowParty.Teacher
                 ? SessionStatus.TeacherNoShow
                 : SessionStatus.StudentNoShow;
+
+            // Best-effort; covers both exit paths below (capped chain vs. normal carry-forward).
+            await _eventLog.LogNoShowAsync(session, party, cancellationToken);
 
             if (party == NoShowParty.Student)
             {
@@ -422,6 +460,32 @@ namespace iucs.readernest.application.Services
                 CarryForwardCount = session.CarryForwardCount + 1,
             };
             await _unitOfWork.Repository<ClassSession>().AddAsync(carriedForward, cancellationToken);
+
+            // A demo has no batch to fall back on — its only link to a student is the
+            // DemoBooking row, and that row still points at the now-terminal original session
+            // unless it's moved here. Miss this and the carried-forward slot looks exactly like
+            // the original (Teacher set, Type Demo) but with "No students assigned": nobody was
+            // ever going to join it, so NoShowDetectionBackgroundService flags it a no-show
+            // again next cycle regardless of who actually shows up, repeating weekly until
+            // MaxAutoCarryForwards silently caps it — confirmed live as the "9 straight weeks"
+            // incident referenced above. Reset the per-occurrence join flags too: they describe
+            // whether this parent/participant joined the OLD session, which says nothing about
+            // the new one.
+            if (session.Type == SessionType.Demo)
+            {
+                var demoBooking = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
+                    .Include(b => b.Participants)
+                    .FirstOrDefaultAsync(b => b.ClassSessionId == session.Id, cancellationToken);
+                if (demoBooking is not null)
+                {
+                    demoBooking.ClassSessionId = carriedForward.Id;
+                    demoBooking.ParentJoinedAtUtc = null;
+                    foreach (var participant in demoBooking.Participants)
+                    {
+                        participant.HasJoined = false;
+                    }
+                }
+            }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
                 changesJson: "{\"noShow\":\"" + party + "\",\"carriedForwardTo\":\"" + carriedForward.Id + "\""

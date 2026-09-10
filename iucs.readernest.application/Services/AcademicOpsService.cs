@@ -22,19 +22,22 @@ namespace iucs.readernest.application.Services
         private readonly INotificationService _notificationService;
         private readonly ICurrentUserService _currentUser;
         private readonly ISessionService _sessionService;
+        private readonly IClassSessionEventLogService _eventLog;
 
         public AcademicOpsService(
             IUnitOfWork unitOfWork,
             IAuditLogService auditLog,
             INotificationService notificationService,
             ICurrentUserService currentUser,
-            ISessionService sessionService)
+            ISessionService sessionService,
+            IClassSessionEventLogService eventLog)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
             _notificationService = notificationService;
             _currentUser = currentUser;
             _sessionService = sessionService;
+            _eventLog = eventLog;
         }
 
         /// <summary>
@@ -104,9 +107,11 @@ namespace iucs.readernest.application.Services
                         // path at all — the teacher is back, they haven't "left" this session yet.
                         var existingTeacherRow = await _unitOfWork.Repository<SessionAttendance>().TrackedQuery()
                             .FirstOrDefaultAsync(a => a.ClassSessionId == sessionId && a.TeacherProfileId == session.TeacherProfileId, cancellationToken);
-                        if (existingTeacherRow is not null)
+                        var isReconnect = existingTeacherRow is not null;
+
+                        if (isReconnect)
                         {
-                            existingTeacherRow.Status = AttendanceStatus.Present;
+                            existingTeacherRow!.Status = AttendanceStatus.Present;
                             existingTeacherRow.LeftAtUtc = null;
                             await _unitOfWork.SaveChangesAsync(cancellationToken);
                         }
@@ -118,27 +123,63 @@ namespace iucs.readernest.application.Services
                                 Status = AttendanceStatus.Present,
                                 JoinedAtUtc = DateTime.UtcNow,
                             });
+
+                            // The real "class started" moment — nothing else in this app ever
+                            // flips a session to InProgress or stamps ActualStartAtUtc from the
+                            // teacher's own actual arrival; CompleteAsync's own ??= fallback only
+                            // covers a session that never got here at all. `session` is the same
+                            // tracked entity for this request, so this rides whichever
+                            // SaveChangesAsync call happens to run next (the event-log write below
+                            // included).
+                            if (session.Status is SessionStatus.Scheduled or SessionStatus.CarriedForward)
+                            {
+                                session.Status = SessionStatus.InProgress;
+                            }
+                            session.ActualStartAtUtc ??= DateTime.UtcNow;
                         }
+
+                        await _eventLog.LogTeacherJoinAsync(
+                            session, session.TeacherProfileId, userId,
+                            $"{user.FirstName} {user.LastName}".Trim(), isReconnect, cancellationToken);
                     }
                 }
                 else if (user.Role == UserRole.Parent)
                 {
                     if (session.BatchId is Guid batchId)
                     {
-                        var childIds = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                        var children = await _unitOfWork.Repository<BatchEnrollment>().Query()
                             .Where(e => e.BatchId == batchId && e.Status == EnrollmentStatus.Active)
                             .Join(_unitOfWork.Repository<Child>().Query(), e => e.ChildId, c => c.Id, (e, c) => c)
-                            .Join(_unitOfWork.Repository<ParentProfile>().Query(), c => c.ParentProfileId, p => p.Id, (c, p) => new { c.Id, p.UserId })
+                            .Join(_unitOfWork.Repository<ParentProfile>().Query(), c => c.ParentProfileId, p => p.Id, (c, p) => new { c.Id, c.FirstName, c.LastName, p.UserId })
                             .Where(x => x.UserId == userId)
-                            .Select(x => x.Id)
                             .ToListAsync(cancellationToken);
 
-                        entries.AddRange(childIds.Select(childId => new AttendanceEntryDto
+                        entries.AddRange(children.Select(c => new AttendanceEntryDto
                         {
-                            ChildId = childId,
+                            ChildId = c.Id,
                             Status = AttendanceStatus.Present,
                             JoinedAtUtc = DateTime.UtcNow,
                         }));
+
+                        if (children.Count > 0)
+                        {
+                            // One rejoin check covering every enrolled child on this join, rather
+                            // than a query per child — usually one row (siblings sharing a batch
+                            // are the exception), bounded either way by class size.
+                            var childIds = children.Select(c => c.Id).ToList();
+                            var previouslyJoinedChildIds = (await _unitOfWork.Repository<SessionAttendance>().Query()
+                                    .Where(a => a.ClassSessionId == sessionId && a.ChildId != null && childIds.Contains(a.ChildId!.Value))
+                                    .Select(a => a.ChildId!.Value)
+                                    .ToListAsync(cancellationToken))
+                                .ToHashSet();
+
+                            foreach (var child in children)
+                            {
+                                await _eventLog.LogStudentJoinAsync(
+                                    session, child.Id, userId, $"{child.FirstName} {child.LastName}".Trim(),
+                                    isReconnect: previouslyJoinedChildIds.Contains(child.Id), cancellationToken);
+                            }
+                        }
                     }
                     else if (!string.IsNullOrWhiteSpace(user.Email))
                     {
@@ -235,15 +276,25 @@ namespace iucs.readernest.application.Services
             }
 
             var matched = false;
+            var joinedNames = new List<string>();
             if (string.Equals(booking.ParentEmail, email, StringComparison.OrdinalIgnoreCase))
             {
+                var wasAlreadyJoined = booking.ParentJoinedAtUtc.HasValue;
                 booking.ParentJoinedAtUtc ??= DateTime.UtcNow;
                 matched = true;
+                if (!wasAlreadyJoined)
+                {
+                    joinedNames.Add(booking.ParentName);
+                }
             }
 
             foreach (var participant in booking.Participants.Where(
                 p => p.Email != null && string.Equals(p.Email, email, StringComparison.OrdinalIgnoreCase)))
             {
+                if (!participant.HasJoined)
+                {
+                    joinedNames.Add(participant.Name);
+                }
                 participant.HasJoined = true;
                 matched = true;
             }
@@ -251,6 +302,15 @@ namespace iucs.readernest.application.Services
             if (matched)
             {
                 await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+
+            // Logged after every real match, including a rejoin of an already-marked-joined
+            // participant (joinedNames stays empty then, which is fine — a rejoin isn't
+            // itself a notable event for a demo lead the way it is for the teacher/student
+            // attendance flows above).
+            foreach (var name in joinedNames)
+            {
+                await _eventLog.LogDemoParticipantJoinAsync(sessionId, name, cancellationToken);
             }
         }
 

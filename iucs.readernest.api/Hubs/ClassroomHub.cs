@@ -48,17 +48,20 @@ namespace iucs.readernest.api.Hubs
         private readonly IGamificationService _gamificationService;
         private readonly IAcademicOpsService _academicOpsService;
         private readonly IClassroomPresenceTracker _presenceTracker;
+        private readonly IClassSessionEventLogService _eventLog;
 
         public ClassroomHub(
             ISessionService sessionService,
             IGamificationService gamificationService,
             IAcademicOpsService academicOpsService,
-            IClassroomPresenceTracker presenceTracker)
+            IClassroomPresenceTracker presenceTracker,
+            IClassSessionEventLogService eventLog)
         {
             _sessionService = sessionService;
             _gamificationService = gamificationService;
             _academicOpsService = academicOpsService;
             _presenceTracker = presenceTracker;
+            _eventLog = eventLog;
         }
 
         public record ParticipantState(string Name, string Role, bool HandRaised);
@@ -117,6 +120,7 @@ namespace iucs.readernest.api.Hubs
 
             if (!await _sessionService.IsSessionParticipantAsync(sessionGuid, userId, Context.ConnectionAborted))
             {
+                await _eventLog.LogJoinDeniedAsync(sessionGuid, userId, "Not a participant of this session.", CancellationToken.None);
                 throw new HubException("You do not have access to this session.");
             }
 
@@ -184,14 +188,22 @@ namespace iucs.readernest.api.Hubs
 
         public async Task LeaveSession(string sessionId)
         {
-            await RemoveFromSessionAsync(sessionId);
+            // Every deliberate exit — "End the class", "Just leave for now", or a plain
+            // Leave — invokes this before the connection actually stops (see
+            // ClassroomHubClient.disconnect() in lib/classroomHub.ts), so a call landing
+            // here reliably means the participant chose to leave. OnDisconnectedAsync
+            // firing WITHOUT this flag having been set first is what actually means an
+            // abrupt drop (network loss, browser crash/close).
+            await RemoveFromSessionAsync(sessionId, wasExplicit: true);
         }
 
         public override async Task OnDisconnectedAsync(Exception? exception)
         {
             if (Context.Items.TryGetValue("sessionId", out var value) && value is string sessionId)
             {
-                await RemoveFromSessionAsync(sessionId);
+                // Already removed (and logged) by an explicit LeaveSession moments earlier —
+                // Rooms.TryGetValue below will simply find nothing for this connection id.
+                await RemoveFromSessionAsync(sessionId, wasExplicit: false);
             }
 
             await base.OnDisconnectedAsync(exception);
@@ -423,7 +435,7 @@ namespace iucs.readernest.api.Hubs
 
         // ---- helpers ----
 
-        private async Task RemoveFromSessionAsync(string sessionId)
+        private async Task RemoveFromSessionAsync(string sessionId, bool wasExplicit)
         {
             _presenceTracker.UserLeft(sessionId, Context.ConnectionId);
 
@@ -435,19 +447,33 @@ namespace iucs.readernest.api.Hubs
                     grants.TryRemove(Context.ConnectionId, out _);
                 }
 
-                // Real departure time, for payout accuracy (see CaptureLeaveAttendanceAsync's own
-                // doc comment) — without this, nothing ever recorded when a teacher actually left
-                // a live class, so one who taught the whole thing and one who left after a few
-                // minutes were indistinguishable. Only worth the lookup for the departing
-                // participant's own role, not every student/parent leaving too.
-                if (removedState?.Role == "teacher"
+                // removedState is null on the SECOND call for the same connection (an explicit
+                // LeaveSession already removed it from Rooms moments earlier; the connection then
+                // formally closing fires OnDisconnectedAsync too) — nothing left to attribute a
+                // departure to, so both the attendance capture and the event log below are
+                // naturally skipped rather than double-logging one exit as two.
+                if (removedState is not null
                     && Guid.TryParse(sessionId, out var sessionGuid)
                     && Guid.TryParse(Context.User?.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
                 {
-                    // CancellationToken.None, deliberately: this is exactly the abrupt-disconnect
-                    // (network drop) case that matters most to capture, and Context.ConnectionAborted
+                    // Real departure time, for payout accuracy (see CaptureLeaveAttendanceAsync's
+                    // own doc comment) — teacher-only, since that's the side payout accuracy
+                    // depends on. CancellationToken.None, deliberately: this covers the
+                    // abrupt-disconnect (network drop) case too, and Context.ConnectionAborted
                     // may already be signalled by the time OnDisconnectedAsync runs.
-                    await _academicOpsService.CaptureLeaveAttendanceAsync(sessionGuid, userId, CancellationToken.None);
+                    if (removedState.Role == "teacher")
+                    {
+                        await _academicOpsService.CaptureLeaveAttendanceAsync(sessionGuid, userId, CancellationToken.None);
+                    }
+
+                    // Durable event-log row for BOTH roles — see IClassSessionEventLogService.
+                    // Best-effort; never allowed to affect the leave itself.
+                    var participantType = removedState.Role == "teacher" ? ParticipantType.Teacher : ParticipantType.Student;
+                    await _eventLog.LogLeaveAsync(
+                        sessionGuid, participantType,
+                        teacherProfileId: null, childId: null, userId: userId,
+                        participantName: removedState.Name, wasExplicit: wasExplicit,
+                        cancellationToken: CancellationToken.None);
                 }
 
                 if (room.IsEmpty)
