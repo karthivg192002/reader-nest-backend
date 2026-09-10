@@ -75,6 +75,39 @@ namespace iucs.readernest.application.Services
             };
         }
 
+        public async Task<HistoryRangeDto> GetHistoryAsync(string serverName, string range, CancellationToken cancellationToken = default)
+        {
+            var server = _options.Servers.FirstOrDefault(s => s.Name == serverName)
+                ?? throw new ArgumentException($"Unknown server '{serverName}'.", nameof(serverName));
+
+            var (duration, step, rateWindow) = range switch
+            {
+                "1h" => (TimeSpan.FromHours(1), TimeSpan.FromMinutes(2), "5m"),
+                "24h" => (TimeSpan.FromHours(24), TimeSpan.FromMinutes(15), "15m"),
+                "7d" => (TimeSpan.FromDays(7), TimeSpan.FromHours(2), "2h"),
+                _ => throw new ArgumentException($"Unknown range '{range}'. Expected 1h, 24h, or 7d.", nameof(range)),
+            };
+
+            var baseUrl = _options.PrometheusBaseUrl;
+            var instanceLabel = EscapeLabelValue(server.Instance);
+            var now = DateTime.UtcNow;
+            var start = now - duration;
+
+            var cpuTask = _prometheus.QueryRangeAsync(
+                baseUrl, $"100 - (avg(rate(node_cpu_seconds_total{{instance=\"{instanceLabel}\",mode=\"idle\"}}[{rateWindow}])) * 100)",
+                start, now, step, cancellationToken);
+            var memTask = _prometheus.QueryRangeAsync(
+                baseUrl, $"100 * (1 - node_memory_MemAvailable_bytes{{instance=\"{instanceLabel}\"}} / node_memory_MemTotal_bytes{{instance=\"{instanceLabel}\"}})",
+                start, now, step, cancellationToken);
+            await Task.WhenAll(cpuTask, memTask);
+
+            return new HistoryRangeDto
+            {
+                CpuHistory = (await cpuTask).Select(p => new TimeSeriesPointDto { Timestamp = p.Timestamp, Value = Clamp(p.Value) }).ToList(),
+                MemoryHistory = (await memTask).Select(p => new TimeSeriesPointDto { Timestamp = p.Timestamp, Value = Clamp(p.Value) }).ToList(),
+            };
+        }
+
         private async Task<DatabaseInsightsDto?> GetDatabaseInsightsAsync(CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(_options.DatabaseName))
@@ -130,11 +163,17 @@ namespace iucs.readernest.application.Services
             var cpuUsageTask = _prometheus.QueryScalarAsync(baseUrl, $"100 - (avg(rate(node_cpu_seconds_total{{instance=\"{instanceLabel}\",mode=\"idle\"}}[2m])) * 100)", cancellationToken);
             var memUsedPercentTask = _prometheus.QueryScalarAsync(baseUrl, $"100 * (1 - node_memory_MemAvailable_bytes{{instance=\"{instanceLabel}\"}} / node_memory_MemTotal_bytes{{instance=\"{instanceLabel}\"}})", cancellationToken);
             var memTotalTask = _prometheus.QueryScalarAsync(baseUrl, $"node_memory_MemTotal_bytes{{instance=\"{instanceLabel}\"}} / 1048576", cancellationToken);
+            var swapTotalTask = _prometheus.QueryScalarAsync(baseUrl, $"node_memory_SwapTotal_bytes{{instance=\"{instanceLabel}\"}} / 1048576", cancellationToken);
+            // 0 swap total means no swap configured -- guard the percent calc below rather than divide by zero.
+            var swapFreeTask = _prometheus.QueryScalarAsync(baseUrl, $"node_memory_SwapFree_bytes{{instance=\"{instanceLabel}\"}} / 1048576", cancellationToken);
             var diskUsedPercentTask = _prometheus.QueryScalarAsync(baseUrl, $"100 * (1 - node_filesystem_avail_bytes{{instance=\"{instanceLabel}\",mountpoint=\"/\",fstype!=\"tmpfs\"}} / node_filesystem_size_bytes{{instance=\"{instanceLabel}\",mountpoint=\"/\",fstype!=\"tmpfs\"}})", cancellationToken);
             var diskTotalTask = _prometheus.QueryScalarAsync(baseUrl, $"node_filesystem_size_bytes{{instance=\"{instanceLabel}\",mountpoint=\"/\",fstype!=\"tmpfs\"}} / 1073741824", cancellationToken);
             var loadTask = _prometheus.QueryScalarAsync(baseUrl, $"node_load1{{instance=\"{instanceLabel}\"}}", cancellationToken);
             var uptimeTask = _prometheus.QueryScalarAsync(baseUrl, $"time() - node_boot_time_seconds{{instance=\"{instanceLabel}\"}}", cancellationToken);
             var servicesTask = _prometheus.QueryVectorAsync(baseUrl, $"rn_service_active{{instance=\"{instanceLabel}\"}}", cancellationToken);
+            // Point-in-time docker stats sample, not a counter -- see ContainerMetricDto.
+            var containerCpuTask = _prometheus.QueryVectorAsync(baseUrl, $"rn_container_cpu_percent{{instance=\"{instanceLabel}\"}}", cancellationToken);
+            var containerMemTask = _prometheus.QueryVectorAsync(baseUrl, $"rn_container_memory_bytes{{instance=\"{instanceLabel}\"}}", cancellationToken);
             // eth0: the single external NIC on both boxes today -- summing every interface would double-count
             // traffic that also passes through docker0/br-*/veth* as it's routed into containers.
             var netRxTask = _prometheus.QueryScalarAsync(baseUrl, $"rate(node_network_receive_bytes_total{{instance=\"{instanceLabel}\",device=\"eth0\"}}[5m]) * 8 / 1000000", cancellationToken);
@@ -166,6 +205,12 @@ namespace iucs.readernest.application.Services
             var jibriBusyTask = server.TracksLiveCalls
                 ? _prometheus.QueryScalarAsync(baseUrl, $"rn_jibri_instances_busy{{instance=\"{instanceLabel}\"}}", cancellationToken)
                 : Task.FromResult<double?>(null);
+            var jibriMinTask = server.TracksLiveCalls
+                ? _prometheus.QueryScalarAsync(baseUrl, $"rn_jibri_min_replicas{{instance=\"{instanceLabel}\"}}", cancellationToken)
+                : Task.FromResult<double?>(null);
+            var jibriMaxTask = server.TracksLiveCalls
+                ? _prometheus.QueryScalarAsync(baseUrl, $"rn_jibri_max_replicas{{instance=\"{instanceLabel}\"}}", cancellationToken)
+                : Task.FromResult<double?>(null);
 
             // Same JVB endpoint as above -- call quality, not just up/down.
             Task<double?> jvbMetric(string name) => server.TracksLiveCalls
@@ -182,11 +227,11 @@ namespace iucs.readernest.application.Services
             var jvbHealthyTask = jvbMetric("jitsi_jvb_healthy");
 
             await Task.WhenAll(
-                upTask, freshnessTask, cpuCoresTask, cpuUsageTask, memUsedPercentTask, memTotalTask,
-                diskUsedPercentTask, diskTotalTask, loadTask, uptimeTask, servicesTask, conferencesTask, participantsTask,
+                upTask, freshnessTask, cpuCoresTask, cpuUsageTask, memUsedPercentTask, memTotalTask, swapTotalTask, swapFreeTask,
+                diskUsedPercentTask, diskTotalTask, loadTask, uptimeTask, servicesTask, containerCpuTask, containerMemTask, conferencesTask, participantsTask,
                 netRxTask, netTxTask, diskReadTask, diskWriteTask,
                 rttTask, lossInTask, lossOutTask, bitrateInTask, bitrateOutTask, sendingAudioTask, sendingVideoTask, stressTask, jvbHealthyTask,
-                jibriTotalTask, jibriBusyTask);
+                jibriTotalTask, jibriBusyTask, jibriMinTask, jibriMaxTask);
 
             var up = await upTask;
             if (up is not 1)
@@ -211,10 +256,29 @@ namespace iucs.readernest.application.Services
                 .OrderBy(s => s.Name)
                 .ToList();
 
+            var containerMem = (await containerMemTask).ToDictionary(
+                s => s.Labels.TryGetValue("name", out var n) ? n : string.Empty, s => s.Value);
+            var containerMetrics = (await containerCpuTask)
+                .Select(s =>
+                {
+                    var name = s.Labels.TryGetValue("name", out var n) ? n : "unknown";
+                    return new ContainerMetricDto
+                    {
+                        Name = name,
+                        CpuPercent = s.Value,
+                        MemoryMb = containerMem.TryGetValue(name, out var bytes) ? bytes / 1048576 : 0,
+                    };
+                })
+                .OrderByDescending(c => c.CpuPercent)
+                .ToList();
+
             var conferences = await conferencesTask;
             var participants = await participantsTask;
             var jvbHealthy = await jvbHealthyTask;
             var jibriTotal = await jibriTotalTask;
+            var swapTotal = await swapTotalTask ?? 0;
+            var swapFree = await swapFreeTask ?? 0;
+            var swapUsedPercent = swapTotal > 0 ? Clamp(100 * (1 - swapFree / swapTotal)) : 0;
             CallQualityDto? callQuality = server.TracksLiveCalls && jvbHealthy is not null
                 ? new CallQualityDto
                 {
@@ -247,6 +311,36 @@ namespace iucs.readernest.application.Services
                 baseUrl, $"deriv(node_filesystem_avail_bytes{{instance=\"{instanceLabel}\",mountpoint=\"/\",fstype!=\"tmpfs\"}}[6h])", cancellationToken);
             await Task.WhenAll(cpuHistoryTask, memHistoryTask, diskAvailBytesTask, diskTrendTask);
 
+            // Week-over-week trend, not a fake day-countdown -- CPU and recording load are
+            // bursty real-time signals, unlike disk fill's smooth accumulation, so a linear
+            // deriv() projection would be meaningless here. increase() over a real 7d range
+            // (not a nested subquery) keeps this a single-level, easy-to-verify query.
+            var cores = await cpuCoresTask ?? 1;
+            var secondsIn7d = 7 * 86400;
+            string cpuAvgExpr(string offset) =>
+                $"100 * (1 - sum(increase(node_cpu_seconds_total{{instance=\"{instanceLabel}\",mode=\"idle\"}}[7d]{offset})) / ({cores} * {secondsIn7d}))";
+            var cpuAvg7dTask = _prometheus.QueryScalarAsync(baseUrl, cpuAvgExpr(""), cancellationToken);
+            var cpuAvgPrev7dTask = _prometheus.QueryScalarAsync(baseUrl, cpuAvgExpr(" offset 7d"), cancellationToken);
+            var cpuPeak7dTask = _prometheus.QueryScalarAsync(
+                baseUrl, $"max_over_time((100 - (avg(rate(node_cpu_seconds_total{{instance=\"{instanceLabel}\",mode=\"idle\"}}[5m])) * 100))[7d:15m])", cancellationToken);
+            var recordingAtCapacity7dTask = server.TracksLiveCalls
+                ? _prometheus.QueryScalarAsync(
+                    baseUrl, $"avg_over_time((rn_jibri_instances_busy{{instance=\"{instanceLabel}\"}} >= bool rn_jibri_max_replicas{{instance=\"{instanceLabel}\"}})[7d:1m]) * 100", cancellationToken)
+                : Task.FromResult<double?>(null);
+            await Task.WhenAll(cpuAvg7dTask, cpuAvgPrev7dTask, cpuPeak7dTask, recordingAtCapacity7dTask);
+
+            var cpuAvg7d = await cpuAvg7dTask;
+            var cpuAvgPrev7d = await cpuAvgPrev7dTask;
+            CapacityTrendDto? capacityTrend = cpuAvg7d is not null
+                ? new CapacityTrendDto
+                {
+                    CpuAvg7dPercent = Clamp(cpuAvg7d.Value),
+                    CpuPeak7dPercent = Clamp(await cpuPeak7dTask ?? 0),
+                    CpuWeekOverWeekChangePercent = cpuAvgPrev7d is > 0 ? Math.Round((cpuAvg7d.Value - cpuAvgPrev7d.Value) / cpuAvgPrev7d.Value * 100, 1) : 0,
+                    RecordingAtCapacityPercent7d = await recordingAtCapacity7dTask is { } pct ? Math.Clamp(pct, 0, 100) : null,
+                }
+                : null;
+
             var diskAvailBytes = await diskAvailBytesTask;
             var diskTrendBytesPerSec = await diskTrendTask;
             var diskForecast = new CapacityForecastDto
@@ -270,6 +364,8 @@ namespace iucs.readernest.application.Services
                 CpuUsagePercent = Clamp(await cpuUsageTask ?? 0),
                 MemoryUsedPercent = Clamp(await memUsedPercentTask ?? 0),
                 MemoryTotalMb = await memTotalTask ?? 0,
+                SwapUsedPercent = swapUsedPercent,
+                SwapTotalMb = swapTotal,
                 DiskUsedPercent = Clamp(await diskUsedPercentTask ?? 0),
                 DiskTotalGb = await diskTotalTask ?? 0,
                 NetworkRxMbps = Math.Max(0, await netRxTask ?? 0),
@@ -282,6 +378,8 @@ namespace iucs.readernest.application.Services
                 MemoryHistory = (await memHistoryTask).Select(p => new TimeSeriesPointDto { Timestamp = p.Timestamp, Value = Clamp(p.Value) }).ToList(),
                 CallQuality = callQuality,
                 DiskForecast = diskForecast,
+                ContainerMetrics = containerMetrics,
+                CapacityTrend = capacityTrend,
                 LiveCalls = server.TracksLiveCalls
                     ? new LiveCallSummaryDto
                     {
@@ -296,6 +394,8 @@ namespace iucs.readernest.application.Services
                     {
                         TotalInstances = (int)jibriTotal.Value,
                         BusyInstances = (int)(await jibriBusyTask ?? 0),
+                        MinInstances = (int)(await jibriMinTask ?? 1),
+                        MaxInstances = (int)(await jibriMaxTask ?? jibriTotal.Value),
                     }
                     : null,
             };
