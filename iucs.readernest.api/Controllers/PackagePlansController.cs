@@ -11,9 +11,14 @@ namespace iucs.readernest.api.Controllers
     // Parent also carries BillingFinance:View for their own /parent/billing screen
     // (served separately by ParentPortalController) — without a role restriction that
     // same claim reaches this unscoped, admin-only plan-configuration screen too.
+    // AdmissionTeam is included deliberately: RequiredSystemRolePermissions grants every
+    // admission account BillingFinance:View/Edit/Approve as a baseline, and /admission/packages
+    // (SubAdminPackages, reused via route) calls this endpoint unconditionally — without
+    // AdmissionTeam here, every real admission-staff account 403's on that page despite the
+    // menu correctly showing it. Confirmed live via a fresh AdmissionTeam test account.
     [ApiController]
     [Route("api/package-plans")]
-    [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)}")]
+    [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
     public class PackagePlansController : ControllerBase
     {
         private readonly IBillingService _billingService;
