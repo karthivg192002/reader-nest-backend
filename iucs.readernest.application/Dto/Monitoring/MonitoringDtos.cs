@@ -136,6 +136,20 @@ namespace iucs.readernest.application.Dto.Monitoring
         public string Name { get; set; } = string.Empty;
         public string Role { get; set; } = string.Empty;
         public DateTime JoinedAtUtc { get; set; }
+        /// <summary>How many simultaneous connections this person currently holds (2+ tabs/devices) -- surfaced explicitly rather than silently collapsed, since it can also indicate a connection struggling to stay up.</summary>
+        public int ConnectionCount { get; set; } = 1;
+        /// <summary>
+        /// Whether a SessionAttendance row already reflects this person's presence (Present/Late,
+        /// not Absent). False can mean attendance capture is still catching up (it fires
+        /// asynchronously on join) or that it genuinely failed -- either way, a live participant
+        /// with no attendance record after they've clearly been in a while is worth an admin's
+        /// attention. For a parent/student connection this checks whether ANY of that parent's
+        /// actively-enrolled children in this batch has a recorded row, mirroring
+        /// AcademicOpsService's own "mark every enrolled child present" resolution -- the system
+        /// has no record of which specific child is physically on the call, only that the parent
+        /// joined on their behalf.
+        /// </summary>
+        public bool AttendanceRecorded { get; set; }
     }
 
     /// <summary>One live class session with everyone currently connected to it, enriched with the human-readable context a raw session Guid doesn't carry on its own.</summary>
@@ -147,7 +161,27 @@ namespace iucs.readernest.application.Dto.Monitoring
         public string? BatchName { get; set; }
         public string TeacherName { get; set; } = string.Empty;
         public DateTime? StartedAtUtc { get; set; }
+        /// <summary>Null for a demo session (no fixed schedule). Running past this is worth flagging, not just informational.</summary>
+        public DateTime? ScheduledEndAtUtc { get; set; }
         public List<LiveParticipantDto> Participants { get; set; } = new();
+    }
+
+    /// <summary>One of today's class sessions, live or not -- for the admin "today's sessions" timeline. Deliberately NOT limited to currently-live ones, unlike LiveClassSessionDto.</summary>
+    public class SessionHistoryEntryDto
+    {
+        public Guid SessionId { get; set; }
+        public string CourseName { get; set; } = string.Empty;
+        public string? BatchName { get; set; }
+        public string TeacherName { get; set; } = string.Empty;
+        public DateTime ScheduledStartAtUtc { get; set; }
+        public DateTime ScheduledEndAtUtc { get; set; }
+        public DateTime? ActualStartAtUtc { get; set; }
+        public DateTime? ActualEndAtUtc { get; set; }
+        public string Status { get; set; } = string.Empty;
+        /// <summary>Distinct people (teacher + students) with a Present/Late SessionAttendance row -- not a live headcount, a durable record.</summary>
+        public int AttendedCount { get; set; }
+        /// <summary>Teacher (1) + actively-enrolled batch students at the time of this query -- the roster this session was expected to draw from.</summary>
+        public int ExpectedCount { get; set; }
     }
 
     /// <summary>Historical CPU/memory usage for one server over an admin-selected window (see GetHistoryAsync).</summary>

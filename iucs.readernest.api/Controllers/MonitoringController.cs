@@ -37,6 +37,14 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _monitoringService.GetLiveUsersAsync(cancellationToken));
         }
 
+        /// <summary>Every session scheduled today (IST), live or not, with attendance counts.</summary>
+        [HttpGet("today-sessions")]
+        [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.View)]
+        public async Task<ActionResult<List<SessionHistoryEntryDto>>> GetTodaySessions(CancellationToken cancellationToken)
+        {
+            return Ok(await _monitoringService.GetTodaySessionsAsync(cancellationToken));
+        }
+
         /// <summary>CPU/memory history for one server over an admin-selected window ("1h", "24h", or "7d").</summary>
         [HttpGet("servers/{serverName}/history")]
         [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.View)]
