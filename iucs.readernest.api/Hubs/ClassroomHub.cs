@@ -37,6 +37,12 @@ namespace iucs.readernest.api.Hubs
         // lock — ConcurrentDictionary makes GetOrAdd/TryRemove on the outer map safe, but a
         // plain List<T> itself isn't safe against two students' SendBoard calls landing at once.
         private static readonly ConcurrentDictionary<string, List<string>> BoardHistory = new();
+        // Current 0-based page of whatever PDF deck the teacher uploaded and is presenting live
+        // (the "like Google Meet" present-a-deck flow) — not the deck file itself (that's the
+        // REST-uploaded SessionPresentation, fetched once by URL), just where the teacher's own
+        // Next/Previous clicks have gotten to, so JoinSession can land a mid-class joiner on the
+        // right slide instead of always page 0.
+        private static readonly ConcurrentDictionary<string, int> CurrentSlide = new();
 
         private readonly ISessionService _sessionService;
         private readonly IGamificationService _gamificationService;
@@ -163,6 +169,13 @@ namespace iucs.readernest.api.Hubs
                 }
             }
 
+            // Same idea as the whiteboard replay above, for whichever slide the teacher's
+            // already on — a mid-class joiner should see the current slide, not page 0.
+            if (CurrentSlide.TryGetValue(sessionId, out var pageIndex))
+            {
+                await Clients.Caller.SendAsync("Slide", pageIndex);
+            }
+
             // PDF's "System Marks Attendance" — join-based capture, fired now that the caller
             // is confirmed to genuinely belong to this session. Best-effort by design (see the
             // method's own doc comment); never allowed to affect the join that already succeeded.
@@ -227,6 +240,23 @@ namespace iucs.readernest.api.Hubs
             }
 
             await Clients.OthersInGroup(Group(sessionId)).SendAsync("Annotation", opJson);
+        }
+
+        // ---- live presentation (present a deck, like Google Meet) ----
+
+        /// <summary>Teacher-only: broadcasts a Next/Previous slide change to the rest of the class
+        /// and remembers it so a student who joins afterward lands on the right page — see
+        /// CurrentSlide's own doc comment. The deck itself isn't sent here at all; every viewer
+        /// already fetched the same PDF by URL once and renders locally.</summary>
+        public async Task SendSlide(string sessionId, int pageIndex)
+        {
+            if (!IsTeacherInRoom(sessionId) || pageIndex < 0)
+            {
+                return;
+            }
+
+            CurrentSlide[sessionId] = pageIndex;
+            await Clients.OthersInGroup(Group(sessionId)).SendAsync("Slide", pageIndex);
         }
 
         // ---- chat (interactive panel) ----
@@ -426,6 +456,7 @@ namespace iucs.readernest.api.Hubs
                     Scores.TryRemove(sessionId, out _); // class over — scoreboard resets
                     BoardAccessGrants.TryRemove(sessionId, out _);
                     BoardHistory.TryRemove(sessionId, out _);
+                    CurrentSlide.TryRemove(sessionId, out _);
                     foreach (var key in AnsweredQuestions.Keys.Where(k => k.StartsWith($"{sessionId}:", StringComparison.Ordinal)))
                     {
                         AnsweredQuestions.TryRemove(key, out _);

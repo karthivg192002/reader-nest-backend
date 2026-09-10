@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using iucs.readernest.api.Auth;
+using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Academics;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Services;
@@ -13,11 +14,15 @@ namespace iucs.readernest.api.Controllers
     [Route("api/sessions")]
     public class SessionsController : ControllerBase
     {
-        private readonly ISessionService _sessionService;
+        private const long MaxPresentationUploadBytes = 100 * 1024 * 1024;
 
-        public SessionsController(ISessionService sessionService)
+        private readonly ISessionService _sessionService;
+        private readonly IFileStorage _fileStorage;
+
+        public SessionsController(ISessionService sessionService, IFileStorage fileStorage)
         {
             _sessionService = sessionService;
+            _fileStorage = fileStorage;
         }
 
         // Staff console only: Teacher and Parent also carry SessionCalendarManagement:View
@@ -217,6 +222,65 @@ namespace iucs.readernest.api.Controllers
         {
             await _sessionService.DeleteRecordingAsync(id, recordingId, cancellationToken);
             return NoContent();
+        }
+
+        /// <summary>Uploads (replacing any prior deck) the PDF the teacher wants to present live in
+        /// this class — the "present a deck like Google Meet" flow. Only the session's own
+        /// assigned teacher or an Admin may do this; enforced in the service, not by role alone,
+        /// since a Teacher role check here wouldn't stop one teacher uploading into another's class.</summary>
+        [HttpPost("{id:guid}/presentation")]
+        [Authorize]
+        [RequestSizeLimit(MaxPresentationUploadBytes)]
+        public async Task<ActionResult<SessionPresentationDto>> UploadPresentation(
+            Guid id,
+            IFormFile file,
+            CancellationToken cancellationToken)
+        {
+            if (file.Length == 0)
+            {
+                return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "The uploaded file is empty." });
+            }
+            var isPdf = string.Equals(Path.GetExtension(file.FileName), ".pdf", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(file.ContentType, "application/pdf", StringComparison.OrdinalIgnoreCase);
+            if (!isPdf)
+            {
+                return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "Only PDF decks are supported — export your slides to PDF first." });
+            }
+
+            await using var stream = file.OpenReadStream();
+            var stored = await _fileStorage.StoreAsync(stream, file.FileName, cancellationToken);
+
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var presentation = await _sessionService.UploadPresentationAsync(id, userId, stored.RelativePath, file.FileName, cancellationToken);
+            return Ok(presentation);
+        }
+
+        /// <summary>Whether a deck has been uploaded for this session yet, and its file name — same
+        /// participant access as joining the class itself.</summary>
+        [HttpGet("{id:guid}/presentation")]
+        [Authorize]
+        public async Task<ActionResult<SessionPresentationDto?>> GetPresentation(Guid id, CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _sessionService.GetPresentationAsync(id, userId, cancellationToken));
+        }
+
+        /// <summary>Streams the uploaded PDF itself — what the live classroom's viewer actually
+        /// points pdf.js at. Same participant access as joining the class.</summary>
+        [HttpGet("{id:guid}/presentation/file")]
+        [Authorize]
+        public async Task<IActionResult> DownloadPresentation(Guid id, CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var presentation = await _sessionService.GetPresentationForDownloadAsync(id, userId, cancellationToken);
+            var stream = await _fileStorage.OpenReadAsync(presentation.StorageUrl, cancellationToken);
+
+            if (stream is null)
+            {
+                return NotFound(new ProblemDetails { Status = 404, Title = "Not Found", Detail = "The stored file is missing." });
+            }
+
+            return File(stream, "application/pdf", presentation.OriginalFileName);
         }
 
         /// <summary>Engagement signals from the live classroom (quiz, activity, whiteboard, attention).</summary>

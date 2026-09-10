@@ -952,6 +952,100 @@ namespace iucs.readernest.application.Services
             };
         }
 
+        /// <summary>Admin, or specifically this session's own assigned teacher — narrower than
+        /// <see cref="IsSessionParticipantAsync"/>, which also lets an enrolled parent through.</summary>
+        private async Task EnsurePresentationModeratorAsync(ClassSession session, Guid userId, CancellationToken cancellationToken)
+        {
+            var user = await _unitOfWork.Repository<User>().GetByIdAsync(userId, cancellationToken)
+                ?? throw new UnauthorizedException("Not signed in.");
+
+            if (user.Role == UserRole.Admin)
+            {
+                return;
+            }
+
+            var isAssignedTeacher = user.Role == UserRole.Teacher
+                && await _unitOfWork.Repository<TeacherProfile>()
+                    .ExistsAsync(t => t.Id == session.TeacherProfileId && t.UserId == userId, cancellationToken);
+            if (!isAssignedTeacher)
+            {
+                throw new ForbiddenException("Only this class's own teacher can present a deck here.");
+            }
+        }
+
+        public async Task<SessionPresentationDto> UploadPresentationAsync(
+            Guid sessionId,
+            Guid userId,
+            string storageUrl,
+            string originalFileName,
+            CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+            await EnsurePresentationModeratorAsync(session, userId, cancellationToken);
+
+            var repository = _unitOfWork.Repository<SessionPresentation>();
+            // Replaces any prior deck for this session rather than accumulating one row per
+            // upload — a teacher swapping decks mid-prep shouldn't leave orphaned old ones
+            // behind, and there's only ever one "current" deck to present.
+            var existing = await repository.TrackedQuery().FirstOrDefaultAsync(p => p.ClassSessionId == sessionId, cancellationToken);
+            if (existing is not null)
+            {
+                existing.StorageUrl = storageUrl;
+                existing.OriginalFileName = originalFileName;
+            }
+            else
+            {
+                existing = new SessionPresentation
+                {
+                    ClassSessionId = sessionId,
+                    StorageUrl = storageUrl,
+                    OriginalFileName = originalFileName,
+                };
+                await repository.AddAsync(existing, cancellationToken);
+            }
+
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            return ToPresentationDto(existing);
+        }
+
+        public async Task<SessionPresentationDto?> GetPresentationAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+            if (!await IsSessionParticipantAsync(session, userId, cancellationToken))
+            {
+                throw new ForbiddenException("You do not have access to this session.");
+            }
+
+            var presentation = await _unitOfWork.Repository<SessionPresentation>().Query()
+                .FirstOrDefaultAsync(p => p.ClassSessionId == sessionId, cancellationToken);
+            return presentation is null ? null : ToPresentationDto(presentation);
+        }
+
+        private static SessionPresentationDto ToPresentationDto(SessionPresentation presentation) => new()
+        {
+            Id = presentation.Id,
+            ClassSessionId = presentation.ClassSessionId,
+            OriginalFileName = presentation.OriginalFileName,
+            CreatedAtUtc = presentation.CreatedAtUtc,
+        };
+
+        public async Task<SessionPresentationDownloadDto> GetPresentationForDownloadAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+            if (!await IsSessionParticipantAsync(session, userId, cancellationToken))
+            {
+                throw new ForbiddenException("You do not have access to this session.");
+            }
+
+            var presentation = await _unitOfWork.Repository<SessionPresentation>().Query()
+                .FirstOrDefaultAsync(p => p.ClassSessionId == sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(SessionPresentation), sessionId);
+            return new SessionPresentationDownloadDto { StorageUrl = presentation.StorageUrl, OriginalFileName = presentation.OriginalFileName };
+        }
+
         /// <summary>Defaults to on (today's unconditional behaviour) until an admin explicitly turns it off.</summary>
         private static bool ReadAutoRecordEnabled(string? configJson)
         {

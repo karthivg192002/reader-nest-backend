@@ -116,5 +116,23 @@ namespace iucs.readernest.application.Services
 
         /// <summary>Non-secret Jitsi settings (domain, auto-record) for whoever is about to join a live class.</summary>
         Task<ClassroomSettingsDto> GetClassroomSettingsAsync(CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Attaches (replacing any prior one) the PDF deck the teacher wants to present live in
+        /// this class. Teacher-only — the assigned teacher or Admin, same gate as
+        /// <see cref="IsSessionParticipantAsync"/>'s moderator check, not every participant.
+        /// </summary>
+        Task<SessionPresentationDto> UploadPresentationAsync(
+            Guid sessionId,
+            Guid userId,
+            string storageUrl,
+            string originalFileName,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>Metadata only (no storage path) — null if nothing's been uploaded for this session yet.</summary>
+        Task<SessionPresentationDto?> GetPresentationAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default);
+
+        /// <summary>Resolves the stored file for download — same participant gate as viewing metadata.</summary>
+        Task<SessionPresentationDownloadDto> GetPresentationForDownloadAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default);
     }
 }
