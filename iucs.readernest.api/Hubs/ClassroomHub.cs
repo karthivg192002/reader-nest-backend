@@ -141,7 +141,7 @@ namespace iucs.readernest.api.Hubs
             }
 
             await Groups.AddToGroupAsync(Context.ConnectionId, Group(sessionId));
-            _presenceTracker.UserJoined(sessionId, Context.ConnectionId);
+            _presenceTracker.UserJoined(sessionId, Context.ConnectionId, userId, name, role);
             await BroadcastRosterAsync(sessionId);
             await SendLeaderboardAsync(sessionId);
 

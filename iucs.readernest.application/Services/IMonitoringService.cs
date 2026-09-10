@@ -14,5 +14,8 @@ namespace iucs.readernest.application.Services
         /// <see cref="ArgumentException"/> for an unknown server name or range.
         /// </summary>
         Task<HistoryRangeDto> GetHistoryAsync(string serverName, string range, CancellationToken cancellationToken = default);
+
+        /// <summary>Every live class session with a connected participant right now, and who's in it -- an admin-only "who's live" view.</summary>
+        Task<List<LiveClassSessionDto>> GetLiveUsersAsync(CancellationToken cancellationToken = default);
     }
 }
