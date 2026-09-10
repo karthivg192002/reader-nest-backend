@@ -26,7 +26,11 @@ namespace iucs.readernest.application.Services
             }
         }
 
-        public int TotalConnectedUsers => _rooms.Values.Sum(r => r.Count);
+        // Distinct people, not raw connections -- one person open on two tabs/devices (a real,
+        // observed case: a teacher with two browser tabs open to the same class) registers as
+        // two connectionIds but must still count as one person, or every count downstream
+        // (this KPI, GetLiveUsersAsync's per-session participant lists) overstates who's live.
+        public int TotalConnectedUsers => _rooms.Values.Sum(r => r.Values.Select(v => v.UserId).Distinct().Count());
 
         public int ActiveClassCount => _rooms.Count;
 
