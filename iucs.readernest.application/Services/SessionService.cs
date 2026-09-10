@@ -19,6 +19,11 @@ namespace iucs.readernest.application.Services
 {
     public class SessionService : ISessionService
     {
+        /// <summary>How many times an unresolved no-show is allowed to silently reschedule
+        /// itself one week later before the chain stops and a human gets asked to look at it
+        /// instead — see MarkNoShowCoreAsync's own comment for the incident that motivated this.</summary>
+        private const int MaxAutoCarryForwards = 3;
+
         private static readonly SessionStatus[] TerminalStatuses =
         [
             SessionStatus.Completed,
@@ -353,6 +358,40 @@ namespace iucs.readernest.application.Services
                 ? SessionStatus.TeacherNoShow
                 : SessionStatus.StudentNoShow;
 
+            if (party == NoShowParty.Student)
+            {
+                // Teacher waited for the student: the waiting amount still accrues
+                await _payoutService.AccrueForSessionAsync(
+                    session, PayoutItemType.StudentNoShowWaiting,
+                    note ?? "Student no-show waiting amount", cancellationToken);
+            }
+            else
+            {
+                await _payoutService.AccrueForSessionAsync(
+                    session, PayoutItemType.TeacherNoShowDeduction,
+                    note ?? "Teacher no-show deduction", cancellationToken);
+                await NotifyAdminsOfTeacherNoShowAsync(session, cancellationToken);
+            }
+
+            // An abandoned booking (a stale/orphaned lead, a batch nobody ever pulled off the
+            // calendar) previously carried itself forward one week later, forever — confirmed
+            // live: one stale demo booking auto-rescheduled itself as a fresh no-show every
+            // single week for 9 straight weeks with nobody ever noticing, since each occurrence
+            // looked like an unremarkable, isolated miss rather than part of a chain. Past this
+            // cap, stop silently rescheduling and hand it to a human instead: the class stays
+            // in its terminal no-show status (still fully visible/actionable from Sessions) and
+            // admins get a one-time "this needs a decision" alert rather than another identical
+            // weekly email indistinguishable from the previous eight.
+            if (session.CarryForwardCount >= MaxAutoCarryForwards)
+            {
+                await NotifyAdminsOfStalledNoShowChainAsync(session, cancellationToken);
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
+                    changesJson: "{\"noShow\":\"" + party + "\",\"carryForwardCapped\":true}",
+                    cancellationToken: cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                return await GetAsync(session.Id, cancellationToken);
+            }
+
             // The missed class is never lost: a carried-forward session is placed one week
             // later at the same slot, keeping the traceability link for calendar and payouts.
             // Unlike fresh scheduling, marking a no-show must never hard-fail, so this never
@@ -380,23 +419,9 @@ namespace iucs.readernest.application.Services
                 ScheduledEndAtUtc = carriedForwardEnd,
                 MeetingRoomId = session.MeetingRoomId,
                 CarriedForwardFromSessionId = session.Id,
+                CarryForwardCount = session.CarryForwardCount + 1,
             };
             await _unitOfWork.Repository<ClassSession>().AddAsync(carriedForward, cancellationToken);
-
-            if (party == NoShowParty.Student)
-            {
-                // Teacher waited for the student: the waiting amount still accrues
-                await _payoutService.AccrueForSessionAsync(
-                    session, PayoutItemType.StudentNoShowWaiting,
-                    note ?? "Student no-show waiting amount", cancellationToken);
-            }
-            else
-            {
-                await _payoutService.AccrueForSessionAsync(
-                    session, PayoutItemType.TeacherNoShowDeduction,
-                    note ?? "Teacher no-show deduction", cancellationToken);
-                await NotifyAdminsOfTeacherNoShowAsync(session, cancellationToken);
-            }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
                 changesJson: "{\"noShow\":\"" + party + "\",\"carriedForwardTo\":\"" + carriedForward.Id + "\""
@@ -1185,6 +1210,33 @@ namespace iucs.readernest.application.Services
                     NotificationType.NoShowAlert,
                     "teacher-noshow-alert",
                     new Dictionary<string, string> { ["StartAtLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc, admin.TimeZoneId) },
+                    cancellationToken);
+            }
+        }
+
+        /// <summary>One-time alert once a no-show chain hits MaxAutoCarryForwards and stops
+        /// auto-rescheduling itself — sent for either party, unlike the teacher-only alert
+        /// above, since a chain this long is itself the problem worth a human's attention
+        /// (an abandoned lead, a batch that should have been archived) regardless of which
+        /// side each individual week's no-show was attributed to.</summary>
+        private async Task NotifyAdminsOfStalledNoShowChainAsync(ClassSession session, CancellationToken cancellationToken)
+        {
+            var admins = await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.Role == UserRole.Admin && u.Status == UserStatus.Active)
+                .ToListAsync(cancellationToken);
+
+            foreach (var admin in admins)
+            {
+                await _notificationService.SendTemplatedEmailAsync(
+                    admin.Id,
+                    admin.Email,
+                    NotificationType.NoShowAlert,
+                    "noshow-chain-stalled-alert",
+                    new Dictionary<string, string>
+                    {
+                        ["StartAtLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc, admin.TimeZoneId),
+                        ["CarryForwardCount"] = (session.CarryForwardCount + 1).ToString(),
+                    },
                     cancellationToken);
             }
         }

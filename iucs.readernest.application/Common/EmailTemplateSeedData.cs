@@ -174,6 +174,18 @@ namespace iucs.readernest.application.Common
                     """,
                     "StartAtLocal"),
 
+                New("noshow-chain-stalled-alert", "No-Show Chain Stalled (Admin)",
+                    "Sent to Admins once an unresolved no-show has auto-rescheduled itself the maximum number of times — the chain has stopped and needs a manual decision.",
+                    NotificationType.NoShowAlert, "A class has been rescheduling itself for weeks — needs a decision",
+                    """
+                    <p>The class originally scheduled at <strong>{{StartAtLocal}}</strong> has now been marked a no-show
+                    <strong>{{CarryForwardCount}}</strong> times in a row, each time auto-rescheduling one week later.</p>
+                    <p>To stop it silently repeating indefinitely, it has <strong>not</strong> been rescheduled again this time.
+                    Please check whether this is a genuine lead/class that needs to be manually re-booked, or a stale
+                    booking that should be cancelled.</p>
+                    """,
+                    "StartAtLocal", "CarryForwardCount"),
+
                 New("class-summary", "Class Summary (Parent)",
                     "Sent to the parent after the teacher writes a class summary for a completed session.",
                     NotificationType.PerformanceSummary, "Class summary — {{SessionDate}}",

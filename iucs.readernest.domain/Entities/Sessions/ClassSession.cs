@@ -48,6 +48,12 @@ namespace iucs.readernest.domain.Entities.Sessions
 
         public ClassSession? CarriedForwardFromSession { get; set; }
 
+        /// <summary>How many times this same class has already auto-carried-forward from an
+        /// unresolved no-show (0 for an original, never-carried session). Caps the chain —
+        /// see SessionService.MarkNoShowCoreAsync's own comment — instead of an abandoned
+        /// booking silently rescheduling itself one week later forever.</summary>
+        public int CarryForwardCount { get; set; }
+
         [MaxLength(500)]
         public string? CancellationReason { get; set; }
 
