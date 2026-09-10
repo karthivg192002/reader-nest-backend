@@ -996,8 +996,17 @@ namespace iucs.readernest.application.Services
             // minutes before start until the scheduled end) — only enforced client-side before
             // this, so a real, usable room + token was one direct GET away for any session at
             // any time, past or weeks out, regardless of what the join button showed.
+            //
+            // Admin/SubAdmin-monitor is the one exception: admin/Sessions.tsx and
+            // coordinator/Calendar.tsx both deliberately show "Join" for every
+            // scheduled/demo session regardless of how far out it is — "Admin had no way at
+            // all to drop into a live class from this screen" is that feature's own comment —
+            // so this check applying to them too silently broke the button with "This class
+            // hasn't opened for joining yet." on anything more than 10 minutes away. A genuine
+            // participant (Teacher/Parent) still only gets the real join window.
+            var isMonitor = user.Role is UserRole.Admin or UserRole.SubAdmin;
             var now = DateTime.UtcNow;
-            if (now < session.ScheduledStartAtUtc.AddMinutes(-10))
+            if (!isMonitor && now < session.ScheduledStartAtUtc.AddMinutes(-10))
             {
                 throw new DomainValidationException("This class hasn't opened for joining yet.");
             }

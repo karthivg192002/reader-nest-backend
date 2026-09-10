@@ -114,12 +114,34 @@ namespace iucs.readernest.application.Services
 
             var totalCount = await query.CountAsync(cancellationToken);
 
+            // Projected inline (not via a shared helper method) — EF Core's SQL translator
+            // has to see the member-init expression directly in the Select lambda; a call out
+            // to a separate static method here silently fails to translate at *query
+            // execution* time (not at compile time), surfacing as a bare 500 on this endpoint
+            // while GetDashboardAsync's own (non-projecting, ToDto()-after-materialize) query
+            // kept working fine. Confirmed live: the dashboard loaded real counts while this
+            // endpoint 500'd "An unexpected error occurred." on every request. Same fix
+            // applied to GetSessionTimelineAsync below.
             var rows = await query
                 .OrderByDescending(e => e.OccurredAtUtc)
                 .ThenBy(e => e.Id)
                 .Skip((page - 1) * pageSize)
                 .Take(pageSize)
-                .Select(e => ToDtoProjection(e))
+                .Select(e => new ClassSessionEventLogDto
+                {
+                    Id = e.Id,
+                    ClassSessionId = e.ClassSessionId,
+                    EventType = e.EventType,
+                    ParticipantType = e.ParticipantType,
+                    ParticipantName = e.ParticipantName,
+                    OccurredAtUtc = e.OccurredAtUtc,
+                    IsExpected = e.IsExpected,
+                    Detail = e.Detail,
+                    SessionType = e.ClassSession.Type,
+                    TeacherName = e.ClassSession.TeacherProfile.User.FirstName + " " + e.ClassSession.TeacherProfile.User.LastName,
+                    BatchName = e.ClassSession.Batch != null ? e.ClassSession.Batch.Name : null,
+                    ScheduledStartAtUtc = e.ClassSession.ScheduledStartAtUtc,
+                })
                 .ToListAsync(cancellationToken);
 
             return new PagedResult<ClassSessionEventLogDto>
@@ -137,7 +159,21 @@ namespace iucs.readernest.application.Services
             return await _unitOfWork.Repository<ClassSessionEventLog>().Query()
                 .Where(e => e.ClassSessionId == sessionId)
                 .OrderBy(e => e.OccurredAtUtc)
-                .Select(e => ToDtoProjection(e))
+                .Select(e => new ClassSessionEventLogDto
+                {
+                    Id = e.Id,
+                    ClassSessionId = e.ClassSessionId,
+                    EventType = e.EventType,
+                    ParticipantType = e.ParticipantType,
+                    ParticipantName = e.ParticipantName,
+                    OccurredAtUtc = e.OccurredAtUtc,
+                    IsExpected = e.IsExpected,
+                    Detail = e.Detail,
+                    SessionType = e.ClassSession.Type,
+                    TeacherName = e.ClassSession.TeacherProfile.User.FirstName + " " + e.ClassSession.TeacherProfile.User.LastName,
+                    BatchName = e.ClassSession.Batch != null ? e.ClassSession.Batch.Name : null,
+                    ScheduledStartAtUtc = e.ClassSession.ScheduledStartAtUtc,
+                })
                 .ToListAsync(cancellationToken);
         }
 
@@ -147,21 +183,5 @@ namespace iucs.readernest.application.Services
                 .Include(s => s.Batch)
                 .Include(s => s.TeacherProfile).ThenInclude(t => t.User);
         }
-
-        private static ClassSessionEventLogDto ToDtoProjection(ClassSessionEventLog e) => new()
-        {
-            Id = e.Id,
-            ClassSessionId = e.ClassSessionId,
-            EventType = e.EventType,
-            ParticipantType = e.ParticipantType,
-            ParticipantName = e.ParticipantName,
-            OccurredAtUtc = e.OccurredAtUtc,
-            IsExpected = e.IsExpected,
-            Detail = e.Detail,
-            SessionType = e.ClassSession.Type,
-            TeacherName = e.ClassSession.TeacherProfile.User.FirstName + " " + e.ClassSession.TeacherProfile.User.LastName,
-            BatchName = e.ClassSession.Batch != null ? e.ClassSession.Batch.Name : null,
-            ScheduledStartAtUtc = e.ClassSession.ScheduledStartAtUtc,
-        };
     }
 }
