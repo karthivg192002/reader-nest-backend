@@ -50,8 +50,11 @@ namespace iucs.readernest.api.Controllers
         }
 
         // FAQ content management — same audience as Email Templates/Progress Reports.
+        // AdmissionTeam included deliberately alongside SubAdmin: /admission/chatbot already
+        // exists in the menu system for any admin who grants Communication to an admission
+        // account — same gap already fixed on EmailTemplatesController/ProgressReportsController.
         [HttpGet("admin/faqs")]
-        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)}")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
         [HasPermission(PermissionModule.Communication, PermissionAction.View)]
         public async Task<ActionResult<IReadOnlyList<ChatFaqDto>>> AllFaqs(CancellationToken cancellationToken)
         {
@@ -59,7 +62,7 @@ namespace iucs.readernest.api.Controllers
         }
 
         [HttpPost("admin/faqs")]
-        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)}")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
         [HasPermission(PermissionModule.Communication, PermissionAction.Create)]
         public async Task<ActionResult<ChatFaqDto>> CreateFaq(SaveChatFaqRequest request, CancellationToken cancellationToken)
         {
@@ -68,7 +71,7 @@ namespace iucs.readernest.api.Controllers
         }
 
         [HttpPut("admin/faqs/{id:guid}")]
-        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)}")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
         [HasPermission(PermissionModule.Communication, PermissionAction.Edit)]
         public async Task<ActionResult<ChatFaqDto>> UpdateFaq(Guid id, SaveChatFaqRequest request, CancellationToken cancellationToken)
         {
@@ -76,7 +79,7 @@ namespace iucs.readernest.api.Controllers
         }
 
         [HttpDelete("admin/faqs/{id:guid}")]
-        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)}")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
         [HasPermission(PermissionModule.Communication, PermissionAction.Delete)]
         public async Task<IActionResult> DeleteFaq(Guid id, CancellationToken cancellationToken)
         {
@@ -84,9 +87,11 @@ namespace iucs.readernest.api.Controllers
             return NoContent();
         }
 
-        // Escalation triage — Admin/SubAdmin plus Teacher, who the doubt actually gets routed to.
+        // Escalation triage — Admin/SubAdmin/AdmissionTeam (the ChatbotAdmin.tsx screen calls
+        // this unconditionally alongside the FAQ endpoints above) plus Teacher, who the doubt
+        // actually gets routed to.
         [HttpGet("escalations")]
-        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.Teacher)}")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)},{nameof(UserRole.Teacher)}")]
         [HasPermission(PermissionModule.Communication, PermissionAction.View)]
         public async Task<ActionResult<IReadOnlyList<ChatEscalationDto>>> Escalations(
             [FromQuery] ChatEscalationStatus? status,
@@ -96,7 +101,7 @@ namespace iucs.readernest.api.Controllers
         }
 
         [HttpPut("escalations/{id:guid}/resolve")]
-        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.Teacher)}")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)},{nameof(UserRole.Teacher)}")]
         [HasPermission(PermissionModule.Communication, PermissionAction.Edit)]
         public async Task<ActionResult<ChatEscalationDto>> ResolveEscalation(
             Guid id,
@@ -106,9 +111,9 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _chatbot.ResolveEscalationAsync(id, UserId(), request, cancellationToken));
         }
 
-        // Usage analytics — admin-only.
+        // Usage analytics — same audience as the FAQ management endpoints above.
         [HttpGet("usage-stats")]
-        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)}")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
         [HasPermission(PermissionModule.Communication, PermissionAction.View)]
         public async Task<ActionResult<ChatbotUsageStatsDto>> UsageStats(CancellationToken cancellationToken)
         {
