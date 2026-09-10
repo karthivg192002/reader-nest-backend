@@ -139,7 +139,12 @@ namespace iucs.readernest.application.Services
                     var dto = new LiveClassSessionDto
                     {
                         SessionId = group.Key,
+                        // One person can hold multiple connections (two tabs, two devices) --
+                        // collapse to one row per UserId, keeping their earliest join so the
+                        // time shown is when they actually first arrived, not their latest tab.
                         Participants = group
+                            .GroupBy(p => p.UserId)
+                            .Select(g => g.OrderBy(p => p.JoinedAtUtc).First())
                             .OrderBy(p => p.JoinedAtUtc)
                             .Select(p => new LiveParticipantDto { UserId = p.UserId, Name = p.Name, Role = p.Role, JoinedAtUtc = p.JoinedAtUtc })
                             .ToList(),
