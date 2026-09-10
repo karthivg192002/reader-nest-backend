@@ -51,6 +51,7 @@ namespace iucs.readernest.api.Data
             await EnsureAdminActivityBankMenuAsync(context);
             await EnsureAdminServerMonitoringMenuAsync(context);
             await EnsureClassSessionLogsMenuAsync(context);
+            await EnsureItAdminMenuAsync(context);
             await EnsureBulkEmailHistoryMenuAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
@@ -1053,6 +1054,91 @@ namespace iucs.readernest.api.Data
                     SortOrder = accessItems.Count == 0 ? 0 : accessItems.Max(m => m.SortOrder) + 1,
                     IsActive = true,
                     RequiredModule = PermissionModule.ClassSessionLogs.ToString(),
+                });
+            }
+        }
+
+        /// <summary>
+        /// Seeds the full "itadmin" portal menu — a dedicated console for a Sub Admin
+        /// persona (e.g. an "IT Admin" custom RoleDefinition) that needs Admin-portal-grade
+        /// breadth, distinctly branded, rather than the generic "/subadmin" Relationship
+        /// Manager console. Same idiom as MenuService.ResolvePortalAsync/AppShell's
+        /// SUBADMIN_PRESET_PORTALS: it is not a separate backend role — the account is still
+        /// UserRole.SubAdmin, routed here purely by RoleDefinition.DefaultRoute's first path
+        /// segment (see MenuService.Portals, which must list "itadmin" for that to work).
+        /// Mirrors the *current* full Admin menu (including items originally added via later
+        /// Ensure* backfills — Activity Bank, Server Monitoring, Class Session Logs — not just
+        /// MenuSeedItems()'s original set), gated by the exact same RequiredModule per item,
+        /// so visibility is entirely a function of whatever modules the role has been granted
+        /// (today, all 12). Runs once — if the portal already has any rows, this is a no-op;
+        /// an Admin who has since edited/removed an item here is never overwritten.
+        /// </summary>
+        private static async Task EnsureItAdminMenuAsync(ReaderNestDbContext context)
+        {
+            if (context.MenuItems.Local.Any(m => m.Portal == "itadmin") ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "itadmin"))
+            {
+                return;
+            }
+
+            (string? Section, string Label, string Path, string Icon, string? RequiredModule)[] items =
+            [
+                (null, "Overall Dashboard", "/itadmin", "LayoutDashboard", null),
+                ("Academics", "Courses", "/itadmin/courses", "BookOpen", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Departments", "/itadmin/departments", "Building2", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Batches", "/itadmin/batches", "Layers", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Academic Calendar", "/itadmin/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement.ToString()),
+                ("Academics", "Sessions", "/itadmin/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+                ("Academics", "Quiz Bank", "/itadmin/quiz-bank", "Sparkles", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Activity Bank", "/itadmin/activity-bank", "PencilRuler", PermissionModule.CourseBatchManagement.ToString()),
+                ("People", "Users", "/itadmin/users", "Users", PermissionModule.UserManagement.ToString()),
+                ("People", "Roles & Permissions", "/itadmin/permissions", "ShieldCheck", PermissionModule.UserManagement.ToString()),
+                ("People", "Enrollment Review", "/itadmin/enrollments", "ClipboardCheck", PermissionModule.Admission.ToString()),
+                ("People", "Store Inquiries", "/itadmin/store-inquiries", "ShoppingBag", PermissionModule.Admission.ToString()),
+                ("People", "Leave Management", "/itadmin/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
+                ("People", "Teacher Availability", "/itadmin/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
+                ("Content", "Content & Resources", "/itadmin/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
+                ("Finance", "Billing & Finance", "/itadmin/billing", "Receipt", PermissionModule.BillingFinance.ToString()),
+                ("Finance", "Packages & Subscriptions", "/itadmin/packages", "CreditCard", PermissionModule.BillingFinance.ToString()),
+                ("Finance", "Payment Gateway Mapping", "/itadmin/payment-mapping", "Landmark", PermissionModule.BillingFinance.ToString()),
+                ("Finance", "Teacher Payouts", "/itadmin/payouts", "Wallet", PermissionModule.Payouts.ToString()),
+                ("Finance", "Fee Suspension", "/itadmin/fee-suspension", "Ban", PermissionModule.BillingFinance.ToString()),
+                ("Insights", "Reports & Analytics", "/itadmin/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
+                ("Insights", "Bulk Email", "/itadmin/bulk-email", "Mail", PermissionModule.Communication.ToString()),
+                ("Insights", "Bulk Email History", "/itadmin/bulk-email/history", "History", PermissionModule.Communication.ToString()),
+                ("Insights", "Email Templates", "/itadmin/email-templates", "FileText", PermissionModule.Communication.ToString()),
+                ("Insights", "Progress Reports", "/itadmin/progress-reports", "ScrollText", PermissionModule.Communication.ToString()),
+                ("Insights", "Doubt Chatbot", "/itadmin/chatbot", "MessageCircleQuestion", PermissionModule.Communication.ToString()),
+                ("System", "Settings & Branding", "/itadmin/settings", "Settings", PermissionModule.Settings.ToString()),
+                ("System", "Server Monitoring", "/itadmin/monitoring", "Activity", PermissionModule.SystemMonitoring.ToString()),
+                ("System", "Class Session Logs", "/itadmin/class-logs", "Radar", PermissionModule.ClassSessionLogs.ToString()),
+            ];
+
+            var sectionOrders = new Dictionary<string, int>();
+            var sortOrders = new Dictionary<string, int>();
+            foreach (var (section, label, path, icon, requiredModule) in items)
+            {
+                var sectionKey = section ?? "";
+                if (!sectionOrders.TryGetValue(sectionKey, out var sectionOrder))
+                {
+                    sectionOrder = sectionOrders.Count;
+                    sectionOrders[sectionKey] = sectionOrder;
+                }
+
+                var sortOrder = sortOrders.TryGetValue(sectionKey, out var current) ? current : 0;
+                sortOrders[sectionKey] = sortOrder + 1;
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "itadmin",
+                    Section = section,
+                    SectionOrder = sectionOrder,
+                    Label = label,
+                    Path = path,
+                    Icon = icon,
+                    SortOrder = sortOrder,
+                    RequiredModule = requiredModule,
+                    IsActive = true,
                 });
             }
         }
