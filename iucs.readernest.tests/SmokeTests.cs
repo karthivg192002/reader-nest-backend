@@ -786,6 +786,232 @@ namespace iucs.readernest.tests
             await Assert.ThrowsAsync<NotFoundException>(() => ops.CancelLeaveAsync(otherTeacherUser.Id, leave.Id));
         }
 
+        /// <summary>Seeds one teacher with `count` scheduled sessions, all safely beyond the
+        /// 6-hour leave cutoff, for the class-wise leave tests below.</summary>
+        private async Task<(TeacherProfile Teacher, List<ClassSession> Sessions)> SeedTeacherWithSessionsAsync(int count)
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: count, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync(t => t.Id == batch.TeacherProfileId);
+            var baseStart = DateTime.UtcNow.AddDays(10).Date.AddHours(9); // well beyond the 6-hour cutoff
+            var sessions = new List<ClassSession>();
+            for (var i = 0; i < count; i++)
+            {
+                var start = baseStart.AddHours(i);
+                var session = new ClassSession
+                {
+                    BatchId = batch.Id,
+                    TeacherProfileId = teacher.Id,
+                    Status = SessionStatus.Scheduled,
+                    ScheduledStartAtUtc = start,
+                    ScheduledEndAtUtc = start.AddMinutes(45),
+                };
+                _db.Context.ClassSessions.Add(session);
+                sessions.Add(session);
+            }
+            await _db.Context.SaveChangesAsync();
+            _db.CurrentUser.UserId = teacher.UserId;
+            return (teacher, sessions);
+        }
+
+        [Fact]
+        public async Task ClassWiseLeave_AutoApproves_AndCancelsExactlyThePickedSessions_WhenWithinAllowance()
+        {
+            var (teacher, sessions) = await SeedTeacherWithSessionsAsync(count: 3);
+            var ops = CreateAcademicOpsService();
+
+            await ops.SetLeaveAllowanceAsync(new SaveLeaveAllowanceRequest { TeacherProfileId = teacher.Id, MonthlyAllowance = 2 });
+            _db.Context.ChangeTracker.Clear();
+
+            var leave = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                SessionIds = new List<Guid> { sessions[0].Id, sessions[1].Id },
+                Reason = "Two of my three classes today",
+            });
+
+            Assert.True(leave.IsClassWise);
+            Assert.Equal(LeaveStatus.Approved, leave.Status);
+            Assert.Equal(2, leave.AffectedSessionCount);
+            Assert.Equal(2, leave.Sessions.Count);
+
+            _db.Context.ChangeTracker.Clear();
+            var refreshed = await _db.Context.ClassSessions.ToListAsync();
+            Assert.Equal(SessionStatus.Cancelled, refreshed.Single(s => s.Id == sessions[0].Id).Status);
+            Assert.Equal(SessionStatus.Cancelled, refreshed.Single(s => s.Id == sessions[1].Id).Status);
+            // The third class was never picked -- must stay untouched, proving cancellation
+            // targets exactly the selected sessions rather than sweeping a whole time window.
+            Assert.Equal(SessionStatus.Scheduled, refreshed.Single(s => s.Id == sessions[2].Id).Status);
+        }
+
+        [Fact]
+        public async Task ClassWiseLeave_FallsBackToPendingReview_WhenExceedingTheMonthlyAllowance()
+        {
+            var (teacher, sessions) = await SeedTeacherWithSessionsAsync(count: 2);
+            var ops = CreateAcademicOpsService();
+
+            await ops.SetLeaveAllowanceAsync(new SaveLeaveAllowanceRequest { TeacherProfileId = teacher.Id, MonthlyAllowance = 1 });
+            _db.Context.ChangeTracker.Clear();
+
+            var leave = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                SessionIds = sessions.Select(s => s.Id).ToList(),
+                Reason = "Both of my two classes today",
+            });
+
+            // 2 requested > 1 allowed -- not auto-approved, but not blocked either.
+            Assert.True(leave.IsClassWise);
+            Assert.Equal(LeaveStatus.Pending, leave.Status);
+            Assert.Equal(2, leave.AffectedSessionCount);
+
+            _db.Context.ChangeTracker.Clear();
+            var beforeApproval = await _db.Context.ClassSessions.ToListAsync();
+            Assert.All(beforeApproval, s => Assert.Equal(SessionStatus.Scheduled, s.Status));
+
+            _db.Context.ChangeTracker.Clear();
+            var reviewed = await ops.ReviewLeaveAsync(leave.Id, new ReviewLeaveRequest { Approve = true });
+            Assert.Equal(LeaveStatus.Approved, reviewed.Status);
+            Assert.Equal(2, reviewed.AffectedSessionCount);
+
+            _db.Context.ChangeTracker.Clear();
+            var afterApproval = await _db.Context.ClassSessions.ToListAsync();
+            Assert.All(afterApproval, s => Assert.Equal(SessionStatus.Cancelled, s.Status));
+        }
+
+        [Fact]
+        public async Task ClassWiseLeave_UsesDefaultAllowance_WhenTeacherHasNoOverrideOfHerOwn()
+        {
+            var (teacher, sessions) = await SeedTeacherWithSessionsAsync(count: 1);
+            var ops = CreateAcademicOpsService();
+
+            // No per-teacher row -- only the centre-wide default (null TeacherProfileId).
+            await ops.SetLeaveAllowanceAsync(new SaveLeaveAllowanceRequest { TeacherProfileId = null, MonthlyAllowance = 5 });
+            _db.Context.ChangeTracker.Clear();
+
+            var status = await ops.GetMyLeaveAllowanceStatusAsync(teacher.UserId);
+            Assert.Equal(5, status.MonthlyAllowance);
+            Assert.Equal(0, status.UsedThisMonth);
+            Assert.Equal(5, status.Remaining);
+
+            var leave = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                SessionIds = new List<Guid> { sessions[0].Id },
+                Reason = "One class",
+            });
+            Assert.Equal(LeaveStatus.Approved, leave.Status);
+        }
+
+        [Fact]
+        public async Task ClassWiseLeave_RejectsASessionThatIsNotHerOwn()
+        {
+            var (_, otherSessions) = await SeedTeacherWithSessionsAsync(count: 1);
+            var (teacher, _) = await SeedTeacherWithSessionsAsync(count: 1);
+            var ops = CreateAcademicOpsService();
+
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+                {
+                    SessionIds = new List<Guid> { otherSessions[0].Id },
+                    Reason = "Not mine",
+                }));
+        }
+
+        [Fact]
+        public async Task ClassWiseLeave_WithinSixHoursOfClass_IsBlocked()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync(t => t.Id == batch.TeacherProfileId);
+            var soon = DateTime.UtcNow.AddHours(2);
+            var session = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = teacher.Id,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = soon,
+                ScheduledEndAtUtc = soon.AddMinutes(45),
+            };
+            _db.Context.ClassSessions.Add(session);
+            await _db.Context.SaveChangesAsync();
+
+            var ops = CreateAcademicOpsService();
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+                {
+                    SessionIds = new List<Guid> { session.Id },
+                    Reason = "Too late",
+                }));
+        }
+
+        [Fact]
+        public async Task ClassWiseLeave_RejectsASessionAlreadyCoveredByAnotherPendingRequest()
+        {
+            var (teacher, sessions) = await SeedTeacherWithSessionsAsync(count: 1);
+            var ops = CreateAcademicOpsService();
+
+            // No allowance configured -- default is 0, so this lands Pending, still "holding"
+            // the session for the duplicate check below.
+            var first = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                SessionIds = new List<Guid> { sessions[0].Id },
+                Reason = "First",
+            });
+            Assert.Equal(LeaveStatus.Pending, first.Status);
+
+            _db.Context.ChangeTracker.Clear();
+            var ex = await Assert.ThrowsAsync<ConflictException>(() =>
+                ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+                {
+                    SessionIds = new List<Guid> { sessions[0].Id },
+                    Reason = "Second, same class",
+                }));
+            Assert.Contains("already has a pending or approved leave request", ex.Message);
+        }
+
+        [Fact]
+        public async Task SubmitLeaveAsync_RejectsBothAWindowAndSpecificSessions_AndRejectsNeither()
+        {
+            var (teacher, sessions) = await SeedTeacherWithSessionsAsync(count: 1);
+            var ops = CreateAcademicOpsService();
+            var start = DateTime.UtcNow.AddDays(10);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+                {
+                    StartAtUtc = start,
+                    EndAtUtc = start.AddHours(1),
+                    SessionIds = new List<Guid> { sessions[0].Id },
+                    Reason = "Both given",
+                }));
+
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest { Reason = "Neither given" }));
+        }
+
+        [Fact]
+        public async Task SetLeaveAllowanceAsync_RejectsANegativeAllowance()
+        {
+            var ops = CreateAcademicOpsService();
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                ops.SetLeaveAllowanceAsync(new SaveLeaveAllowanceRequest { MonthlyAllowance = -1 }));
+        }
+
+        [Fact]
+        public async Task SetLeaveAllowanceAsync_PerTeacherOverride_WinsOverTheDefault()
+        {
+            var (teacher, _) = await SeedTeacherWithSessionsAsync(count: 1);
+            var ops = CreateAcademicOpsService();
+
+            await ops.SetLeaveAllowanceAsync(new SaveLeaveAllowanceRequest { TeacherProfileId = null, MonthlyAllowance = 2 });
+            await ops.SetLeaveAllowanceAsync(new SaveLeaveAllowanceRequest { TeacherProfileId = teacher.Id, MonthlyAllowance = 7 });
+            _db.Context.ChangeTracker.Clear();
+
+            var status = await ops.GetMyLeaveAllowanceStatusAsync(teacher.UserId);
+            Assert.Equal(7, status.MonthlyAllowance);
+
+            var allowances = await ops.ListLeaveAllowancesAsync();
+            Assert.Equal(2, allowances.Count);
+            Assert.Contains(allowances, a => a.TeacherProfileId == null && a.MonthlyAllowance == 2 && a.TeacherName == "All teachers (default)");
+            Assert.Contains(allowances, a => a.TeacherProfileId == teacher.Id && a.MonthlyAllowance == 7);
+        }
+
         [Fact]
         public async Task CaptureAttendance_Rejoin_UpdatesRow_NeverDuplicates()
         {

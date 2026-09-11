@@ -28,6 +28,19 @@ namespace iucs.readernest.application.Services
         /// <summary>Teacher withdraws their own still-Pending leave request.</summary>
         Task CancelLeaveAsync(Guid teacherUserId, Guid leaveId, CancellationToken cancellationToken = default);
 
+        // Class-wise cancellation allowance
+        /// <summary>Admin (or a role granted LeaveManagement) view of the configured
+        /// allowances — the default card plus any per-teacher overrides.</summary>
+        Task<IReadOnlyList<LeaveAllowanceDto>> ListLeaveAllowancesAsync(CancellationToken cancellationToken = default);
+
+        /// <summary>Admin-only: sets the centre default (omit TeacherProfileId) or one
+        /// teacher's override.</summary>
+        Task<LeaveAllowanceDto> SetLeaveAllowanceAsync(SaveLeaveAllowanceRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>The signed-in teacher's own remaining class-wise-cancellation quota for
+        /// the current calendar month.</summary>
+        Task<LeaveAllowanceStatusDto> GetMyLeaveAllowanceStatusAsync(Guid teacherUserId, CancellationToken cancellationToken = default);
+
         // Attendance capture
         Task<IReadOnlyList<SessionAttendanceDto>> CaptureAttendanceAsync(
             Guid sessionId,

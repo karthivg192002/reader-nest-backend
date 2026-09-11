@@ -32,5 +32,16 @@ namespace iucs.readernest.domain.Entities.Academics
 
         [MaxLength(500)]
         public string? ReviewNote { get; set; }
+
+        /// <summary>
+        /// True for a class-wise leave (specific sessions picked from <see cref="Sessions"/>)
+        /// rather than a whole-day/date-range leave. Approval logic branches on this: a
+        /// class-wise request cancels exactly its linked sessions; a whole-window one cancels
+        /// everything scheduled inside StartAtUtc/EndAtUtc, as before.
+        /// </summary>
+        public bool IsClassWise { get; set; }
+
+        /// <summary>Only populated when IsClassWise — the exact sessions this request covers.</summary>
+        public ICollection<LeaveRequestSession> Sessions { get; set; } = new List<LeaveRequestSession>();
     }
 }

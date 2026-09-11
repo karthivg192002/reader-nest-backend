@@ -44,6 +44,13 @@ namespace iucs.readernest.api.Hubs
         // right slide instead of always page 0.
         private static readonly ConcurrentDictionary<string, int> CurrentSlide = new();
 
+        // Whichever participant the teacher currently has spotlighted/pinned in their own
+        // Jitsi view (null = nobody pinned) — see SetPinned's own doc comment for why this
+        // needs to exist at all. Persisted the same way CurrentSlide is, so a student who
+        // joins mid-class (or reconnects) lands with the teacher's view already applied
+        // instead of only picking it up on the next pin change.
+        private static readonly ConcurrentDictionary<string, string?> PinnedParticipant = new();
+
         private readonly ISessionService _sessionService;
         private readonly IGamificationService _gamificationService;
         private readonly IAcademicOpsService _academicOpsService;
@@ -180,6 +187,14 @@ namespace iucs.readernest.api.Hubs
                 await Clients.Caller.SendAsync("Slide", pageIndex);
             }
 
+            // Same idea again for whoever the teacher currently has pinned/spotlighted — a
+            // student who joins after the teacher already pinned themselves (or anyone else)
+            // should land on that same view, not the room's default tile layout with no pin.
+            if (PinnedParticipant.TryGetValue(sessionId, out var pinnedId))
+            {
+                await Clients.Caller.SendAsync("Pinned", pinnedId);
+            }
+
             // PDF's "System Marks Attendance" — join-based capture, fired now that the caller
             // is confirmed to genuinely belong to this session. Best-effort by design (see the
             // method's own doc comment); never allowed to affect the join that already succeeded.
@@ -269,6 +284,32 @@ namespace iucs.readernest.api.Hubs
 
             CurrentSlide[sessionId] = pageIndex;
             await Clients.OthersInGroup(Group(sessionId)).SendAsync("Slide", pageIndex);
+        }
+
+        // ---- pin / spotlight sync ----
+
+        /// <summary>
+        /// Teacher-only: broadcasts whichever participant the teacher just pinned in their own
+        /// Jitsi view (or null when they unpin) so every student's view follows along. Jitsi's
+        /// native pin is purely local to whichever browser clicked it — a teacher pinning
+        /// herself while screen-sharing showed "Pinned" on her own screen only, with students
+        /// still seeing her in the small tile, since nothing relayed that choice to anyone
+        /// else. `participantId` is the Jitsi endpoint id (the same id `videoConferenceJoined`
+        /// hands the pinning participant for themselves), which is the same id every other
+        /// participant in the room already knows them by, so the student side can hand it
+        /// straight to its own `pinParticipant` command with no lookup needed. A student
+        /// pinning someone locally for their own view is left alone — only the teacher's own
+        /// pin choice is ever synced, since that's the one everyone is meant to follow.
+        /// </summary>
+        public async Task SetPinned(string sessionId, string? participantId)
+        {
+            if (!IsTeacherInRoom(sessionId))
+            {
+                return;
+            }
+
+            PinnedParticipant[sessionId] = participantId;
+            await Clients.OthersInGroup(Group(sessionId)).SendAsync("Pinned", participantId);
         }
 
         // ---- chat (interactive panel) ----
@@ -483,6 +524,7 @@ namespace iucs.readernest.api.Hubs
                     BoardAccessGrants.TryRemove(sessionId, out _);
                     BoardHistory.TryRemove(sessionId, out _);
                     CurrentSlide.TryRemove(sessionId, out _);
+                    PinnedParticipant.TryRemove(sessionId, out _);
                     foreach (var key in AnsweredQuestions.Keys.Where(k => k.StartsWith($"{sessionId}:", StringComparison.Ordinal)))
                     {
                         AnsweredQuestions.TryRemove(key, out _);
