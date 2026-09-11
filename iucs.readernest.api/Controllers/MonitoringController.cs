@@ -45,10 +45,17 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _monitoringService.GetTodaySessionsAsync(cancellationToken));
         }
 
-        /// <summary>CPU/memory history for one server over an admin-selected window ("1h", "24h", or "7d").</summary>
-        [HttpGet("servers/{serverName}/history")]
+        /// <summary>
+        /// CPU/memory history for one server over an admin-selected window ("1h", "24h", or "7d").
+        /// serverName is a query param, not a path segment: both real server names ("Jitsi / Video",
+        /// "App / API") contain "/", which ASP.NET Core's routing never decodes from %2F in a route
+        /// value even when the client percent-encodes it correctly -- a path segment binds to
+        /// "Jitsi %2F Video" verbatim and every one of these lookups 400s. Confirmed broken in
+        /// production this way for all five serverName-keyed endpoints below.
+        /// </summary>
+        [HttpGet("servers/history")]
         [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.View)]
-        public async Task<ActionResult<HistoryRangeDto>> GetHistory(string serverName, [FromQuery] string range, CancellationToken cancellationToken)
+        public async Task<ActionResult<HistoryRangeDto>> GetHistory([FromQuery] string serverName, [FromQuery] string range, CancellationToken cancellationToken)
         {
             try
             {
@@ -61,9 +68,9 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>Error-filtered `docker logs` tail for one container on one server. 400s for an unknown server/container or a server with no SSH configured, rather than a raw 500, so the frontend can show a clear reason instead of a generic failure.</summary>
-        [HttpGet("servers/{serverName}/logs")]
+        [HttpGet("servers/logs")]
         [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.View)]
-        public async Task<ActionResult<ServerLogsDto>> GetServerLogs(string serverName, [FromQuery] string container, [FromQuery] int lines, CancellationToken cancellationToken)
+        public async Task<ActionResult<ServerLogsDto>> GetServerLogs([FromQuery] string serverName, [FromQuery] string container, [FromQuery] int lines, CancellationToken cancellationToken)
         {
             try
             {
@@ -76,9 +83,9 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>Runs the Jibri autoscaler immediately instead of waiting out its next cron minute.</summary>
-        [HttpPost("servers/{serverName}/jibri/rescale")]
+        [HttpPost("servers/jibri/rescale")]
         [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.Edit)]
-        public async Task<ActionResult<JibriControlResultDto>> RescaleJibriNow(string serverName, CancellationToken cancellationToken)
+        public async Task<ActionResult<JibriControlResultDto>> RescaleJibriNow([FromQuery] string serverName, CancellationToken cancellationToken)
         {
             try
             {
@@ -91,9 +98,9 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>Sets how many Jibri instances stay warm even while idle.</summary>
-        [HttpPut("servers/{serverName}/jibri/min-replicas")]
+        [HttpPut("servers/jibri/min-replicas")]
         [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.Edit)]
-        public async Task<ActionResult<JibriControlResultDto>> SetJibriMinReplicas(string serverName, [FromBody] SetJibriMinReplicasRequest request, CancellationToken cancellationToken)
+        public async Task<ActionResult<JibriControlResultDto>> SetJibriMinReplicas([FromQuery] string serverName, [FromBody] SetJibriMinReplicasRequest request, CancellationToken cancellationToken)
         {
             try
             {
@@ -106,9 +113,9 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>Restarts one configured container on one server -- interrupts anything currently using that service.</summary>
-        [HttpPost("servers/{serverName}/services/{container}/restart")]
+        [HttpPost("servers/services/restart")]
         [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.Edit)]
-        public async Task<ActionResult<ServiceRestartResultDto>> RestartService(string serverName, string container, CancellationToken cancellationToken)
+        public async Task<ActionResult<ServiceRestartResultDto>> RestartService([FromQuery] string serverName, [FromQuery] string container, CancellationToken cancellationToken)
         {
             try
             {
