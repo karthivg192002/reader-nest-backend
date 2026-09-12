@@ -27,6 +27,14 @@ namespace iucs.readernest.application.Dto.Sessions
 
         [Required]
         public DateTime ScheduledEndAtUtc { get; set; }
+
+        /// <summary>Null keeps the session's current teacher — only set this to actually move
+        /// the session to a different teacher (same "Edit session" action, not a separate one).</summary>
+        public Guid? TeacherProfileId { get; set; }
+
+        /// <summary>Null keeps the session's current batch. Demo bookings' own reschedule call
+        /// never sets this — a demo has no batch to change.</summary>
+        public Guid? BatchId { get; set; }
     }
 
     public class CancelSessionRequest

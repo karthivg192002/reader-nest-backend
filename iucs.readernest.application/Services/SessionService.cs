@@ -176,8 +176,44 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException($"A session in status '{original.Status}' cannot be rescheduled.");
             }
 
+            // "Edit session" (WBS Round 2 feedback): a reschedule was time-only before — moving
+            // a session to a different teacher or batch meant cancelling and rebooking from
+            // scratch, losing the link to the original. Both are optional overrides on top of
+            // the same reschedule flow rather than a separate action, since this already creates
+            // a fresh linked calendar entry either way (see the comment below).
+            var newTeacherId = request.TeacherProfileId ?? original.TeacherProfileId;
+            var newBatchId = request.BatchId ?? original.BatchId;
+
+            if (original.Type == SessionType.Regular && newBatchId is null)
+            {
+                throw new DomainValidationException("A regular session must belong to a batch.");
+            }
+
+            if (newBatchId.HasValue && newBatchId != original.BatchId)
+            {
+                var batchExists = await _unitOfWork.Repository<Batch>()
+                    .ExistsAsync(b => b.Id == newBatchId.Value, cancellationToken);
+                if (!batchExists)
+                {
+                    throw new NotFoundException(nameof(Batch), newBatchId.Value);
+                }
+            }
+
+            if (newTeacherId != original.TeacherProfileId)
+            {
+                var teacherExists = await _unitOfWork.Repository<TeacherProfile>()
+                    .ExistsAsync(t => t.Id == newTeacherId, cancellationToken);
+                if (!teacherExists)
+                {
+                    throw new NotFoundException(nameof(TeacherProfile), newTeacherId);
+                }
+            }
+
+            // Checked against whichever teacher the session will actually end up with —
+            // the original teacher's own free/busy slot is irrelevant once they're being
+            // swapped out.
             await EnsureTeacherIsFreeAsync(
-                original.TeacherProfileId, request.ScheduledStartAtUtc, request.ScheduledEndAtUtc,
+                newTeacherId, request.ScheduledStartAtUtc, request.ScheduledEndAtUtc,
                 cancellationToken, excludeSessionId: original.Id);
 
             original.Status = SessionStatus.Rescheduled;
@@ -186,8 +222,8 @@ namespace iucs.readernest.application.Services
             // so history and colour coding stay traceable.
             var replacement = new ClassSession
             {
-                BatchId = original.BatchId,
-                TeacherProfileId = original.TeacherProfileId,
+                BatchId = newBatchId,
+                TeacherProfileId = newTeacherId,
                 Type = original.Type,
                 ScheduledStartAtUtc = request.ScheduledStartAtUtc,
                 ScheduledEndAtUtc = request.ScheduledEndAtUtc,
