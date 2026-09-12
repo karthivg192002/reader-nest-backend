@@ -137,19 +137,30 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>
-        /// The parent's join link for this demo -- a short, stable URL (no JWT dangling off the
-        /// end that reads as broken/suspicious pasted into WhatsApp or email) staff can copy and
+        /// The parent's join link for this demo -- a stable URL (no JWT dangling off the end
+        /// that reads as broken/suspicious pasted into WhatsApp or email) staff can copy and
         /// share manually. Points at this controller's own public <see cref="Join"/> redirect,
         /// which re-resolves the room/domain/token fresh on every click and never expires --
         /// unlike the old short-link wrapper this replaced, copying it now versus a parent
         /// opening it next month behave identically instead of the latter silently 404-ing.
+        /// Also returns a genuinely short /m/{slug} form of that same stable URL (staff asked
+        /// for one directly, e.g. for WhatsApp/SMS where every character counts) -- it wraps
+        /// <see cref="Join"/> itself, not a baked token, so it inherits the same never-stale
+        /// behavior; only the shortener's own row (effectively permanent -- 10 years out) ever
+        /// needs renewing, which in practice it won't.
         /// </summary>
         [HttpGet("{id:guid}/join-link")]
         [HasPermission(PermissionModule.Admission, PermissionAction.View)]
-        public async Task<ActionResult<object>> GetJoinLink(Guid id, CancellationToken cancellationToken)
+        public async Task<ActionResult<object>> GetJoinLink(
+            Guid id,
+            [FromServices] IShortLinkService shortLinks,
+            CancellationToken cancellationToken)
         {
             var joinUrl = await _demoBookingService.GetJoinLinkAsync(id, cancellationToken);
-            return Ok(new { joinUrl });
+            var userId = Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+            var slug = await shortLinks.CreateAsync(joinUrl, DateTime.UtcNow.AddYears(10), userId, cancellationToken);
+            var apiBaseUrl = $"{Request.Scheme}://{Request.Host}";
+            return Ok(new { joinUrl, shortUrl = $"{apiBaseUrl}/m/{slug}" });
         }
 
         /// <summary>
