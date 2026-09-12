@@ -483,12 +483,28 @@ namespace iucs.readernest.application.Services
             // attach the recording to, so this is a no-op rather than a NotFoundException: the
             // finalize script has no session id to have gotten wrong, only a room name that's
             // legitimately outside this feature's scope.
-            var session = await _unitOfWork.Repository<ClassSession>().Query()
-                .FirstOrDefaultAsync(s => s.MeetingRoomId == roomName, cancellationToken);
-            if (session is null)
+            //
+            // A personal room's MeetingRoomId is a permanent per-teacher identifier reused
+            // across every demo/1-on-1 class that teacher ever runs -- NOT unique per occurrence
+            // the way a batch's room id effectively is. Matching on MeetingRoomId alone with
+            // FirstOrDefault silently piled every one of that teacher's recordings, forever,
+            // onto whichever session row happened to sort first -- confirmed in production as
+            // multiple unrelated recordings stacked on one old session while every later class
+            // using that room showed "no recording". Disambiguate by picking the candidate whose
+            // scheduled end is closest to now: finalize always fires within minutes of the class
+            // that was actually recorded ending, so that's the one this recording belongs to.
+            var candidates = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.MeetingRoomId == roomName)
+                .ToListAsync(cancellationToken);
+            if (candidates.Count == 0)
             {
                 return null;
             }
+
+            var now = DateTime.UtcNow;
+            var session = candidates.Count == 1
+                ? candidates[0]
+                : candidates.MinBy(s => Math.Abs(((s.ActualEndAtUtc ?? s.ScheduledEndAtUtc) - now).Ticks))!;
 
             var recording = new SessionRecording
             {
