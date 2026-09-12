@@ -247,6 +247,20 @@ builder.Services.AddRateLimiter(options =>
                 Window = TimeSpan.FromMinutes(5),
                 QueueLimit = 0,
             }));
+    // Public demo join redirect: legitimate traffic can legitimately retry a handful of times
+    // (a parent reloading, or clicking their own link plus each invitee's from one household/
+    // IP), but booking ids aren't secret once a link exists, so this still caps blind GUID
+    // enumeration against the endpoint -- looser than "login"/"pin-reset" since there's no
+    // credential to brute-force here, just a link to guess.
+    options.AddPolicy("demo-join", httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
+                Window = TimeSpan.FromMinutes(5),
+                QueueLimit = 0,
+            }));
 });
 
 // Authorization: module/action permission policies (Admin passes implicitly)

@@ -5,6 +5,7 @@ using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace iucs.readernest.api.Controllers
 {
@@ -123,22 +124,39 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>
-        /// A short, shareable link to the parent's join link for this demo -- the raw form
-        /// carries a full signed JWT in its fragment, which reads as broken/suspicious pasted
-        /// into WhatsApp or email. For staff to copy and share manually.
+        /// The parent's join link for this demo -- a short, stable URL (no JWT dangling off the
+        /// end that reads as broken/suspicious pasted into WhatsApp or email) staff can copy and
+        /// share manually. Points at this controller's own public <see cref="Join"/> redirect,
+        /// which re-resolves the room/domain/token fresh on every click -- unlike the old
+        /// short-link wrapper this replaced, copying it now versus a parent opening it days
+        /// later behave identically instead of the latter silently 404-ing.
         /// </summary>
         [HttpGet("{id:guid}/join-link")]
         [HasPermission(PermissionModule.Admission, PermissionAction.View)]
-        public async Task<ActionResult<object>> GetJoinLink(
-            Guid id,
-            [FromServices] IShortLinkService shortLinks,
-            CancellationToken cancellationToken)
+        public async Task<ActionResult<object>> GetJoinLink(Guid id, CancellationToken cancellationToken)
         {
             var (joinUrl, expiresAtUtc) = await _demoBookingService.GetJoinLinkAsync(id, cancellationToken);
-            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-            var slug = await shortLinks.CreateAsync(joinUrl, expiresAtUtc, userId, cancellationToken);
-            var apiBaseUrl = $"{Request.Scheme}://{Request.Host}";
-            return Ok(new { joinUrl = $"{apiBaseUrl}/m/{slug}", expiresAtUtc });
+            return Ok(new { joinUrl, expiresAtUtc });
+        }
+
+        /// <summary>
+        /// The link a parent/invitee actually clicks -- from the confirmation email, a resend, or
+        /// staff's "Copy Link". Deliberately public and unauthenticated (a demo lead has no
+        /// account to sign in with) and deliberately NOT a static URL: it resolves the current
+        /// Jitsi domain and mints a fresh signed token on every single hit, so it can never go
+        /// stale the way a URL with those baked in at send time could -- reported live as a
+        /// parent's join link 404-ing while the teacher, who always re-resolves fresh through
+        /// the authenticated app, kept joining fine. <paramref name="p"/> selects one of the
+        /// booking's extra invitees; omitted, this is the primary parent's own link.
+        /// </summary>
+        [HttpGet("{id:guid}/join")]
+        [EnableRateLimiting("demo-join")]
+        public async Task<IActionResult> Join(Guid id, [FromQuery] Guid? p, CancellationToken cancellationToken)
+        {
+            var url = await _demoBookingService.ResolveLiveJoinUrlAsync(id, p, cancellationToken);
+            return url is null
+                ? NotFound("This demo's join window has closed, or the link is no longer valid.")
+                : Redirect(url);
         }
 
         /// <summary>Every active teacher's load around this booking's slot, for the reassignment page.</summary>

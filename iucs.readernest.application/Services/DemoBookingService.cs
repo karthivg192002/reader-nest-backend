@@ -14,6 +14,7 @@ using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using iucs.readernest.domain.Repository;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace iucs.readernest.application.Services
@@ -31,6 +32,7 @@ namespace iucs.readernest.application.Services
         private readonly IJitsiTokenService _jitsiTokenService;
         private readonly INotificationService _notificationService;
         private readonly IUserService _userService;
+        private readonly IConfiguration _configuration;
         private readonly ILogger<DemoBookingService> _logger;
 
         public DemoBookingService(
@@ -42,6 +44,7 @@ namespace iucs.readernest.application.Services
             IJitsiTokenService jitsiTokenService,
             INotificationService notificationService,
             IUserService userService,
+            IConfiguration configuration,
             ILogger<DemoBookingService> logger)
         {
             _unitOfWork = unitOfWork;
@@ -52,6 +55,7 @@ namespace iucs.readernest.application.Services
             _jitsiTokenService = jitsiTokenService;
             _notificationService = notificationService;
             _userService = userService;
+            _configuration = configuration;
             _logger = logger;
         }
 
@@ -725,9 +729,11 @@ namespace iucs.readernest.application.Services
         /// <summary>
         /// The parent's join link for this demo (plus the moment it stops working), for staff to
         /// copy and share manually (WhatsApp, SMS) instead of relying on the email actually
-        /// landing. Same room and link-building as the email; does not mutate anything, so unlike
-        /// ResendLinkAsync it does not self-heal a pre-fixed-link booking's room -- call
-        /// ResendLinkAsync first if that matters here.
+        /// landing. Now the same stable /join redirect the confirmation email carries (see
+        /// BuildStableJoinUrl) rather than a raw, moment-in-time Jitsi URL -- staff used to be
+        /// able to copy a link whose room/domain was correct when copied but went stale (404)
+        /// by the time a parent actually opened it days later; this one re-resolves everything
+        /// fresh on every click, so "copy it now" and "click it next week" behave identically.
         /// </summary>
         public async Task<(string JoinUrl, DateTime ExpiresAtUtc)> GetJoinLinkAsync(Guid bookingId, CancellationToken cancellationToken = default)
         {
@@ -742,8 +748,78 @@ namespace iucs.readernest.application.Services
             }
 
             var expiresAtUtc = session.ScheduledEndAtUtc.AddHours(2);
-            var joinUrl = await BuildDemoJoinUrlAsync(session, booking.ParentName, booking.ParentEmail, moderator: false, cancellationToken);
-            return (joinUrl, expiresAtUtc);
+            return (BuildStableJoinUrl(bookingId, participantId: null), expiresAtUtc);
+        }
+
+        /// <summary>
+        /// Resolves a parent/participant's join link fresh, right now -- see the interface's own
+        /// remarks for the staleness problem this replaces (a static domain/token baked into an
+        /// email or copied link, versus a teacher's always-fresh authenticated join). Public,
+        /// unauthenticated callers reach this only through DemoBookingsController's anonymous
+        /// GET /join redirect -- never expose the raw signed URL this returns from an endpoint
+        /// requiring no proof of identity beyond knowing the booking id.
+        /// </summary>
+        public async Task<string?> ResolveLiveJoinUrlAsync(Guid bookingId, Guid? participantId, CancellationToken cancellationToken = default)
+        {
+            var booking = await _unitOfWork.Repository<DemoBooking>().Query()
+                .Include(b => b.ClassSession)
+                .Include(b => b.Participants)
+                .FirstOrDefaultAsync(b => b.Id == bookingId, cancellationToken);
+
+            if (booking?.ClassSession is not { } session || string.IsNullOrWhiteSpace(session.MeetingRoomId))
+            {
+                return null;
+            }
+
+            // Same margin the signed token itself has always carried (BuildDemoJoinUrlAsync) --
+            // a link is dead once the token it would mint is dead, so report it as gone here
+            // too rather than minting a token that would just fail inside Jitsi a moment later.
+            if (DateTime.UtcNow > session.ScheduledEndAtUtc.AddHours(2))
+            {
+                return null;
+            }
+
+            string participantName;
+            string participantEmail;
+            if (participantId.HasValue)
+            {
+                var participant = booking.Participants.FirstOrDefault(p => p.Id == participantId.Value);
+                if (participant is null || string.IsNullOrWhiteSpace(participant.Email))
+                {
+                    return null;
+                }
+                participantName = participant.Name;
+                participantEmail = participant.Email!;
+            }
+            else
+            {
+                participantName = booking.ParentName;
+                participantEmail = booking.ParentEmail;
+            }
+
+            return await BuildDemoJoinUrlAsync(session, participantName, participantEmail, moderator: false, cancellationToken);
+        }
+
+        /// <summary>
+        /// The link actually handed to a parent/invitee (email, resend, or staff's "Copy Link")
+        /// -- a stable pointer at this booking's own public join redirect
+        /// (DemoBookingsController.Join → ResolveLiveJoinUrlAsync) rather than a raw Jitsi URL
+        /// with the domain and a signed token already baked in. Baking those in at send time is
+        /// exactly what went stale: reported live as a parent's join link 404-ing while the
+        /// teacher's own join kept working — traced to the old /join-link short link's target
+        /// (or the raw URL's baked-in domain/token) drifting from what's current by the time it
+        /// was actually opened, something a teacher's always-fresh authenticated join never hits.
+        /// This link instead re-resolves both on every single click, so it can't go stale that
+        /// way no matter how long it sits in an inbox.
+        /// `Api:BaseUrl` lets a deployment override its own public origin explicitly; falling
+        /// back to the current production API host keeps this working out of the box without
+        /// that config needing to exist first.
+        /// </summary>
+        private string BuildStableJoinUrl(Guid bookingId, Guid? participantId)
+        {
+            var apiBaseUrl = (_configuration["Api:BaseUrl"] ?? "https://api.thereadernest.in").TrimEnd('/');
+            var query = participantId.HasValue ? $"?p={participantId.Value}" : string.Empty;
+            return $"{apiBaseUrl}/api/demo-bookings/{bookingId}/join{query}";
         }
 
         public async Task<IReadOnlyList<TeacherWorkloadDto>> GetTeacherWorkloadAsync(
@@ -995,7 +1071,7 @@ namespace iucs.readernest.application.Services
                     {
                         ["ChildName"] = booking.ChildName,
                         ["WhenLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc),
-                        ["JoinUrl"] = await BuildDemoJoinUrlAsync(session, booking.ParentName, booking.ParentEmail, moderator: false, cancellationToken),
+                        ["JoinUrl"] = BuildStableJoinUrl(booking.Id, participantId: null),
                     },
                     cancellationToken);
                 await _emailSender.SendAsync(booking.ParentEmail, parentSubject, parentHtml, cancellationToken);
@@ -1007,7 +1083,7 @@ namespace iucs.readernest.application.Services
                         {
                             ["ChildName"] = booking.ChildName,
                             ["WhenLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc),
-                            ["JoinUrl"] = await BuildDemoJoinUrlAsync(session, participant.Name, participant.Email!, moderator: false, cancellationToken),
+                            ["JoinUrl"] = BuildStableJoinUrl(booking.Id, participant.Id),
                         },
                         cancellationToken);
                     await _emailSender.SendAsync(participant.Email!, participantSubject, participantHtml, cancellationToken);

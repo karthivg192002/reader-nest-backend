@@ -59,6 +59,23 @@ namespace iucs.readernest.application.Services
         Task<(string JoinUrl, DateTime ExpiresAtUtc)> GetJoinLinkAsync(Guid bookingId, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Resolves a parent/participant's demo join link fresh, right now — the current Jitsi
+        /// domain and a newly-signed token, never whatever was baked into an email or copied
+        /// link at some earlier moment. Backs the public GET /api/demo-bookings/{id}/join
+        /// redirect that the confirmation email, resend and "Copy Link" now all point at instead
+        /// of a static URL, so a Jitsi domain change (or just time passing) can't leave a parent
+        /// holding a dead link the way a frozen one could — reported live as a parent's join
+        /// link 404-ing while teachers, who always re-resolve fresh through the authenticated
+        /// app, kept joining fine.
+        /// <paramref name="participantId"/> null means the primary parent; otherwise the id of
+        /// one of the booking's extra invitees.
+        /// Returns null when there's nothing left to join: no such booking/session, no room yet,
+        /// the given participant id doesn't belong to this booking, or the join window (through
+        /// ScheduledEndAtUtc + 2h, the same margin the signed token itself carries) has passed.
+        /// </summary>
+        Task<string?> ResolveLiveJoinUrlAsync(Guid bookingId, Guid? participantId, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Every active teacher's load around the booking's slot, so staff can see who's
         /// free/light before overriding the assignment — not just a blind name dropdown.
         /// </summary>

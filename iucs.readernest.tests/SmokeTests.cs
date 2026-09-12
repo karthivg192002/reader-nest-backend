@@ -108,7 +108,7 @@ namespace iucs.readernest.tests
         private ResourceService CreateResourceService() => new(_db.UnitOfWork, _auditLog);
 
         private DemoBookingService CreateDemoBookingService() =>
-            new(_db.UnitOfWork, _auditLog, _emailSender, _emailTemplates, new FakeCrmNotifier(), new FakeJitsiTokenService(), _notifications, CreateUserService(), NullLogger<DemoBookingService>.Instance);
+            new(_db.UnitOfWork, _auditLog, _emailSender, _emailTemplates, new FakeCrmNotifier(), new FakeJitsiTokenService(), _notifications, CreateUserService(), new ConfigurationBuilder().Build(), NullLogger<DemoBookingService>.Instance);
 
         private QuizQuestionService CreateQuizQuestionService() => new(_db.UnitOfWork, _auditLog, CreateSessionService(), _bulkFileReader);
 
@@ -3395,8 +3395,99 @@ namespace iucs.readernest.tests
                 ScheduledEndAtUtc = DateTime.UtcNow.AddDays(1).AddMinutes(30),
             });
 
+            // The email carries the stable, self-resolving join redirect now (see
+            // DemoBookingService.BuildStableJoinUrl) rather than a raw Jitsi URL with the
+            // domain/token baked in at send time -- that's what let a parent's copy of the link
+            // go stale (and 404) independently of the teacher's own always-fresh join.
             var email = Assert.Single(_emailSender.Sent, e => e.To == "lead@test.com");
-            Assert.Contains($"https://meet.techmisai.com/{dto.MeetingRoomId}", email.Body);
+            Assert.Contains($"https://api.thereadernest.in/api/demo-bookings/{dto.Id}/join", email.Body);
+        }
+
+        [Fact]
+        public async Task ResolveLiveJoinUrl_ForThePrimaryParent_ResolvesTheCurrentRoom()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var demoService = CreateDemoBookingService();
+            var dto = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Lead Parent",
+                ParentEmail = "join-parent@test.com",
+                ChildName = "Kid",
+                TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddHours(1),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddHours(1).AddMinutes(30),
+            });
+
+            var url = await demoService.ResolveLiveJoinUrlAsync(dto.Id, participantId: null);
+
+            Assert.NotNull(url);
+            Assert.Contains(dto.MeetingRoomId!, url);
+        }
+
+        [Fact]
+        public async Task ResolveLiveJoinUrl_UnknownBooking_ReturnsNull()
+        {
+            var url = await CreateDemoBookingService().ResolveLiveJoinUrlAsync(Guid.NewGuid(), participantId: null);
+
+            Assert.Null(url);
+        }
+
+        [Fact]
+        public async Task ResolveLiveJoinUrl_PastTheJoinWindow_ReturnsNull()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var demoService = CreateDemoBookingService();
+            var dto = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Lead Parent",
+                ParentEmail = "expired-parent@test.com",
+                ChildName = "Kid",
+                TeacherProfileId = teacher.Id,
+                // Well past even the token's own end-of-window (ScheduledEndAtUtc + 2h) -- a
+                // demo nobody ever joined, not a rescheduled or in-progress one.
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-3).AddMinutes(30),
+            });
+
+            var url = await demoService.ResolveLiveJoinUrlAsync(dto.Id, participantId: null);
+
+            Assert.Null(url);
+        }
+
+        [Fact]
+        public async Task ResolveLiveJoinUrl_ForAnInvitedParticipant_ResolvesTheirOwnLink_AndRejectsAnUnrelatedParticipantId()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var demoService = CreateDemoBookingService();
+            var dto = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Lead Parent",
+                ParentEmail = "primary-parent@test.com",
+                ChildName = "Kid",
+                TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddHours(1),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddHours(1).AddMinutes(30),
+                Participants = [new DemoParticipantDto { Name = "Grandma", Email = "grandma@test.com" }],
+            });
+
+            var participantId = _db.Context.DemoParticipants.Single(p => p.Email == "grandma@test.com").Id;
+            var participantUrl = await demoService.ResolveLiveJoinUrlAsync(dto.Id, participantId);
+            Assert.NotNull(participantUrl);
+
+            var unrelatedUrl = await demoService.ResolveLiveJoinUrlAsync(dto.Id, Guid.NewGuid());
+            Assert.Null(unrelatedUrl);
         }
 
         [Fact]
@@ -3409,7 +3500,8 @@ namespace iucs.readernest.tests
 
             var service = new DemoBookingService(
                 _db.UnitOfWork, _auditLog, new ThrowingEmailSender(), _emailTemplates,
-                new FakeCrmNotifier(), new FakeJitsiTokenService(), _notifications, CreateUserService(), NullLogger<DemoBookingService>.Instance);
+                new FakeCrmNotifier(), new FakeJitsiTokenService(), _notifications, CreateUserService(),
+                new ConfigurationBuilder().Build(), NullLogger<DemoBookingService>.Instance);
 
             // An SMTP failure (confirmed in production logs as an uncaught exception here) must
             // not turn an already-committed booking into a 500 — the booking is real by the time
@@ -5154,7 +5246,7 @@ namespace iucs.readernest.tests
             var service1 = CreateStoreService();
             var service2 = new StoreService(
                 uow2, auditLog2,
-                new DemoBookingService(uow2, auditLog2, _emailSender, emailTemplates2, new FakeCrmNotifier(), new FakeJitsiTokenService(), notifications2, userService2, NullLogger<DemoBookingService>.Instance));
+                new DemoBookingService(uow2, auditLog2, _emailSender, emailTemplates2, new FakeCrmNotifier(), new FakeJitsiTokenService(), notifications2, userService2, new ConfigurationBuilder().Build(), NullLogger<DemoBookingService>.Instance));
 
             var request1 = new CreateStoreDemoBookingRequest
             {
