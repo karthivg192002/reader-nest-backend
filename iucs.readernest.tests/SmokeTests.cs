@@ -7859,6 +7859,33 @@ namespace iucs.readernest.tests
             }
         }
 
+        /// <summary>
+        /// "Bulk Email History"'s other view: every individual email, none of a Bulk Email's own
+        /// per-recipient copies (those stay covered by GetBulkEmailHistoryAsync/BlastDetail,
+        /// grouped by the send event), and the type filter actually narrows the list.
+        /// </summary>
+        [Fact]
+        public async Task GetEmailHistory_ExcludesBulkEmailCopies_AndFiltersByType()
+        {
+            var reports = new ReportsService(_db.UnitOfWork, _notifications);
+            var recipient = await _db.SeedUserAsync($"eh-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+
+            await _notifications.SendEmailAsync(recipient.Id, recipient.Email, NotificationType.PaymentReminder, "Fee due", "<p>Please pay.</p>");
+            await _notifications.SendEmailAsync(recipient.Id, recipient.Email, NotificationType.SessionReminder, "Class soon", "<p>See you soon.</p>");
+
+            var sender = await _db.SeedUserAsync($"eh-sender-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            await reports.SendBulkEmailAsync(sender.Id, new BulkEmailRequest { Subject = "Newsletter", Body = "<p>Hi</p>" });
+
+            var all = await reports.GetEmailHistoryAsync(null, 500);
+            Assert.DoesNotContain(all, e => e.Subject == "Newsletter");
+            Assert.Contains(all, e => e.Subject == "Fee due" && e.Type == NotificationType.PaymentReminder);
+            Assert.Contains(all, e => e.Subject == "Class soon" && e.Type == NotificationType.SessionReminder);
+
+            var onlyReminders = await reports.GetEmailHistoryAsync(NotificationType.SessionReminder, 500);
+            Assert.Single(onlyReminders, e => e.Subject == "Class soon");
+            Assert.DoesNotContain(onlyReminders, e => e.Subject == "Fee due");
+        }
+
         [Fact]
         public async Task TeacherPerformance_IncludesLatestPayoutSummary_StatusAndTotalOnly()
         {

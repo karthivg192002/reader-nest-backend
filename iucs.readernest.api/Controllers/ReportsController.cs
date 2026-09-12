@@ -101,6 +101,20 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _reportsService.GetBulkEmailBlastDetailAsync(id, cancellationToken));
         }
 
+        /// <summary>
+        /// Every individual (non-Bulk-Email) email sent to a user, newest first -- "Bulk Email
+        /// History"'s other view. Optional <paramref name="type"/> narrows to one NotificationType.
+        /// </summary>
+        [HttpGet("email-history")]
+        [HasPermission(PermissionModule.Communication, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<EmailHistoryItemDto>>> EmailHistory(
+            [FromQuery] NotificationType? type,
+            [FromQuery] int take = 500,
+            CancellationToken cancellationToken = default)
+        {
+            return Ok(await _reportsService.GetEmailHistoryAsync(type, take, cancellationToken));
+        }
+
         /// <summary>A parent's reply to one Bulk Email they received.</summary>
         [HttpPost("bulk-email/{recipientId:guid}/reply")]
         [Authorize(Roles = nameof(UserRole.Parent))]
