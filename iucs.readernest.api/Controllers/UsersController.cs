@@ -7,6 +7,7 @@ using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
 namespace iucs.readernest.api.Controllers
@@ -151,14 +152,20 @@ namespace iucs.readernest.api.Controllers
         /// <summary>
         /// A short, shareable link to the same room MyMeetingRoom builds -- the long form
         /// (domain/room#jwt=&lt;huge signed token&gt;) reads as broken/suspicious pasted into
-        /// WhatsApp or email. Expires with the token it wraps (6h), same as the direct link.
+        /// WhatsApp or email.
+        /// Deliberately never expires: this used to bake a 6-hour Jitsi token straight into a
+        /// /m/{slug} short-link row, so the link itself quietly stopped working mid-afternoon
+        /// for a personal room meant to be reused indefinitely (reported live: "live test demo
+        /// link not working" -- an old tab holding one of these had gone stale). Now points at
+        /// the stable, id-based <see cref="MeetingRoomJoin"/> redirect below instead, which
+        /// mints a fresh short-lived token on every click -- same "stable link, resolved live"
+        /// pattern DemoBookingService.ResolveLiveJoinUrlAsync already uses for a parent's demo
+        /// join link, and for the same reason: nothing here is baked in to go stale.
         /// </summary>
         [HttpGet("me/meeting-room/short-link")]
         [Microsoft.AspNetCore.Authorization.Authorize]
         public async Task<ActionResult<object>> MyMeetingRoomShortLink(
             [FromServices] iucs.readernest.domain.Repository.IUnitOfWork unitOfWork,
-            [FromServices] application.Common.Interfaces.IJitsiTokenService jitsiTokenService,
-            [FromServices] IShortLinkService shortLinks,
             CancellationToken cancellationToken)
         {
             var userId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value);
@@ -176,20 +183,46 @@ namespace iucs.readernest.api.Controllers
                 await unitOfWork.SaveChangesAsync(cancellationToken);
             }
 
+            var apiBaseUrl = $"{Request.Scheme}://{Request.Host}";
+            return Ok(new { url = $"{apiBaseUrl}/api/users/{userId}/meeting-room/join" });
+        }
+
+        /// <summary>
+        /// Public, anonymous redirect a guest's invite link points at -- resolves this room's
+        /// live Jitsi URL fresh on every click (a brand new, short-lived token; never a stale
+        /// baked-in one) and 302s there, exactly like DemoBookingsController.Join does for a
+        /// parent's demo link. Deliberately non-moderator: this is the *invite* link handed to
+        /// students/parents, not the room owner's own access (that's the authenticated
+        /// /meet/personal route in-app, which already re-resolves fresh on every load the same
+        /// way). Never expires by design -- see the remarks on MyMeetingRoomShortLink above.
+        /// </summary>
+        [HttpGet("{id:guid}/meeting-room/join")]
+        [AllowAnonymous]
+        [EnableRateLimiting("demo-join")]
+        public async Task<IActionResult> MeetingRoomJoin(
+            Guid id,
+            [FromServices] iucs.readernest.domain.Repository.IUnitOfWork unitOfWork,
+            [FromServices] application.Common.Interfaces.IJitsiTokenService jitsiTokenService,
+            CancellationToken cancellationToken)
+        {
+            var user = await unitOfWork.Repository<domain.Entities.Users.User>()
+                .FirstOrDefaultAsync(u => u.Id == id, cancellationToken);
+            if (user is null || string.IsNullOrEmpty(user.PersonalMeetingRoomId))
+            {
+                return NotFound("This room no longer exists.");
+            }
+
             var jitsiConfigJson = await unitOfWork.Repository<domain.Entities.Integrations.Integration>().Query()
                 .Where(i => i.Key == "jitsi")
                 .Select(i => i.ConfigJson)
                 .FirstOrDefaultAsync(cancellationToken);
             var domain = application.Helper.JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
-            var expiresAtUtc = DateTime.UtcNow.AddHours(6);
             var token = jitsiTokenService.CreateToken(
-                domain, jitsiConfigJson, user.PersonalMeetingRoomId, $"{user.FirstName} {user.LastName}".Trim(),
-                user.Email, moderator: true, expiresAtUtc);
+                domain, jitsiConfigJson, user.PersonalMeetingRoomId, "Guest",
+                participantEmail: null, moderator: false, DateTime.UtcNow.AddHours(6));
             var targetUrl = application.Helper.JitsiLinkBuilder.BuildJoinUrl(user.PersonalMeetingRoomId, jitsiConfigJson, token)!;
 
-            var slug = await shortLinks.CreateAsync(targetUrl, expiresAtUtc, userId, cancellationToken);
-            var apiBaseUrl = $"{Request.Scheme}://{Request.Host}";
-            return Ok(new { url = $"{apiBaseUrl}/m/{slug}", expiresAtUtc });
+            return Redirect(targetUrl);
         }
 
         [HttpGet("{id:guid}")]
