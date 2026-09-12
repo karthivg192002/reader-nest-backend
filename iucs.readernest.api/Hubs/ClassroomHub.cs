@@ -119,20 +119,41 @@ namespace iucs.readernest.api.Hubs
                 throw new HubException("Invalid session id.");
             }
 
-            var userIdClaim = Context.User?.FindFirstValue(ClaimTypes.NameIdentifier);
-            if (!Guid.TryParse(userIdClaim, out var userId))
+            // Jibri's headless "recording observer" page (see docs/JITSI_ARCHITECTURE.md) has no
+            // real logged-in user, so it can't pass IsSessionParticipantAsync -- it authenticates
+            // instead with a CreateRecordingObserverHubToken carrying a "purpose" +
+            // "sessionId" claim, checked here in place of (never in addition to) the normal
+            // userId/participant check. The token's own sessionId claim, not just its mere
+            // presence, must match the room being joined -- otherwise one observer token could
+            // be replayed to silently watch a different class's whiteboard/quiz traffic.
+            var isRecordingObserver = Context.User?.FindFirstValue("purpose") == "recording-observer";
+            Guid userId;
+            if (isRecordingObserver)
             {
-                throw new HubException("Not signed in.");
+                var tokenSessionId = Context.User?.FindFirstValue("sessionId");
+                if (tokenSessionId != sessionId)
+                {
+                    throw new HubException("Token is not scoped to this session.");
+                }
+                userId = Guid.Parse(Context.User!.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            }
+            else
+            {
+                var userIdClaim = Context.User?.FindFirstValue(ClaimTypes.NameIdentifier);
+                if (!Guid.TryParse(userIdClaim, out userId))
+                {
+                    throw new HubException("Not signed in.");
+                }
+
+                if (!await _sessionService.IsSessionParticipantAsync(sessionGuid, userId, Context.ConnectionAborted))
+                {
+                    await _eventLog.LogJoinDeniedAsync(sessionGuid, userId, "Not a participant of this session.", CancellationToken.None);
+                    throw new HubException("You do not have access to this session.");
+                }
             }
 
-            if (!await _sessionService.IsSessionParticipantAsync(sessionGuid, userId, Context.ConnectionAborted))
-            {
-                await _eventLog.LogJoinDeniedAsync(sessionGuid, userId, "Not a participant of this session.", CancellationToken.None);
-                throw new HubException("You do not have access to this session.");
-            }
-
-            var name = string.IsNullOrWhiteSpace(displayName) ? UserName : displayName.Trim();
-            var role = IsTeacher ? "teacher" : "student";
+            var name = isRecordingObserver ? "Recording" : (string.IsNullOrWhiteSpace(displayName) ? UserName : displayName.Trim());
+            var role = isRecordingObserver ? "observer" : (IsTeacher ? "teacher" : "student");
 
             // A room that goes fully empty (everyone disconnects, even momentarily) has its
             // in-memory Scores wiped in RemoveFromSessionAsync below — reseed from the durable
@@ -198,7 +219,12 @@ namespace iucs.readernest.api.Hubs
             // PDF's "System Marks Attendance" — join-based capture, fired now that the caller
             // is confirmed to genuinely belong to this session. Best-effort by design (see the
             // method's own doc comment); never allowed to affect the join that already succeeded.
-            await _academicOpsService.CaptureJoinAttendanceAsync(sessionGuid, userId, Context.ConnectionAborted);
+            // Skipped for the recording observer -- its userId is a throwaway synthetic id with
+            // no real attendance to record.
+            if (!isRecordingObserver)
+            {
+                await _academicOpsService.CaptureJoinAttendanceAsync(sessionGuid, userId, Context.ConnectionAborted);
+            }
         }
 
         public async Task LeaveSession(string sessionId)
@@ -492,8 +518,11 @@ namespace iucs.readernest.api.Hubs
                 // LeaveSession already removed it from Rooms moments earlier; the connection then
                 // formally closing fires OnDisconnectedAsync too) — nothing left to attribute a
                 // departure to, so both the attendance capture and the event log below are
-                // naturally skipped rather than double-logging one exit as two.
+                // naturally skipped rather than double-logging one exit as two. Also excludes the
+                // recording observer (see JoinSession) -- its userId is a throwaway synthetic id
+                // with no real attendance or leave event to record.
                 if (removedState is not null
+                    && removedState.Role != "observer"
                     && Guid.TryParse(sessionId, out var sessionGuid)
                     && Guid.TryParse(Context.User?.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
                 {
@@ -558,7 +587,11 @@ namespace iucs.readernest.api.Hubs
                 return;
             }
 
+            // Jibri's own "observer" connection (see JoinSession) never appears in the roster
+            // real participants see -- it's a robot, not a classmate, and the frontend's roster
+            // types/UI have no concept of a third role to render it correctly anyway.
             var roster = room
+                .Where(kv => kv.Value.Role != "observer")
                 .Select(kv => new { connectionId = kv.Key, name = kv.Value.Name, role = kv.Value.Role, handRaised = kv.Value.HandRaised })
                 .OrderByDescending(p => p.role == "teacher")
                 .ThenBy(p => p.name)

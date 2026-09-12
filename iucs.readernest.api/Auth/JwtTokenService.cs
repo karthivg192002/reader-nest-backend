@@ -53,5 +53,39 @@ namespace iucs.readernest.api.Auth
                 ExpiresAtUtc = expiresAtUtc,
             };
         }
+
+        public TokenResult CreateRecordingObserverHubToken(Guid sessionId, DateTime expiresAtUtc)
+        {
+            // A throwaway subject — nothing ever looks this id up as a real user, unlike the
+            // NameIdentifier CreateToken issues above, so it deliberately isn't a real user id.
+            var syntheticUserId = Guid.NewGuid();
+            var claims = new List<Claim>
+            {
+                new(JwtRegisteredClaimNames.Sub, syntheticUserId.ToString()),
+                new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+                new(ClaimTypes.NameIdentifier, syntheticUserId.ToString()),
+                new(ClaimTypes.Name, "Recording"),
+                new("purpose", "recording-observer"),
+                new("sessionId", sessionId.ToString()),
+            };
+
+            var credentials = new SigningCredentials(
+                new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_options.SigningKey)),
+                SecurityAlgorithms.HmacSha256);
+
+            var token = new JwtSecurityToken(
+                issuer: _options.Issuer,
+                audience: _options.Audience,
+                claims: claims,
+                notBefore: DateTime.UtcNow,
+                expires: expiresAtUtc,
+                signingCredentials: credentials);
+
+            return new TokenResult
+            {
+                AccessToken = new JwtSecurityTokenHandler().WriteToken(token),
+                ExpiresAtUtc = expiresAtUtc,
+            };
+        }
     }
 }

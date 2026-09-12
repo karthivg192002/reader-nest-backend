@@ -160,6 +160,17 @@ builder.Services
             // call — the same shape of cost this check already paid for the status-only version.
             OnTokenValidated = async context =>
             {
+                // Jibri's recording-observer token (ClassroomHub-only, see
+                // CreateRecordingObserverHubToken) carries a throwaway subject that never
+                // resolves to a real User row -- the active-account check below would always
+                // fail it. It's short-lived and scoped to one sessionId claim that
+                // ClassroomHub.JoinSession itself verifies, so there's nothing further to
+                // refresh here.
+                if (context.Principal?.FindFirstValue("purpose") == "recording-observer")
+                {
+                    return;
+                }
+
                 var userIdClaim = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
                 if (!Guid.TryParse(userIdClaim, out var userId))
                 {

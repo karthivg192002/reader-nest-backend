@@ -124,6 +124,17 @@ namespace iucs.readernest.application.Services
         /// </summary>
         Task<JitsiJoinDto> GetJitsiJoinAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// Machine-to-machine equivalent of <see cref="GetJitsiJoinAsync"/> for Jibri's headless
+        /// "recording observer" page: no signed-in caller, so authorization is "does an
+        /// InProgress ClassSession exist for this exact room right now" rather than
+        /// IsSessionParticipantAsync. Returns null (not an error) when there's no such session —
+        /// a personal room Jibri is recording ad hoc, or a startup race before the ClassSession
+        /// flips to InProgress — mirroring FinalizeJibriRecordingAsync's "not every room maps to
+        /// a trackable moment" no-op philosophy.
+        /// </summary>
+        Task<RecordingObserverJoinDto?> GetLiveObserverJoinAsync(string roomName, CancellationToken cancellationToken = default);
+
         /// <summary>Non-secret Jitsi settings (domain, auto-record) for whoever is about to join a live class.</summary>
         Task<ClassroomSettingsDto> GetClassroomSettingsAsync(CancellationToken cancellationToken = default);
 

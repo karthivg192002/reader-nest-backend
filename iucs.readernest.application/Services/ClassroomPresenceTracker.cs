@@ -30,11 +30,16 @@ namespace iucs.readernest.application.Services
         // observed case: a teacher with two browser tabs open to the same class) registers as
         // two connectionIds but must still count as one person, or every count downstream
         // (this KPI, GetLiveUsersAsync's per-session participant lists) overstates who's live.
-        public int TotalConnectedUsers => _rooms.Values.Sum(r => r.Values.Select(v => v.UserId).Distinct().Count());
+        // Jibri's "recording observer" connection (see ClassroomHub.JoinSession) is excluded
+        // from every reader below -- it's a robot, not a person, and would otherwise show up as
+        // a phantom "Recording" participant in the admin's live-users dashboard.
+        public int TotalConnectedUsers => _rooms.Values.Sum(r => r.Values.Where(IsRealPerson).Select(v => v.UserId).Distinct().Count());
 
-        public int ActiveClassCount => _rooms.Count;
+        public int ActiveClassCount => _rooms.Values.Count(room => room.Values.Any(IsRealPerson));
 
         public IReadOnlyList<LivePresenceEntry> GetLiveConnections() =>
-            _rooms.Values.SelectMany(room => room.Values).ToList();
+            _rooms.Values.SelectMany(room => room.Values).Where(IsRealPerson).ToList();
+
+        private static bool IsRealPerson(LivePresenceEntry entry) => entry.Role != "observer";
     }
 }

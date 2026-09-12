@@ -211,6 +211,11 @@ namespace iucs.readernest.tests
         {
             return new TokenResult { AccessToken = "test-token", ExpiresAtUtc = DateTime.UtcNow.AddHours(1) };
         }
+
+        public TokenResult CreateRecordingObserverHubToken(Guid sessionId, DateTime expiresAtUtc)
+        {
+            return new TokenResult { AccessToken = "test-observer-hub-token", ExpiresAtUtc = expiresAtUtc };
+        }
     }
 
     /// <summary>Mirrors production's "unconfigured" state (no appId/appSecret) — always returns no token.</summary>
@@ -231,6 +236,12 @@ namespace iucs.readernest.tests
 
         public bool ValidateFinalizeToken(string? bearerToken, string? jitsiConfigJson, string expectedRoom)
             => ValidateFinalizeTokenResult;
+
+        public string? CreateRecordingObserverToken(
+            string domain,
+            string? jitsiConfigJson,
+            string room,
+            DateTime expiresAtUtc) => null;
     }
 
     /// <summary>

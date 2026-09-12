@@ -87,6 +87,26 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _sessionService.GetJitsiJoinAsync(id, userId, cancellationToken));
         }
 
+        /// <summary>
+        /// Machine-to-machine: nginx on the Jitsi server proxies Jibri's own top-level
+        /// navigation to /&lt;room&gt; here (see docs/JITSI_ARCHITECTURE.md's recording-observer
+        /// section) instead of the bare Jitsi Meet SPA, so the recording captures our whiteboard/
+        /// quiz overlay, not just raw video tiles. Deliberately anonymous — Jibri's headless
+        /// Chrome has no logged-in user — but the token it hands back only ever admits a
+        /// moderator-less participant into one specific, currently-InProgress room, same bounded
+        /// trust model as recordings/finalize. Returns 204 when the room has no InProgress
+        /// session right now (e.g. a personal room, or a startup race).
+        /// </summary>
+        [HttpGet("recordings/observer-join")]
+        [AllowAnonymous]
+        public async Task<ActionResult<RecordingObserverJoinDto>> GetRecordingObserverJoin(
+            [FromQuery] string room,
+            CancellationToken cancellationToken)
+        {
+            var join = await _sessionService.GetLiveObserverJoinAsync(room, cancellationToken);
+            return join is null ? NoContent() : Ok(join);
+        }
+
         /// <summary>Non-secret Jitsi settings (domain, auto-record) for whoever is about to join a live class.</summary>
         [HttpGet("classroom-settings")]
         [Authorize]
