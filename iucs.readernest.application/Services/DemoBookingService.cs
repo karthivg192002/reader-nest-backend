@@ -2,6 +2,7 @@ using System.Text.Json;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Admission;
+using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Dto.Users;
 using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
@@ -14,6 +15,7 @@ using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using iucs.readernest.domain.Repository;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace iucs.readernest.application.Services
@@ -31,6 +33,8 @@ namespace iucs.readernest.application.Services
         private readonly IJitsiTokenService _jitsiTokenService;
         private readonly INotificationService _notificationService;
         private readonly IUserService _userService;
+        private readonly ISessionService _sessionService;
+        private readonly IConfiguration _configuration;
         private readonly ILogger<DemoBookingService> _logger;
 
         public DemoBookingService(
@@ -42,6 +46,8 @@ namespace iucs.readernest.application.Services
             IJitsiTokenService jitsiTokenService,
             INotificationService notificationService,
             IUserService userService,
+            ISessionService sessionService,
+            IConfiguration configuration,
             ILogger<DemoBookingService> logger)
         {
             _unitOfWork = unitOfWork;
@@ -52,6 +58,8 @@ namespace iucs.readernest.application.Services
             _jitsiTokenService = jitsiTokenService;
             _notificationService = notificationService;
             _userService = userService;
+            _sessionService = sessionService;
+            _configuration = configuration;
             _logger = logger;
         }
 
@@ -209,6 +217,73 @@ namespace iucs.readernest.application.Services
             }, cancellationToken);
 
             return await GetAsync(booking.Id, cancellationToken);
+        }
+
+        /// <summary>
+        /// Permanently removes a demo booking (a test entry, a mistaken double-booking) -- see
+        /// the interface's own remarks for the guard on already-converted leads. Every repository
+        /// Remove() here is the app-wide soft delete (IsDeleted, filtered out of every query
+        /// going forward) rather than a real SQL DELETE, so this is safe against the FK-Restrict
+        /// convention every relationship in this schema uses (no cascade to fight).
+        /// </summary>
+        public async Task DeleteAsync(Guid bookingId, CancellationToken cancellationToken = default)
+        {
+            // Tracked, not the no-tracking Query() the rest of this method's reads use -- booking
+            // and its Included Participants must come off the SAME tracked graph that gets
+            // Remove()'d below, or re-attaching a second, separately-queried copy of an entity
+            // EF already tracks throws "already being tracked" (confirmed: this is exactly what
+            // a detached Query() + Remove() on the same rows did here originally).
+            var booking = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
+                .Include(b => b.Participants)
+                .FirstOrDefaultAsync(b => b.Id == bookingId, cancellationToken)
+                ?? throw new NotFoundException(nameof(DemoBooking), bookingId);
+
+            if (booking.InvoiceId.HasValue || booking.ConversionStatus == ConversionStatus.Enrolled)
+            {
+                throw new DomainValidationException(
+                    "This booking is already invoiced or enrolled -- change its conversion status instead of deleting it.");
+            }
+
+            // Frees the teacher's slot the same way any other cancelled class does, reusing
+            // SessionService's own cancellation rather than duplicating that status/audit logic
+            // here. A session that's already terminal (cancelled/completed/etc.) has nothing
+            // left to free -- fine to just proceed with deleting the booking itself.
+            if (booking.ClassSessionId is { } sessionId)
+            {
+                try
+                {
+                    await _sessionService.CancelAsync(
+                        sessionId,
+                        new CancelSessionRequest { Reason = "Demo booking deleted" },
+                        cancellationToken);
+                }
+                catch (Exception ex) when (ex is DomainValidationException or NotFoundException)
+                {
+                    _logger.LogInformation(
+                        ex, "Demo booking {BookingId}'s session {SessionId} was already terminal or missing; deleting the booking anyway.",
+                        bookingId, sessionId);
+                }
+            }
+
+            // Feedback isn't reachable through booking.Participants -- deleted separately so it
+            // doesn't linger, visible to nobody, once its parent booking is gone.
+            var feedbacks = await _unitOfWork.Repository<DemoFeedback>().Query()
+                .Where(f => f.DemoBookingId == bookingId)
+                .ToListAsync(cancellationToken);
+            foreach (var feedback in feedbacks)
+            {
+                _unitOfWork.Repository<DemoFeedback>().Remove(feedback);
+            }
+
+            foreach (var participant in booking.Participants)
+            {
+                _unitOfWork.Repository<DemoParticipant>().Remove(participant);
+            }
+
+            _unitOfWork.Repository<DemoBooking>().Remove(booking);
+
+            await _auditLog.StageAsync(AuditAction.Delete, nameof(DemoBooking), booking.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
         /// <summary>
@@ -723,27 +798,91 @@ namespace iucs.readernest.application.Services
         }
 
         /// <summary>
-        /// The parent's join link for this demo (plus the moment it stops working), for staff to
-        /// copy and share manually (WhatsApp, SMS) instead of relying on the email actually
-        /// landing. Same room and link-building as the email; does not mutate anything, so unlike
-        /// ResendLinkAsync it does not self-heal a pre-fixed-link booking's room -- call
-        /// ResendLinkAsync first if that matters here.
+        /// The parent's join link for this demo, for staff to copy and share manually (WhatsApp,
+        /// SMS) instead of relying on the email actually landing. The same stable /join redirect
+        /// the confirmation email carries (see BuildStableJoinUrl) rather than a raw,
+        /// moment-in-time Jitsi URL -- staff used to be able to copy a link whose room/domain was
+        /// correct when copied but went stale (404) by the time a parent actually opened it days
+        /// later; this one re-resolves everything fresh on every click and never expires (see
+        /// ResolveLiveJoinUrlAsync), so "copy it now" and "click it next month" behave identically.
         /// </summary>
-        public async Task<(string JoinUrl, DateTime ExpiresAtUtc)> GetJoinLinkAsync(Guid bookingId, CancellationToken cancellationToken = default)
+        public async Task<string> GetJoinLinkAsync(Guid bookingId, CancellationToken cancellationToken = default)
+        {
+            var exists = await _unitOfWork.Repository<DemoBooking>().ExistsAsync(b => b.Id == bookingId, cancellationToken);
+            if (!exists)
+            {
+                throw new NotFoundException(nameof(DemoBooking), bookingId);
+            }
+
+            return BuildStableJoinUrl(bookingId, participantId: null);
+        }
+
+        /// <summary>
+        /// Resolves a parent/participant's join link fresh, right now -- see the interface's own
+        /// remarks for the staleness problem this replaces (a static domain/token baked into an
+        /// email or copied link, versus a teacher's always-fresh authenticated join). Public,
+        /// unauthenticated callers reach this only through DemoBookingsController's anonymous
+        /// GET /join redirect -- never expose the raw signed URL this returns from an endpoint
+        /// requiring no proof of identity beyond knowing the booking id.
+        /// Deliberately no time-based cutoff: a demo that ran long, got revisited weeks later for
+        /// a recap, or whose invite just sat unopened all still resolve -- the only things that
+        /// make this return null are the booking/session/room not existing, or an unrelated
+        /// participant id. (The link dies the moment the booking itself is deleted -- see
+        /// DeleteAsync -- not on any clock.)
+        /// </summary>
+        public async Task<string?> ResolveLiveJoinUrlAsync(Guid bookingId, Guid? participantId, CancellationToken cancellationToken = default)
         {
             var booking = await _unitOfWork.Repository<DemoBooking>().Query()
                 .Include(b => b.ClassSession)
-                .FirstOrDefaultAsync(b => b.Id == bookingId, cancellationToken)
-                ?? throw new NotFoundException(nameof(DemoBooking), bookingId);
+                .Include(b => b.Participants)
+                .FirstOrDefaultAsync(b => b.Id == bookingId, cancellationToken);
 
-            if (booking.ClassSession is not { } session)
+            if (booking?.ClassSession is not { } session || string.IsNullOrWhiteSpace(session.MeetingRoomId))
             {
-                throw new DomainValidationException("This booking has no linked class session to build a link for.");
+                return null;
             }
 
-            var expiresAtUtc = session.ScheduledEndAtUtc.AddHours(2);
-            var joinUrl = await BuildDemoJoinUrlAsync(session, booking.ParentName, booking.ParentEmail, moderator: false, cancellationToken);
-            return (joinUrl, expiresAtUtc);
+            string participantName;
+            string participantEmail;
+            if (participantId.HasValue)
+            {
+                var participant = booking.Participants.FirstOrDefault(p => p.Id == participantId.Value);
+                if (participant is null || string.IsNullOrWhiteSpace(participant.Email))
+                {
+                    return null;
+                }
+                participantName = participant.Name;
+                participantEmail = participant.Email!;
+            }
+            else
+            {
+                participantName = booking.ParentName;
+                participantEmail = booking.ParentEmail;
+            }
+
+            return await BuildDemoJoinUrlAsync(session, participantName, participantEmail, moderator: false, cancellationToken);
+        }
+
+        /// <summary>
+        /// The link actually handed to a parent/invitee (email, resend, or staff's "Copy Link")
+        /// -- a stable pointer at this booking's own public join redirect
+        /// (DemoBookingsController.Join → ResolveLiveJoinUrlAsync) rather than a raw Jitsi URL
+        /// with the domain and a signed token already baked in. Baking those in at send time is
+        /// exactly what went stale: reported live as a parent's join link 404-ing while the
+        /// teacher's own join kept working — traced to the old /join-link short link's target
+        /// (or the raw URL's baked-in domain/token) drifting from what's current by the time it
+        /// was actually opened, something a teacher's always-fresh authenticated join never hits.
+        /// This link instead re-resolves both on every single click, so it can't go stale that
+        /// way no matter how long it sits in an inbox.
+        /// `Api:BaseUrl` lets a deployment override its own public origin explicitly; falling
+        /// back to the current production API host keeps this working out of the box without
+        /// that config needing to exist first.
+        /// </summary>
+        private string BuildStableJoinUrl(Guid bookingId, Guid? participantId)
+        {
+            var apiBaseUrl = (_configuration["Api:BaseUrl"] ?? "https://api.thereadernest.in").TrimEnd('/');
+            var query = participantId.HasValue ? $"?p={participantId.Value}" : string.Empty;
+            return $"{apiBaseUrl}/api/demo-bookings/{bookingId}/join{query}";
         }
 
         public async Task<IReadOnlyList<TeacherWorkloadDto>> GetTeacherWorkloadAsync(
@@ -957,6 +1096,14 @@ namespace iucs.readernest.application.Services
         /// expiring a couple of hours past the demo) instead of a bare room name that would
         /// work forever for anyone who ever saw the email.
         /// </summary>
+        // No appId/appSecret configured on this deployment's "jitsi" Integration today means
+        // CreateToken already returns null (unsigned join) regardless of this value -- but if
+        // JWT room auth is ever turned on, a token minted with this expiry must not itself
+        // become the next dead-link bug. "No expire" only meant not tying the link's window to
+        // ScheduledEndAtUtc; still bounded (not literally forever) so a leaked token can't be
+        // replayed indefinitely.
+        private static readonly TimeSpan JoinTokenLifetime = TimeSpan.FromDays(365 * 5);
+
         private async Task<string> BuildDemoJoinUrlAsync(
             ClassSession session, string participantName, string participantEmail, bool moderator, CancellationToken cancellationToken)
         {
@@ -970,7 +1117,7 @@ namespace iucs.readernest.application.Services
                 jitsiConfigJson,
                 _jitsiTokenService.CreateToken(
                     domain, jitsiConfigJson, session.MeetingRoomId!, participantName, participantEmail,
-                    moderator, session.ScheduledEndAtUtc.AddHours(2)),
+                    moderator, DateTime.UtcNow.Add(JoinTokenLifetime)),
                 participantName)
                 ?? "#";
         }
@@ -995,7 +1142,7 @@ namespace iucs.readernest.application.Services
                     {
                         ["ChildName"] = booking.ChildName,
                         ["WhenLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc),
-                        ["JoinUrl"] = await BuildDemoJoinUrlAsync(session, booking.ParentName, booking.ParentEmail, moderator: false, cancellationToken),
+                        ["JoinUrl"] = BuildStableJoinUrl(booking.Id, participantId: null),
                     },
                     cancellationToken);
                 await _emailSender.SendAsync(booking.ParentEmail, parentSubject, parentHtml, cancellationToken);
@@ -1007,7 +1154,7 @@ namespace iucs.readernest.application.Services
                         {
                             ["ChildName"] = booking.ChildName,
                             ["WhenLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc),
-                            ["JoinUrl"] = await BuildDemoJoinUrlAsync(session, participant.Name, participant.Email!, moderator: false, cancellationToken),
+                            ["JoinUrl"] = BuildStableJoinUrl(booking.Id, participant.Id),
                         },
                         cancellationToken);
                     await _emailSender.SendAsync(participant.Email!, participantSubject, participantHtml, cancellationToken);
