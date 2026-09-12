@@ -1,4 +1,5 @@
 using iucs.readernest.application.Dto.Admission;
+using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.domain.Enums;
 
 namespace iucs.readernest.application.Services
@@ -54,6 +55,19 @@ namespace iucs.readernest.application.Services
         /// confirmation email. Always uses the teacher's current fixed personal room.
         /// </summary>
         Task<DemoBookingDto> ResendLinkAsync(Guid bookingId, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Moves a still-scheduled demo to a new date/time. Reuses ISessionService.RescheduleAsync
+        /// on the booking's linked session (same holiday/teacher-availability checks a regular
+        /// session's reschedule enforces), re-points the booking at the resulting replacement
+        /// session, and re-sends the parent/teacher confirmation emails with the new time — the
+        /// same templates ResendLinkAsync uses. Before this, staff had no way to just move a demo:
+        /// only Cancel (kills the lead) or Delete (loses the record) existed.
+        /// </summary>
+        Task<DemoBookingDto> RescheduleAsync(
+            Guid bookingId,
+            RescheduleSessionRequest request,
+            CancellationToken cancellationToken = default);
 
         /// <summary>The parent's join link for this demo, for staff to copy and share manually. Never expires.</summary>
         Task<string> GetJoinLinkAsync(Guid bookingId, CancellationToken cancellationToken = default);

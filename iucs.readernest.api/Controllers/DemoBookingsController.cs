@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using iucs.readernest.api.Auth;
 using iucs.readernest.application.Dto.Admission;
+using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
 using Microsoft.AspNetCore.Authorization;
@@ -113,6 +114,18 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             return Ok(await _demoBookingService.ReassignTeacherAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>Move a still-scheduled demo to a new date/time. Notifies the parent, invitees
+        /// and teacher with the new time, same as resend-link.</summary>
+        [HttpPut("{id:guid}/reschedule")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<DemoBookingDto>> Reschedule(
+            Guid id,
+            RescheduleSessionRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _demoBookingService.RescheduleAsync(id, request, cancellationToken));
         }
 
         /// <summary>Manually re-send the demo's join link to the parent, invitees and teacher.</summary>

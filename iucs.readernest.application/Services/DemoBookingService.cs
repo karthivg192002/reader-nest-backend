@@ -797,6 +797,58 @@ namespace iucs.readernest.application.Services
             return await GetAsync(bookingId, cancellationToken);
         }
 
+        public async Task<DemoBookingDto> RescheduleAsync(
+            Guid bookingId,
+            RescheduleSessionRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var booking = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
+                .Include(b => b.Participants)
+                .FirstOrDefaultAsync(b => b.Id == bookingId, cancellationToken)
+                ?? throw new NotFoundException(nameof(DemoBooking), bookingId);
+
+            // Same boundary ReassignTeacherAsync enforces — the frontend only offers this for a
+            // still-scheduled demo, but that's a UI convenience, not the actual gate.
+            if (booking.ConversionStatus != ConversionStatus.DemoScheduled)
+            {
+                throw new DomainValidationException("Only a demo that is still scheduled can be rescheduled.");
+            }
+
+            if (booking.ClassSessionId is not { } classSessionId)
+            {
+                throw new DomainValidationException("This booking has no linked class session to reschedule.");
+            }
+
+            // ISessionService.RescheduleAsync already runs the holiday check and the teacher's
+            // own availability check, and creates a brand new ClassSession row linked back to the
+            // original (see its own remarks — a reschedule is a fresh calendar entry, not an
+            // in-place time edit, so history stays traceable). This booking's ClassSessionId has
+            // to follow that new row, or every screen reading through it — including the parent's
+            // own join link — would keep resolving against the old, now-Rescheduled session.
+            var newSession = await _sessionService.RescheduleAsync(classSessionId, request, cancellationToken);
+            booking.ClassSessionId = newSession.Id;
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(DemoBooking), booking.Id.ToString(),
+                changesJson: $"{{\"rescheduledSessionId\":\"{newSession.Id}\"}}", cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            var demoSession = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .FirstOrDefaultAsync(s => s.Id == newSession.Id, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), newSession.Id);
+            var teacher = await EnsureTeacherMeetingRoomAsync(demoSession.TeacherProfileId, cancellationToken);
+
+            // Same "don't let parent/teacher find out the time changed some other way" reasoning
+            // as ResendLinkAsync — reuses the exact same templates, just with the new time now
+            // baked into WhenLocal via SendParentDemoLinkEmailsAsync reading session.ScheduledStartAtUtc.
+            await SendParentDemoLinkEmailsAsync(demoSession, booking, cancellationToken);
+            await SendTeacherDemoLinkEmailAsync(
+                demoSession, booking, teacher, "demo-scheduled-teacher",
+                new Dictionary<string, string> { ["ParentName"] = booking.ParentName },
+                cancellationToken);
+
+            return await GetAsync(bookingId, cancellationToken);
+        }
+
         /// <summary>
         /// The parent's join link for this demo, for staff to copy and share manually (WhatsApp,
         /// SMS) instead of relying on the email actually landing. The same stable /join redirect
