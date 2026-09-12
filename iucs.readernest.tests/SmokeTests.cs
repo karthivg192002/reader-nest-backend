@@ -80,10 +80,11 @@ namespace iucs.readernest.tests
 
         private StoreService CreateStoreService() => new(_db.UnitOfWork, _auditLog, CreateDemoBookingService());
 
-        private SessionService CreateSessionService() => new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, new FakeJitsiTokenService());
+        private SessionService CreateSessionService() =>
+            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, new FakeJitsiTokenService(), new FakeTokenService());
 
         private SessionService CreateSessionService(FakeJitsiTokenService jitsiTokens) =>
-            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, jitsiTokens);
+            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, jitsiTokens, new FakeTokenService());
 
         private BillingService CreateBillingService() =>
             new(_db.UnitOfWork, _auditLog, new FakePaymentGateway(), _notifications, _db.CurrentUser, _bulkFileReader, _invoicePdfGenerator);

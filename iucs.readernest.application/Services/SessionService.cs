@@ -34,6 +34,7 @@ namespace iucs.readernest.application.Services
         private readonly INotificationService _notificationService;
         private readonly ICurrentUserService _currentUser;
         private readonly IJitsiTokenService _jitsiTokenService;
+        private readonly ITokenService _tokenService;
 
         public SessionService(
             IUnitOfWork unitOfWork,
@@ -41,7 +42,8 @@ namespace iucs.readernest.application.Services
             IPayoutService payoutService,
             INotificationService notificationService,
             ICurrentUserService currentUser,
-            IJitsiTokenService jitsiTokenService)
+            IJitsiTokenService jitsiTokenService,
+            ITokenService tokenService)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
@@ -49,6 +51,7 @@ namespace iucs.readernest.application.Services
             _notificationService = notificationService;
             _currentUser = currentUser;
             _jitsiTokenService = jitsiTokenService;
+            _tokenService = tokenService;
         }
 
         public async Task<IReadOnlyList<ClassSessionDto>> ListAsync(
@@ -954,6 +957,53 @@ namespace iucs.readernest.application.Services
             return new JitsiJoinDto { Room = session.MeetingRoomId, Domain = domain, Token = token, ScheduledEndAtUtc = session.ScheduledEndAtUtc };
         }
 
+        public async Task<RecordingObserverJoinDto?> GetLiveObserverJoinAsync(string roomName, CancellationToken cancellationToken = default)
+        {
+            // Disambiguation is simpler than FinalizeJibriRecordingAsync's closest-scheduled-end
+            // heuristic: "InProgress right now" is unambiguous for a room that can only be one
+            // class at a time on this deployment, whereas finalize runs after the fact against
+            // every historical session that ever used the room.
+            var candidates = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.MeetingRoomId == roomName && s.Status == SessionStatus.InProgress)
+                .ToListAsync(cancellationToken);
+
+            if (candidates.Count == 0)
+            {
+                return null;
+            }
+
+            // Shouldn't happen -- but FinalizeJibriRecordingAsync's own history shows "shouldn't
+            // happen" has happened before for this same MeetingRoomId-sharing pattern. Earliest
+            // start keeps this deterministic rather than throwing, since Jibri can't react to an
+            // error here anyway.
+            var session = candidates.Count == 1
+                ? candidates[0]
+                : candidates.MinBy(s => s.ActualStartAtUtc ?? s.ScheduledStartAtUtc)!;
+
+            var jitsiConfigJson = await _unitOfWork.Repository<Integration>().Query()
+                .Where(i => i.Key == "jitsi")
+                .Select(i => i.ConfigJson)
+                .FirstOrDefaultAsync(cancellationToken);
+            var domain = JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
+            // A generous ceiling rather than tied to ScheduledEndAtUtc like a real participant's
+            // token -- a class running long shouldn't have its own recording observer's access
+            // expire mid-capture.
+            var expiresAtUtc = DateTime.UtcNow.AddHours(4);
+
+            var token = _jitsiTokenService.CreateRecordingObserverToken(domain, jitsiConfigJson, roomName, expiresAtUtc);
+            var hubToken = _tokenService.CreateRecordingObserverHubToken(session.Id, expiresAtUtc).AccessToken;
+
+            return new RecordingObserverJoinDto
+            {
+                SessionId = session.Id,
+                Room = roomName,
+                Domain = domain,
+                Token = token,
+                HubToken = hubToken,
+                ExpiresAtUtc = expiresAtUtc,
+            };
+        }
+
         public async Task<ClassroomSettingsDto> GetClassroomSettingsAsync(CancellationToken cancellationToken = default)
         {
             var configJson = await _unitOfWork.Repository<Integration>().Query()
@@ -1016,6 +1066,7 @@ namespace iucs.readernest.application.Services
                     var activity = group.Where(e => e.Type is EngagementEventType.ActivityClick or EngagementEventType.ActivityCompleted).Sum(e => e.Value);
                     var whiteboard = group.Where(e => e.Type == EngagementEventType.WhiteboardInteraction).Sum(e => e.Value);
                     var attention = group.Where(e => e.Type == EngagementEventType.AttentionPing).Sum(e => e.Value);
+                    var screenShare = group.Where(e => e.Type == EngagementEventType.ScreenShareSeconds).Sum(e => e.Value);
 
                     var score = EngagementScoring.Score(quizCorrect, quizAttempts, activity, whiteboard, attention);
 
@@ -1028,6 +1079,7 @@ namespace iucs.readernest.application.Services
                         ActivityInteractions = activity,
                         WhiteboardInteractions = whiteboard,
                         AttentionPings = attention,
+                        ScreenShareSeconds = screenShare,
                         EngagementScore = score,
                         LearningOutcome = score >= 60 ? "on-track" : score >= 30 ? "needs-encouragement" : "needs-attention",
                     };
@@ -1061,6 +1113,17 @@ namespace iucs.readernest.application.Services
             if (quizAttempts > 0)
             {
                 summary += $" {engagement.Sum(e => e.QuizCorrect)}/{quizAttempts} quiz answers correct.";
+            }
+
+            // Durable "was the whiteboard actually captured" signal (see
+            // EngagementEventType.ScreenShareSeconds) -- silent when zero rather than warning,
+            // since most sessions predate this feature and haven't adopted it yet; a warning
+            // on every one of those would be noise, not signal.
+            var screenShareSeconds = engagement.Sum(e => e.ScreenShareSeconds);
+            if (screenShareSeconds > 0)
+            {
+                var screenShareMinutes = Math.Max(1, screenShareSeconds / 60);
+                summary += $" Screen-shared for ~{screenShareMinutes} min — the recording should include the whiteboard.";
             }
 
             return summary;

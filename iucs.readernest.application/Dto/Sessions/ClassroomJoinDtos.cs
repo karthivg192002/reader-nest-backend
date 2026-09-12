@@ -16,6 +16,28 @@ namespace iucs.readernest.application.Dto.Sessions
         public DateTime ScheduledEndAtUtc { get; set; }
     }
 
+    /// <summary>
+    /// Everything Jibri's headless "recording observer" page needs to join the same call and
+    /// ClassroomHub session a real teacher would see — see docs/JITSI_ARCHITECTURE.md's
+    /// recording-observer section and SessionService.GetLiveObserverJoinAsync.
+    /// </summary>
+    public class RecordingObserverJoinDto
+    {
+        public Guid SessionId { get; set; }
+
+        public string Room { get; set; } = null!;
+
+        public string Domain { get; set; } = null!;
+
+        /// <summary>Null when the deployment hasn't been configured for token-verified joins yet — same caveat as JitsiJoinDto.Token.</summary>
+        public string? Token { get; set; }
+
+        /// <summary>Bearer token for ClassroomHub only (see CreateRecordingObserverHubToken) — not the same signing key/audience as <see cref="Token"/>, which is Jitsi's own.</summary>
+        public string? HubToken { get; set; }
+
+        public DateTime ExpiresAtUtc { get; set; }
+    }
+
     /// <summary>Non-secret Jitsi settings the classroom screen needs before it joins.</summary>
     public class ClassroomSettingsDto
     {
