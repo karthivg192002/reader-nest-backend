@@ -387,12 +387,29 @@ namespace iucs.readernest.application.Services
             var sendingVideoTask = jvbMetric("jitsi_jvb_endpoints_sending_video");
             var stressTask = jvbMetric("jitsi_jvb_stress");
             var jvbHealthyTask = jvbMetric("jitsi_jvb_healthy");
+            // jitsi_jvb_ice_succeeded(_relayed)_total come from the same native JVB endpoint --
+            // "relayed" means the winning ICE candidate pair used the Cloudflare TURN fallback
+            // (see turn-credentials-refresh.sh) instead of a direct UDP path, i.e. this
+            // participant would likely have had no working audio/video before that fix.
+            var iceSucceededTask = jvbMetric("jitsi_jvb_ice_succeeded_total");
+            var iceSucceededRelayedTask = jvbMetric("jitsi_jvb_ice_succeeded_relayed_total");
+
+            // rn_turn_credentials_* come from the same textfile-collector mechanism as
+            // rn_service_active -- published by turn-credentials-refresh.sh each time it runs
+            // (see /opt/rn-monitoring/turn-credentials-refresh.sh on the Jitsi box).
+            var turnRefreshedTask = server.TracksLiveCalls
+                ? _prometheus.QueryScalarAsync(baseUrl, $"rn_turn_credentials_refreshed_timestamp_seconds{{instance=\"{instanceLabel}\"}}", cancellationToken)
+                : Task.FromResult<double?>(null);
+            var turnTtlTask = server.TracksLiveCalls
+                ? _prometheus.QueryScalarAsync(baseUrl, $"rn_turn_credentials_ttl_seconds{{instance=\"{instanceLabel}\"}}", cancellationToken)
+                : Task.FromResult<double?>(null);
 
             await Task.WhenAll(
                 upTask, freshnessTask, cpuCoresTask, cpuUsageTask, memUsedPercentTask, memTotalTask, swapTotalTask, swapFreeTask,
                 diskUsedPercentTask, diskTotalTask, loadTask, uptimeTask, servicesTask, containerCpuTask, containerMemTask, conferencesTask, participantsTask,
                 netRxTask, netTxTask, diskReadTask, diskWriteTask,
                 rttTask, lossInTask, lossOutTask, bitrateInTask, bitrateOutTask, sendingAudioTask, sendingVideoTask, stressTask, jvbHealthyTask,
+                iceSucceededTask, iceSucceededRelayedTask, turnRefreshedTask, turnTtlTask,
                 jibriTotalTask, jibriBusyTask, jibriMinTask, jibriMaxTask);
 
             var up = await upTask;
@@ -453,6 +470,22 @@ namespace iucs.readernest.application.Services
                     EndpointsSendingVideo = (int)(await sendingVideoTask ?? 0),
                     JvbStressPercent = Math.Clamp((await stressTask ?? 0) * 100, 0, 100),
                     JvbHealthy = jvbHealthy == 1,
+                }
+                : null;
+
+            var turnRefreshedAt = await turnRefreshedTask;
+            var iceSucceeded = await iceSucceededTask ?? 0;
+            var iceSucceededRelayed = await iceSucceededRelayedTask ?? 0;
+            TurnStatusDto? turnStatus = server.TracksLiveCalls && turnRefreshedAt is not null
+                ? new TurnStatusDto
+                {
+                    LastRefreshedAtUtc = DateTimeOffset.FromUnixTimeSeconds((long)turnRefreshedAt.Value).UtcDateTime,
+                    SecondsSinceRefresh = Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeSeconds() - turnRefreshedAt.Value),
+                    CredentialsTtlSeconds = await turnTtlTask ?? 0,
+                    CredentialsHealthy = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - turnRefreshedAt.Value < (await turnTtlTask ?? 86400),
+                    IceSucceededTotal = (long)iceSucceeded,
+                    IceSucceededRelayedTotal = (long)iceSucceededRelayed,
+                    RelayedUsagePercent = iceSucceeded > 0 ? Math.Round(iceSucceededRelayed / iceSucceeded * 100, 1) : 0,
                 }
                 : null;
 
@@ -539,6 +572,7 @@ namespace iucs.readernest.application.Services
                 CpuHistory = (await cpuHistoryTask).Select(p => new TimeSeriesPointDto { Timestamp = p.Timestamp, Value = Clamp(p.Value) }).ToList(),
                 MemoryHistory = (await memHistoryTask).Select(p => new TimeSeriesPointDto { Timestamp = p.Timestamp, Value = Clamp(p.Value) }).ToList(),
                 CallQuality = callQuality,
+                TurnStatus = turnStatus,
                 DiskForecast = diskForecast,
                 ContainerMetrics = containerMetrics,
                 CapacityTrend = capacityTrend,

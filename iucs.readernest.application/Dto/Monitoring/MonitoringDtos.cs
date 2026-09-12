@@ -72,6 +72,30 @@ namespace iucs.readernest.application.Dto.Monitoring
     }
 
     /// <summary>
+    /// Health of the Cloudflare Calls TURN fallback (see docs/JITSI_ARCHITECTURE.md) that lets
+    /// clients on UDP-blocking networks still reach the JVB. Populated only for the Jitsi server,
+    /// and only once /opt/rn-monitoring/turn-credentials-refresh.sh has published its textfile
+    /// metric at least once.
+    /// </summary>
+    public class TurnStatusDto
+    {
+        /// <summary>False means the last refresh is older than its own requested TTL — the credentials Prosody is
+        /// currently advertising may have expired, most likely because the refresh cron job stopped running.</summary>
+        public bool CredentialsHealthy { get; set; }
+        public DateTime? LastRefreshedAtUtc { get; set; }
+        public double SecondsSinceRefresh { get; set; }
+        /// <summary>TTL the refresh script requested from Cloudflare for the current credentials (seconds).</summary>
+        public double CredentialsTtlSeconds { get; set; }
+        /// <summary>Total ICE negotiations JVB has completed successfully since it last started.</summary>
+        public long IceSucceededTotal { get; set; }
+        /// <summary>Of those, how many selected a relayed (TURN) candidate pair -- i.e. actually needed the
+        /// fallback because a direct UDP path to the JVB wasn't available for that participant.</summary>
+        public long IceSucceededRelayedTotal { get; set; }
+        /// <summary>0 when IceSucceededTotal is 0 (no data yet), not a divide-by-zero NaN.</summary>
+        public double RelayedUsagePercent { get; set; }
+    }
+
+    /// <summary>
     /// One server's point-in-time health, as reported by its own rn-status agent. <see cref="Reachable"/>
     /// false means the agent couldn't be reached at all (server down, network issue, wrong token) —
     /// every other field is then meaningless/default and the UI should show it as unknown, not "0%".
@@ -106,6 +130,7 @@ namespace iucs.readernest.application.Dto.Monitoring
         public List<TimeSeriesPointDto> CpuHistory { get; set; } = new();
         public List<TimeSeriesPointDto> MemoryHistory { get; set; } = new();
         public CallQualityDto? CallQuality { get; set; }
+        public TurnStatusDto? TurnStatus { get; set; }
         public CapacityForecastDto? DiskForecast { get; set; }
         /// <summary>Per-container CPU/memory snapshot, sorted by CPU descending — empty if the rn-container-stats.sh script hasn't published on this box yet.</summary>
         public List<ContainerMetricDto> ContainerMetrics { get; set; } = new();
