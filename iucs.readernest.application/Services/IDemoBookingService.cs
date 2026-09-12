@@ -55,8 +55,8 @@ namespace iucs.readernest.application.Services
         /// </summary>
         Task<DemoBookingDto> ResendLinkAsync(Guid bookingId, CancellationToken cancellationToken = default);
 
-        /// <summary>The parent's join link for this demo (and its expiry), for staff to copy and share manually.</summary>
-        Task<(string JoinUrl, DateTime ExpiresAtUtc)> GetJoinLinkAsync(Guid bookingId, CancellationToken cancellationToken = default);
+        /// <summary>The parent's join link for this demo, for staff to copy and share manually. Never expires.</summary>
+        Task<string> GetJoinLinkAsync(Guid bookingId, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Resolves a parent/participant's demo join link fresh, right now — the current Jitsi
@@ -69,11 +69,22 @@ namespace iucs.readernest.application.Services
         /// app, kept joining fine.
         /// <paramref name="participantId"/> null means the primary parent; otherwise the id of
         /// one of the booking's extra invitees.
-        /// Returns null when there's nothing left to join: no such booking/session, no room yet,
-        /// the given participant id doesn't belong to this booking, or the join window (through
-        /// ScheduledEndAtUtc + 2h, the same margin the signed token itself carries) has passed.
+        /// Deliberately no time-based expiry — see the implementation's own remarks. Returns null
+        /// only when there's nothing to resolve at all: no such booking/session, no room yet, or
+        /// the given participant id doesn't belong to this booking. The link dies only when the
+        /// booking itself is deleted (<see cref="DeleteAsync"/>), never on a clock.
         /// </summary>
         Task<string?> ResolveLiveJoinUrlAsync(Guid bookingId, Guid? participantId, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Permanently removes a demo booking staff no longer want on the books (a test entry, a
+        /// mistaken double-booking) — the booking, its extra invitees and any submitted feedback,
+        /// and cancels the linked class session so the teacher's slot frees up and the join link
+        /// stops resolving. Refuses once the lead has already converted to real money — invoiced
+        /// or Enrolled — since that has its own history to preserve; change its conversion status
+        /// instead of deleting those.
+        /// </summary>
+        Task DeleteAsync(Guid bookingId, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Every active teacher's load around the booking's slot, so staff can see who's

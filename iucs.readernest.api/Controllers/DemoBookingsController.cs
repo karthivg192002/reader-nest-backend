@@ -127,16 +127,16 @@ namespace iucs.readernest.api.Controllers
         /// The parent's join link for this demo -- a short, stable URL (no JWT dangling off the
         /// end that reads as broken/suspicious pasted into WhatsApp or email) staff can copy and
         /// share manually. Points at this controller's own public <see cref="Join"/> redirect,
-        /// which re-resolves the room/domain/token fresh on every click -- unlike the old
-        /// short-link wrapper this replaced, copying it now versus a parent opening it days
-        /// later behave identically instead of the latter silently 404-ing.
+        /// which re-resolves the room/domain/token fresh on every click and never expires --
+        /// unlike the old short-link wrapper this replaced, copying it now versus a parent
+        /// opening it next month behave identically instead of the latter silently 404-ing.
         /// </summary>
         [HttpGet("{id:guid}/join-link")]
         [HasPermission(PermissionModule.Admission, PermissionAction.View)]
         public async Task<ActionResult<object>> GetJoinLink(Guid id, CancellationToken cancellationToken)
         {
-            var (joinUrl, expiresAtUtc) = await _demoBookingService.GetJoinLinkAsync(id, cancellationToken);
-            return Ok(new { joinUrl, expiresAtUtc });
+            var joinUrl = await _demoBookingService.GetJoinLinkAsync(id, cancellationToken);
+            return Ok(new { joinUrl });
         }
 
         /// <summary>
@@ -146,7 +146,8 @@ namespace iucs.readernest.api.Controllers
         /// Jitsi domain and mints a fresh signed token on every single hit, so it can never go
         /// stale the way a URL with those baked in at send time could -- reported live as a
         /// parent's join link 404-ing while the teacher, who always re-resolves fresh through
-        /// the authenticated app, kept joining fine. <paramref name="p"/> selects one of the
+        /// the authenticated app, kept joining fine. Never expires -- see
+        /// ResolveLiveJoinUrlAsync's own remarks. <paramref name="p"/> selects one of the
         /// booking's extra invitees; omitted, this is the primary parent's own link.
         /// </summary>
         [HttpGet("{id:guid}/join")]
@@ -155,8 +156,21 @@ namespace iucs.readernest.api.Controllers
         {
             var url = await _demoBookingService.ResolveLiveJoinUrlAsync(id, p, cancellationToken);
             return url is null
-                ? NotFound("This demo's join window has closed, or the link is no longer valid.")
+                ? NotFound("This demo booking (or that invitee) no longer exists.")
                 : Redirect(url);
+        }
+
+        /// <summary>
+        /// Permanently removes a demo booking -- a test entry, a mistaken double-booking -- and
+        /// frees the teacher's slot. Refused once the lead is already invoiced or Enrolled; use
+        /// its conversion status for that instead (see <see cref="UpdateConversionStatus"/>).
+        /// </summary>
+        [HttpDelete("{id:guid}")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Delete)]
+        public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
+        {
+            await _demoBookingService.DeleteAsync(id, cancellationToken);
+            return NoContent();
         }
 
         /// <summary>Every active teacher's load around this booking's slot, for the reassignment page.</summary>
