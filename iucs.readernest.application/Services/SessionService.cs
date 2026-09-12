@@ -1026,7 +1026,14 @@ namespace iucs.readernest.application.Services
             {
                 throw new DomainValidationException("This class hasn't opened for joining yet.");
             }
-            if (now > session.ScheduledEndAtUtc)
+            // This deployment's Jitsi has no duration cap (see docs/LONG_DURATION_SESSIONS.md) and
+            // JitsiLive.tsx's own "Continue Class" flow exists specifically so classes can legitimately
+            // run past ScheduledEndAtUtc — but this check, enforced against the wall clock alone, still
+            // refused a rejoin for anyone (teacher or student) who disconnected after that instant, even
+            // with the class actively InProgress. Confirmed live gap, not a Jitsi limitation. InProgress
+            // sessions get no time cutoff at all now; a still-Scheduled session (never actually started)
+            // keeps the original cutoff so a stale/abandoned booking can't be joined indefinitely.
+            if (!isMonitor && session.Status != SessionStatus.InProgress && now > session.ScheduledEndAtUtc)
             {
                 throw new DomainValidationException("This class has already ended.");
             }
