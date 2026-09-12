@@ -279,6 +279,39 @@ namespace iucs.readernest.application.Dto.Reports
         public int FailureCount { get; set; }
     }
 
+    /// <summary>
+    /// One individual email actually sent to one user -- reminders, booking confirmations,
+    /// payment notices and every other system email, but never a Bulk Email's own per-recipient
+    /// copy (that's what BulkEmailHistoryItemDto/BulkEmailBlastDetailDto already cover, grouped
+    /// by the send event rather than one row per recipient). Backs "Bulk Email History"'s
+    /// non-default filter view: "every other email sent to users," itself filterable by type.
+    /// </summary>
+    public class EmailHistoryItemDto
+    {
+        public Guid Id { get; set; }
+
+        public string RecipientName { get; set; } = null!;
+
+        public string RecipientEmail { get; set; } = null!;
+
+        public string? Subject { get; set; }
+
+        public NotificationType Type { get; set; }
+
+        /// <summary>The template this was rendered from (e.g. "session-reminder-parent"), null
+        /// for a hand-built email -- more specific than Type, which several unrelated templates
+        /// can share (see Notification's own doc comment).</summary>
+        public string? TemplateKey { get; set; }
+
+        public NotificationStatus Status { get; set; }
+
+        /// <summary>Null when delivery never completed (Failed, or still Pending) -- CreatedAtUtc
+        /// is what this list sorts and displays by in that case.</summary>
+        public DateTime? SentAtUtc { get; set; }
+
+        public DateTime CreatedAtUtc { get; set; }
+    }
+
     /// <summary>One blast's full recipient list with delivery status and any reply, for the
     /// admin History detail view.</summary>
     public class BulkEmailBlastDetailDto
