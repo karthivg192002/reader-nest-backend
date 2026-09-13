@@ -8370,6 +8370,55 @@ namespace iucs.readernest.tests
             Assert.Equal(demo.MeetingRoomId, replacement.MeetingRoomId);
         }
 
+        /// <summary>
+        /// BUG-007. Rescheduling a Demo from this generic Sessions-page dialog left its
+        /// DemoBooking.ClassSessionId pointing at `original` -- a row that's now terminal
+        /// (Status.Rescheduled) and never shown as joinable again. IsSessionParticipantAsync's
+        /// parent branch (and ParentPortalService.GetScheduleAsync's own demo-session filter)
+        /// both key off exactly that field, not the session's RescheduledFromSessionId chain --
+        /// so the parent could only ever be authorized against the stale original, while the
+        /// teacher (matched directly via TeacherProfileId) correctly joined the new replacement.
+        /// Both landed in the same Jitsi room (MeetingRoomId carries over) so the call itself
+        /// looked fine, but two different session ids meant two different ClassroomHub groups --
+        /// confirmed live as neither side's People roster nor whiteboard ever syncing with the
+        /// other. Reported directly (not screen-recorded) as: after editing a session, teacher
+        /// and student joined "fine" but couldn't see each other in People, and the whiteboard
+        /// didn't sync in either direction.
+        /// </summary>
+        [Fact]
+        public async Task RescheduleSession_ADemoWithABooking_MovesTheBookingsSessionLink_SoTheParentStaysAuthorized()
+        {
+            var parentEmail = $"lead-{Guid.NewGuid():N}@test.com";
+            var (session, booking) = await SeedDemoSessionAsync(parentEmail);
+            var parentUser = await _db.SeedUserAsync(parentEmail, "x", UserRole.Parent);
+            _db.Context.ParentProfiles.Add(new ParentProfile { UserId = parentUser.Id });
+            await _db.Context.SaveChangesAsync();
+
+            // Sanity: parent is authorized against the original session before any edit.
+            Assert.True(await CreateSessionService().IsSessionParticipantAsync(session.Id, parentUser.Id));
+
+            var newStart = session.ScheduledStartAtUtc.AddHours(2);
+            var replacement = await CreateSessionService().RescheduleAsync(session.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = newStart,
+                ScheduledEndAtUtc = newStart.AddMinutes(30),
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            Assert.Equal(replacement.Id, (await _db.Context.DemoBookings.FirstAsync(b => b.Id == booking.Id)).ClassSessionId);
+
+            // The actual bug: without the fix, this is the one session id both the teacher's
+            // and the parent's own portal now need to agree on -- the parent must be authorized
+            // against it too, not just the stale original.
+            Assert.True(await CreateSessionService().IsSessionParticipantAsync(replacement.Id, parentUser.Id));
+
+            // And the parent's own schedule listing has to actually surface the new session --
+            // authorization alone doesn't help if their portal never shows them a link to it.
+            var schedule = await new ParentPortalService(_db.UnitOfWork).GetScheduleAsync(
+                parentUser.Id, DateTime.UtcNow, DateTime.UtcNow.AddDays(30));
+            Assert.Contains(schedule, s => s.Id == replacement.Id);
+        }
+
         public void Dispose() => _db.Dispose();
     }
 }

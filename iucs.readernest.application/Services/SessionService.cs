@@ -264,6 +264,29 @@ namespace iucs.readernest.application.Services
                 RescheduledFromSessionId = original.Id,
             };
             await _unitOfWork.Repository<ClassSession>().AddAsync(replacement, cancellationToken);
+
+            // Confirmed live: a Demo rescheduled from this generic Sessions-page dialog (as
+            // opposed to Admission's own Demo Booking reschedule, which already keeps this in
+            // sync) left the DemoBooking's ClassSessionId pointing at `original` — a row that's
+            // now terminal (Status.Rescheduled) and never shown as joinable again. The parent
+            // side of IsSessionParticipantAsync (and ParentPortalService.GetScheduleAsync's own
+            // demo-session filter) both key off THIS field, not the session's own
+            // RescheduledFromSessionId chain, so the parent could only ever see/join the stale
+            // original — while the teacher, matched directly via TeacherProfileId, correctly
+            // joined the new `replacement`. Both landed in the same Jitsi room (MeetingRoomId
+            // carries over) so the call itself looked fine, but two different session ids meant
+            // two different ClassroomHub groups: neither side's roster or whiteboard ever synced
+            // with the other. Following the booking to the new row fixes both at once.
+            if (original.Type == SessionType.Demo)
+            {
+                var demoBooking = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
+                    .FirstOrDefaultAsync(b => b.ClassSessionId == original.Id, cancellationToken);
+                if (demoBooking is not null)
+                {
+                    demoBooking.ClassSessionId = replacement.Id;
+                }
+            }
+
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), original.Id.ToString(),
                 changesJson: $"{{\"rescheduledTo\":\"{replacement.Id}\"}}", cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
