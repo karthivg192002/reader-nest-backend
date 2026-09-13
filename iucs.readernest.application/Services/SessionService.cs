@@ -1328,7 +1328,6 @@ namespace iucs.readernest.application.Services
                     var activity = group.Where(e => e.Type is EngagementEventType.ActivityClick or EngagementEventType.ActivityCompleted).Sum(e => e.Value);
                     var whiteboard = group.Where(e => e.Type == EngagementEventType.WhiteboardInteraction).Sum(e => e.Value);
                     var attention = group.Where(e => e.Type == EngagementEventType.AttentionPing).Sum(e => e.Value);
-                    var screenShare = group.Where(e => e.Type == EngagementEventType.ScreenShareSeconds).Sum(e => e.Value);
 
                     var score = EngagementScoring.Score(quizCorrect, quizAttempts, activity, whiteboard, attention);
 
@@ -1341,7 +1340,6 @@ namespace iucs.readernest.application.Services
                         ActivityInteractions = activity,
                         WhiteboardInteractions = whiteboard,
                         AttentionPings = attention,
-                        ScreenShareSeconds = screenShare,
                         EngagementScore = score,
                         LearningOutcome = score >= 60 ? "on-track" : score >= 30 ? "needs-encouragement" : "needs-attention",
                     };
@@ -1375,17 +1373,6 @@ namespace iucs.readernest.application.Services
             if (quizAttempts > 0)
             {
                 summary += $" {engagement.Sum(e => e.QuizCorrect)}/{quizAttempts} quiz answers correct.";
-            }
-
-            // Durable "was the whiteboard actually captured" signal (see
-            // EngagementEventType.ScreenShareSeconds) -- silent when zero rather than warning,
-            // since most sessions predate this feature and haven't adopted it yet; a warning
-            // on every one of those would be noise, not signal.
-            var screenShareSeconds = engagement.Sum(e => e.ScreenShareSeconds);
-            if (screenShareSeconds > 0)
-            {
-                var screenShareMinutes = Math.Max(1, screenShareSeconds / 60);
-                summary += $" Screen-shared for ~{screenShareMinutes} min — the recording should include the whiteboard.";
             }
 
             return summary;
