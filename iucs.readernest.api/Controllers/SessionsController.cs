@@ -97,14 +97,62 @@ namespace iucs.readernest.api.Controllers
         /// trust model as recordings/finalize. Returns 204 when the room has no InProgress
         /// session right now (e.g. a personal room, or a startup race).
         /// </summary>
+        /// <summary>
+        /// Anonymous by necessity (Jibri's headless Chrome has no logged-in user), which
+        /// otherwise means anyone on the internet who learns a personal room id -- it isn't
+        /// secret, it appears in copy-link URLs and confirmation emails -- could pull a live
+        /// join token for whatever class happens to be running in that room. Actually restricted
+        /// via <see cref="IsFromTrustedJibriHost"/>: only requests whose remote IP matches
+        /// Jibri:AllowedIps get a token; everyone else gets 403 regardless of the room being
+        /// live. Confirmed live-exploitable before this check existed -- a plain unauthenticated
+        /// request against an in-progress room returned a real 4-hour Jitsi + hub token.
+        /// </summary>
         [HttpGet("recordings/observer-join")]
         [AllowAnonymous]
         public async Task<ActionResult<RecordingObserverJoinDto>> GetRecordingObserverJoin(
             [FromQuery] string room,
+            [FromServices] IConfiguration configuration,
             CancellationToken cancellationToken)
         {
+            if (!IsFromTrustedJibriHost(configuration))
+            {
+                return Forbid();
+            }
+
             var join = await _sessionService.GetLiveObserverJoinAsync(room, cancellationToken);
             return join is null ? NoContent() : Ok(join);
+        }
+
+        /// <summary>
+        /// Jibri:AllowedIps is a CSV of IPs/CIDRs in configuration (the Jitsi server's own
+        /// outbound address by default) -- this call's own remote IP, resolved through
+        /// UseForwardedHeaders in Program.cs so it reflects the real client rather than an
+        /// intermediate reverse proxy, must match one of them. An empty/missing setting fails
+        /// closed (denies everyone) rather than open, so a blank config can't silently reopen
+        /// this to the whole internet the way [AllowAnonymous] alone did.
+        /// </summary>
+        private bool IsFromTrustedJibriHost(IConfiguration configuration)
+        {
+            var remoteIp = HttpContext.Connection.RemoteIpAddress;
+            if (remoteIp is null)
+            {
+                return false;
+            }
+
+            var normalizedRemoteIp = remoteIp.IsIPv4MappedToIPv6 ? remoteIp.MapToIPv4() : remoteIp;
+            var allowedEntries = (configuration["Jibri:AllowedIps"] ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            foreach (var entry in allowedEntries)
+            {
+                if (System.Net.IPAddress.TryParse(entry, out var allowedIp)
+                    && (allowedIp.IsIPv4MappedToIPv6 ? allowedIp.MapToIPv4() : allowedIp).Equals(normalizedRemoteIp))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>Non-secret Jitsi settings (domain, auto-record) for whoever is about to join a live class.</summary>
