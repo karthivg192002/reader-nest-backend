@@ -83,10 +83,10 @@ namespace iucs.readernest.tests
         private ClassSessionEventLogService CreateEventLogService() => new(_db.UnitOfWork);
 
         private SessionService CreateSessionService() =>
-            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, new FakeJitsiTokenService(), CreateEventLogService(), new FakeTokenService());
+            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, new FakeJitsiTokenService(), CreateEventLogService(), new FakeTokenService(), new FakeRecordingRenderClient());
 
         private SessionService CreateSessionService(FakeJitsiTokenService jitsiTokens) =>
-            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, jitsiTokens, CreateEventLogService(), new FakeTokenService());
+            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, jitsiTokens, CreateEventLogService(), new FakeTokenService(), new FakeRecordingRenderClient());
 
         private BillingService CreateBillingService() =>
             new(_db.UnitOfWork, _auditLog, new FakePaymentGateway(), _notifications, _db.CurrentUser, _bulkFileReader, _invoicePdfGenerator);
@@ -5300,7 +5300,7 @@ namespace iucs.readernest.tests
             var userService2 = new UserService(
                 uow2, _hasher, notifications2, emailTemplates2, auditLog2, _emailSender, _whatsAppSender, _smsSender, _bulkFileReader, NullLogger<UserService>.Instance);
             var sessionService2 = new SessionService(
-                uow2, auditLog2, CreatePayoutService(), notifications2, _db.CurrentUser, new FakeJitsiTokenService(), new ClassSessionEventLogService(uow2), new FakeTokenService());
+                uow2, auditLog2, CreatePayoutService(), notifications2, _db.CurrentUser, new FakeJitsiTokenService(), new ClassSessionEventLogService(uow2), new FakeTokenService(), new FakeRecordingRenderClient());
             var service1 = CreateStoreService();
             var service2 = new StoreService(
                 uow2, auditLog2,

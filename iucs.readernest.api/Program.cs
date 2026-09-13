@@ -81,6 +81,10 @@ builder.Services.AddSingleton<IInvoicePdfGenerator, InvoicePdfGenerator>();
 // Short timeout so one down/slow server can't stall the whole summary request.
 builder.Services.AddHttpClient("Prometheus", client => client.Timeout = TimeSpan.FromSeconds(5));
 builder.Services.AddScoped<IPrometheusClient, PrometheusClient>();
+// Recording-render bot trigger: short timeout so a slow/unreachable bot can never delay a
+// class actually starting/recording -- see RecordingRenderClient's own doc comment.
+builder.Services.AddHttpClient("RecordingRenderBot", client => client.Timeout = TimeSpan.FromSeconds(5));
+builder.Services.AddScoped<IRecordingRenderClient, RecordingRenderClient>();
 // Dual-gateway abstraction: the dispatcher routes to Razorpay/Cashfree using live
 // credentials from Settings → Integrations, and falls back to the simulated gateway
 // while an integration is disabled or its keys are blank.

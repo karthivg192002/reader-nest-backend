@@ -253,6 +253,36 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>
+        /// Tells the recording-render bot (see docs/JITSI_ARCHITECTURE.md's recording-render
+        /// section) to start capturing this room's whiteboard/quiz overlay. Called by
+        /// JitsiLive.tsx the moment its own recordingStatusChanged listener sees a real Jibri
+        /// recording start. Best-effort: never fails the request just because the bot itself is
+        /// unreachable (see IRecordingRenderClient) -- a class's recording must never depend on
+        /// this optional enhancement.
+        /// </summary>
+        /// Takes the room directly from the caller (JitsiLive.tsx already has it from its own
+        /// join response) rather than re-resolving it from the session id server-side -- this
+        /// is a best-effort side-channel trigger only (turns capture on/off, grants no access
+        /// to anything), so it doesn't need the same participant-ownership check a real data
+        /// endpoint would.
+        [HttpPost("recording-render/start")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<IActionResult> StartRecordingRender([FromQuery] string room, CancellationToken cancellationToken)
+        {
+            await _sessionService.StartRecordingRenderAsync(room, cancellationToken);
+            return NoContent();
+        }
+
+        /// <summary>Counterpart to <see cref="StartRecordingRender"/> -- called when recording stops or the teacher leaves.</summary>
+        [HttpPost("recording-render/stop")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<IActionResult> StopRecordingRender([FromQuery] string room, CancellationToken cancellationToken)
+        {
+            await _sessionService.StopRecordingRenderAsync(room, cancellationToken);
+            return NoContent();
+        }
+
+        /// <summary>
         /// Machine-to-machine: the Jibri finalize-recording hook on the video server calls this
         /// once a recording finishes, identifying the class by Jitsi room name (it has no
         /// ClassSession id, and no logged-in user to authorize as) — see

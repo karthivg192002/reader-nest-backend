@@ -218,6 +218,14 @@ namespace iucs.readernest.tests
         }
     }
 
+    /// <summary>No-op -- tests never have a real recording-render bot to call.</summary>
+    public class FakeRecordingRenderClient : IRecordingRenderClient
+    {
+        public Task StartAsync(string room, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task StopAsync(string room, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
     /// <summary>Mirrors production's "unconfigured" state (no appId/appSecret) — always returns no token.</summary>
     public class FakeJitsiTokenService : IJitsiTokenService
     {

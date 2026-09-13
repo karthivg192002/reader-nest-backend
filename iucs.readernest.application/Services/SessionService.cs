@@ -41,6 +41,7 @@ namespace iucs.readernest.application.Services
         private readonly IJitsiTokenService _jitsiTokenService;
         private readonly IClassSessionEventLogService _eventLog;
         private readonly ITokenService _tokenService;
+        private readonly IRecordingRenderClient _recordingRenderClient;
 
         public SessionService(
             IUnitOfWork unitOfWork,
@@ -50,7 +51,8 @@ namespace iucs.readernest.application.Services
             ICurrentUserService currentUser,
             IJitsiTokenService jitsiTokenService,
             IClassSessionEventLogService eventLog,
-            ITokenService tokenService)
+            ITokenService tokenService,
+            IRecordingRenderClient recordingRenderClient)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
@@ -60,6 +62,7 @@ namespace iucs.readernest.application.Services
             _jitsiTokenService = jitsiTokenService;
             _eventLog = eventLog;
             _tokenService = tokenService;
+            _recordingRenderClient = recordingRenderClient;
         }
 
         public async Task<IReadOnlyList<ClassSessionDto>> ListAsync(
@@ -1176,6 +1179,18 @@ namespace iucs.readernest.application.Services
                 ExpiresAtUtc = expiresAtUtc,
             };
         }
+
+        /// <summary>Fires the same moment JitsiLive.tsx's own recordingStatusChanged handler
+        /// sees a real Jibri recording actually start -- see IRecordingRenderClient's own doc
+        /// comment for why this never throws even if the bot is unreachable.</summary>
+        public Task StartRecordingRenderAsync(string room, CancellationToken cancellationToken = default)
+            => _recordingRenderClient.StartAsync(room, cancellationToken);
+
+        /// <summary>Counterpart to <see cref="StartRecordingRenderAsync"/> -- fires when
+        /// recording stops or the teacher leaves, so the bot doesn't keep a browser context
+        /// (and its own Jitsi connection) running for a class that's no longer recording.</summary>
+        public Task StopRecordingRenderAsync(string room, CancellationToken cancellationToken = default)
+            => _recordingRenderClient.StopAsync(room, cancellationToken);
 
         public async Task<ClassroomSettingsDto> GetClassroomSettingsAsync(CancellationToken cancellationToken = default)
         {

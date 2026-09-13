@@ -140,6 +140,12 @@ namespace iucs.readernest.application.Services
         /// only a ClassroomHub token, no Jitsi token/domain (see RecordingRenderJoinDto).</summary>
         Task<RecordingRenderJoinDto?> GetRecordingRenderJoinAsync(string roomName, CancellationToken cancellationToken = default);
 
+        /// <summary>Tells the recording-render bot to start capturing this room's whiteboard/quiz overlay.</summary>
+        Task StartRecordingRenderAsync(string room, CancellationToken cancellationToken = default);
+
+        /// <summary>Tells the recording-render bot to stop capturing this room.</summary>
+        Task StopRecordingRenderAsync(string room, CancellationToken cancellationToken = default);
+
         /// <summary>Non-secret Jitsi settings (domain, auto-record) for whoever is about to join a live class.</summary>
         Task<ClassroomSettingsDto> GetClassroomSettingsAsync(CancellationToken cancellationToken = default);
 
