@@ -141,13 +141,24 @@ builder.Services
 
         // SignalR websockets can't send an Authorization header: the classroom hub
         // authenticates via the standard access_token query parameter instead.
+        //
+        // recording-render/stop needs the same treatment for a different reason: it's called
+        // from a pagehide listener (JitsiLive.tsx) using fetch's keepalive:true, the standard
+        // way to let a request survive the page unloading. Confirmed live that a keepalive
+        // fetch carrying a custom Authorization header -- which forces a CORS preflight, since
+        // this call crosses from thereadernest.in to api.thereadernest.in -- never actually
+        // reaches the backend at all during a real page unload: the preflight's extra round
+        // trip doesn't get the same "let it finish" guarantee, so the whole request is dropped.
+        // A bodyless POST with the token in the query string and no custom headers is a CORS
+        // "simple request" -- no preflight, and confirmed live to actually arrive.
         options.Events = new JwtBearerEvents
         {
             OnMessageReceived = context =>
             {
                 var accessToken = context.Request.Query["access_token"];
                 if (!string.IsNullOrEmpty(accessToken)
-                    && context.HttpContext.Request.Path.StartsWithSegments("/hubs"))
+                    && (context.HttpContext.Request.Path.StartsWithSegments("/hubs")
+                        || context.HttpContext.Request.Path.StartsWithSegments("/api/sessions/recording-render/stop")))
                 {
                     context.Token = accessToken;
                 }
