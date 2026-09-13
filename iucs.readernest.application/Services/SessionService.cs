@@ -1104,9 +1104,57 @@ namespace iucs.readernest.application.Services
             return false;
         }
 
+        public async Task<Guid> ResolveCurrentSessionIdAsync(Guid sessionId, CancellationToken cancellationToken = default)
+        {
+            var currentId = sessionId;
+            // Bounded, not a plain "follow until null": a data bug that somehow formed a cycle
+            // must not hang this request forever — no genuine reschedule chain should ever get
+            // remotely this deep.
+            for (var hop = 0; hop < 50; hop++)
+            {
+                var status = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.Id == currentId)
+                    .Select(s => (SessionStatus?)s.Status)
+                    .FirstOrDefaultAsync(cancellationToken);
+                if (status is null or not SessionStatus.Rescheduled)
+                {
+                    // Doesn't exist (let the caller's own not-found handling fire against the
+                    // ORIGINAL id) or isn't rescheduled — this is the current, live session.
+                    return currentId;
+                }
+
+                var next = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.RescheduledFromSessionId == currentId)
+                    .Select(s => (Guid?)s.Id)
+                    .FirstOrDefaultAsync(cancellationToken);
+                if (next is null)
+                {
+                    // Rescheduled but nothing claims to be its replacement — shouldn't happen
+                    // (RescheduleAsync always creates one in the same transaction) — stop on
+                    // this data inconsistency rather than loop.
+                    return currentId;
+                }
+                currentId = next.Value;
+            }
+            return currentId;
+        }
+
         public async Task<JitsiJoinDto> GetJitsiJoinAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default)
         {
-            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken)
+            // Confirmed live: a teacher and a student, each joining from their own portal after
+            // an admin edited (rescheduled) the class, ended up with two different-but-both-
+            // "valid" session ids for what they both thought was the same class — most often
+            // because one of them still had the page open from before the edit and never
+            // reloaded the now-stale list it was showing. Both landed in the same Jitsi video
+            // room regardless (MeetingRoomId carries over on a reschedule), so the call itself
+            // looked completely fine to both — but the ClassroomHub group is keyed by session
+            // id, so neither's People roster or whiteboard ever synced with the other. Resolving
+            // to the current session before doing anything else means it no longer matters which
+            // id either side started from — same fix for the exact same symptom already found
+            // and shipped for one specific cause (a stale DemoBooking link) now covers every
+            // cause of it, including a browser tab that's simply been open since before the edit.
+            var resolvedSessionId = await ResolveCurrentSessionIdAsync(sessionId, cancellationToken);
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(resolvedSessionId, cancellationToken)
                 ?? throw new NotFoundException(nameof(ClassSession), sessionId);
 
             if (string.IsNullOrWhiteSpace(session.MeetingRoomId))
@@ -1170,7 +1218,7 @@ namespace iucs.readernest.application.Services
                 // token that's valid indefinitely — it dies with the class, not with the link.
                 session.ScheduledEndAtUtc.AddHours(2));
 
-            return new JitsiJoinDto { Room = session.MeetingRoomId, Domain = domain, Token = token, ScheduledEndAtUtc = session.ScheduledEndAtUtc };
+            return new JitsiJoinDto { SessionId = session.Id, Room = session.MeetingRoomId, Domain = domain, Token = token, ScheduledEndAtUtc = session.ScheduledEndAtUtc };
         }
 
         public async Task<RecordingObserverJoinDto?> GetLiveObserverJoinAsync(string roomName, CancellationToken cancellationToken = default)

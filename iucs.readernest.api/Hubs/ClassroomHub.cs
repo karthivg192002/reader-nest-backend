@@ -145,6 +145,19 @@ namespace iucs.readernest.api.Hubs
                     throw new HubException("Not signed in.");
                 }
 
+                // See ISessionService.ResolveCurrentSessionIdAsync's own doc comment: a
+                // connection arriving with a pre-edit session id (e.g. a portal tab that was
+                // already open when an admin edited/rescheduled the class, never reloaded)
+                // is transparently redirected to whatever the class turned into, so it lands
+                // in the very same ClassroomHub group a fresh caller resolving the same class
+                // right now would — rather than either getting refused outright (once a stale
+                // id's own DemoBooking link has moved on, as RescheduleAsync now keeps it doing)
+                // or, worse, being silently authorized and grouped apart from everyone who
+                // already has the current id (a Regular/batch session's own BatchEnrollment
+                // check still passes against a stale-but-same-batch id either way).
+                sessionGuid = await _sessionService.ResolveCurrentSessionIdAsync(sessionGuid, Context.ConnectionAborted);
+                sessionId = sessionGuid.ToString();
+
                 if (!await _sessionService.IsSessionParticipantAsync(sessionGuid, userId, Context.ConnectionAborted))
                 {
                     await _eventLog.LogJoinDeniedAsync(sessionGuid, userId, "Not a participant of this session.", CancellationToken.None);

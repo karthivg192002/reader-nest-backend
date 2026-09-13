@@ -8419,6 +8419,103 @@ namespace iucs.readernest.tests
             Assert.Contains(schedule, s => s.Id == replacement.Id);
         }
 
+        // ---- Session-id resolution across a reschedule (still reported after the DemoBooking
+        // fix above -- a stale id can arrive for reasons besides a stale DemoBooking link, e.g.
+        // a portal tab that was simply already open when the edit happened) ----
+
+        [Fact]
+        public async Task ResolveCurrentSessionId_ANonRescheduledSession_ReturnsItself()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+
+            Assert.Equal(session.Id, await CreateSessionService().ResolveCurrentSessionIdAsync(session.Id));
+        }
+
+        [Fact]
+        public async Task ResolveCurrentSessionId_AMissingSession_ReturnsTheIdUnchanged()
+        {
+            // Lets the caller's own not-found handling fire against the id it actually asked
+            // for, rather than this silently swallowing "that session doesn't exist at all".
+            var bogusId = Guid.NewGuid();
+
+            Assert.Equal(bogusId, await CreateSessionService().ResolveCurrentSessionIdAsync(bogusId));
+        }
+
+        [Fact]
+        public async Task ResolveCurrentSessionId_ARescheduledChain_WalksToTheFinalReplacement_FromAnyLinkInIt()
+        {
+            var (batch, _, original) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var service = CreateSessionService();
+
+            var start = original.ScheduledStartAtUtc.AddDays(1);
+            var firstEdit = await service.RescheduleAsync(original.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = start,
+                ScheduledEndAtUtc = start.AddMinutes(45),
+            });
+            var secondStart = start.AddDays(1);
+            var secondEdit = await service.RescheduleAsync(firstEdit.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = secondStart,
+                ScheduledEndAtUtc = secondStart.AddMinutes(45),
+            });
+
+            // Two edits ago, one edit ago, and the current one itself all resolve to the same,
+            // final, still-live session.
+            Assert.Equal(secondEdit.Id, await service.ResolveCurrentSessionIdAsync(original.Id));
+            Assert.Equal(secondEdit.Id, await service.ResolveCurrentSessionIdAsync(firstEdit.Id));
+            Assert.Equal(secondEdit.Id, await service.ResolveCurrentSessionIdAsync(secondEdit.Id));
+        }
+
+        /// <summary>
+        /// BUG-008. Reported again after BUG-007's DemoBooking-link fix above, this time for the
+        /// far more common cause: a parent's (or teacher's) own portal tab was simply already
+        /// open, showing the class's pre-edit session id, when an admin edited/rescheduled it --
+        /// nothing about that requires a demo or a stale DemoBooking row at all. GetJitsiJoinAsync
+        /// used to look the given id up literally, so this stale id either 403'd outright (once a
+        /// batch/teacher change moved eligibility) or, worse, quietly succeeded against a Regular
+        /// session's still-valid BatchEnrollment match while the *other* side of the call joined
+        /// under the NEW id -- same underlying symptom either way: two different ClassroomHub
+        /// groups for what both people think is the one class, so neither's People roster or
+        /// whiteboard ever reaches the other, even though both land in the same Jitsi room.
+        /// </summary>
+        [Fact]
+        public async Task GetJitsiJoin_WithAStaleRescheduledSessionId_ResolvesAndAuthorizesAgainstTheCurrentSession()
+        {
+            var (batch, _, original) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            // SeedBatchWithSessionAsync's own session starts tomorrow (outside the 10-minute
+            // join window) and has no room yet -- move it to "already started" with a room, so
+            // GetJitsiJoinAsync's own window/room checks don't get in the way of what this test
+            // is actually checking.
+            original.ScheduledStartAtUtc = DateTime.UtcNow.AddMinutes(-5);
+            original.ScheduledEndAtUtc = DateTime.UtcNow.AddMinutes(40);
+            original.MeetingRoomId = "room-original";
+            await _db.Context.SaveChangesAsync();
+
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var child = new Child { ParentProfile = parentProfile, FirstName = "Kid", LastName = "Stale" };
+            _db.Context.AddRange(parentProfile, child);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.Add(new BatchEnrollment { BatchId = batch.Id, ChildId = child.Id, Status = EnrollmentStatus.Active });
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateSessionService();
+            var newStart = DateTime.UtcNow.AddMinutes(5);
+            var replacement = await service.RescheduleAsync(original.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = newStart,
+                ScheduledEndAtUtc = newStart.AddMinutes(45),
+            });
+
+            // The parent's own portal tab still only knows the ORIGINAL id -- it was open
+            // before the edit and never reloaded. That's the whole scenario.
+            var join = await CreateSessionService().GetJitsiJoinAsync(original.Id, parentUser.Id);
+
+            Assert.Equal(replacement.Id, join.SessionId);
+            Assert.Equal(replacement.MeetingRoomId, join.Room);
+        }
+
         public void Dispose() => _db.Dispose();
     }
 }
