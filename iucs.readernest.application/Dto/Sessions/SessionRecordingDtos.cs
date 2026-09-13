@@ -85,6 +85,9 @@ namespace iucs.readernest.application.Dto.Sessions
 
         public int AttentionPings { get; set; }
 
+        /// <summary>Seconds this participant's screen was shared -- see EngagementEventType.ScreenShareSeconds. Not a factor in EngagementScore.</summary>
+        public int ScreenShareSeconds { get; set; }
+
         /// <summary>Weighted 0-100 score across participation, accuracy and attention.</summary>
         public int EngagementScore { get; set; }
 
