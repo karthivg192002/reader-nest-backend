@@ -152,20 +152,19 @@ namespace iucs.readernest.api.Controllers
         /// <summary>
         /// A short, shareable link to the same room MyMeetingRoom builds -- the long form
         /// (domain/room#jwt=&lt;huge signed token&gt;) reads as broken/suspicious pasted into
-        /// WhatsApp or email.
-        /// Deliberately never expires: this used to bake a 6-hour Jitsi token straight into a
-        /// /m/{slug} short-link row, so the link itself quietly stopped working mid-afternoon
-        /// for a personal room meant to be reused indefinitely (reported live: "live test demo
-        /// link not working" -- an old tab holding one of these had gone stale). Now points at
-        /// the stable, id-based <see cref="MeetingRoomJoin"/> redirect below instead, which
-        /// mints a fresh short-lived token on every click -- same "stable link, resolved live"
-        /// pattern DemoBookingService.ResolveLiveJoinUrlAsync already uses for a parent's demo
-        /// join link, and for the same reason: nothing here is baked in to go stale.
+        /// WhatsApp or email. The id-based <see cref="MeetingRoomJoin"/> redirect below fixed
+        /// the staleness problem (see its own remarks) but is itself a long, GUID-bearing API
+        /// URL -- not actually short, just no longer stale. This mints a real /m/{slug} row
+        /// (the same short-link mechanism DemoBookingsController.GetJoinLink uses) that points
+        /// at that stable redirect, so the link is both short AND never goes stale: whatever
+        /// resolves the slug still lands on MeetingRoomJoin, which mints a fresh token on every
+        /// click. Never expires, matching MeetingRoomJoin's own "reused indefinitely" design.
         /// </summary>
         [HttpGet("me/meeting-room/short-link")]
         [Microsoft.AspNetCore.Authorization.Authorize]
         public async Task<ActionResult<object>> MyMeetingRoomShortLink(
             [FromServices] iucs.readernest.domain.Repository.IUnitOfWork unitOfWork,
+            [FromServices] IShortLinkService shortLinks,
             CancellationToken cancellationToken)
         {
             var userId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value);
@@ -184,7 +183,9 @@ namespace iucs.readernest.api.Controllers
             }
 
             var apiBaseUrl = $"{Request.Scheme}://{Request.Host}";
-            return Ok(new { url = $"{apiBaseUrl}/api/users/{userId}/meeting-room/join" });
+            var stableUrl = $"{apiBaseUrl}/api/users/{userId}/meeting-room/join";
+            var slug = await shortLinks.CreateAsync(stableUrl, DateTime.UtcNow.AddYears(10), userId, cancellationToken);
+            return Ok(new { url = $"{apiBaseUrl}/m/{slug}" });
         }
 
         /// <summary>
