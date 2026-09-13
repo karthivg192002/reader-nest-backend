@@ -71,6 +71,7 @@ namespace iucs.readernest.api.Data
             await EnsureStoreInquiriesMenuAsync(context);
             await EnsureAdminLeaveAndAvailabilityMenuAsync(context);
             await EnsureTeacherRecordingsMenuAsync(context);
+            await EnsureAdminRecordingsMenuAsync(context);
             await EnsureAdmissionPaymentTrackingMenuAsync(context);
             await EnsureTeacherAssignmentMenuAsync(context);
             await EnsureParentRecordingsMenuAsync(context);
@@ -538,6 +539,7 @@ namespace iucs.readernest.api.Data
             ("admin", "Academics", "Batches", "/admin/batches", "Layers", PermissionModule.CourseBatchManagement.ToString()),
             ("admin", "Academics", "Academic Calendar", "/admin/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement.ToString()),
             ("admin", "Academics", "Sessions", "/admin/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+            ("admin", "Academics", "Recordings", "/admin/recordings", "Video", PermissionModule.SessionCalendarManagement.ToString()),
             ("admin", "Academics", "Quiz Bank", "/admin/quiz-bank", "Sparkles", PermissionModule.CourseBatchManagement.ToString()),
             ("admin", "People", "Users", "/admin/users", "Users", PermissionModule.UserManagement.ToString()),
             ("admin", "People", "Roles & Permissions", "/admin/permissions", "ShieldCheck", PermissionModule.UserManagement.ToString()),
@@ -1736,6 +1738,54 @@ namespace iucs.readernest.api.Data
                 Path = path,
                 Icon = "Video",
                 SortOrder = attendance.SortOrder + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.SessionCalendarManagement.ToString(),
+            });
+        }
+
+        /// <summary>
+        /// Retrofits the Admin "Recordings" menu item (AdminRecordings.tsx, /admin/recordings)
+        /// into a database that was seeded before this item existed. Mirrors
+        /// EnsureTeacherRecordingsMenuAsync -- this only fires for pre-existing databases;
+        /// fresh ones already get it from MenuSeedItems(). Admin previously had no
+        /// institution-wide view of registered recordings -- deleting a stray/wrong one
+        /// meant opening the right class's own row in Sessions first, one at a time.
+        /// </summary>
+        private static async Task EnsureAdminRecordingsMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/admin/recordings";
+            if (context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == path))
+            {
+                return;
+            }
+
+            var sessions = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "admin" && m.Path == "/admin/sessions");
+            if (sessions is null)
+            {
+                return; // no Academics section item to anchor after (unexpected) — nothing sensible to append after
+            }
+
+            // Insert right after Sessions, shifting Quiz Bank (and anything else in the
+            // section after it) up by one — matches the fresh-seed ordering in MenuSeedItems().
+            var toShift = await context.MenuItems
+                .Where(m => m.Portal == "admin" && m.Section == "Academics" && m.SortOrder > sessions.SortOrder)
+                .ToListAsync();
+            foreach (var item in toShift)
+            {
+                item.SortOrder += 1;
+            }
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "admin",
+                Section = "Academics",
+                SectionOrder = sessions.SectionOrder,
+                Label = "Recordings",
+                Path = path,
+                Icon = "Video",
+                SortOrder = sessions.SortOrder + 1,
                 IsActive = true,
                 RequiredModule = PermissionModule.SessionCalendarManagement.ToString(),
             });
