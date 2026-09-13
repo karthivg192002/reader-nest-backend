@@ -15,6 +15,14 @@ namespace iucs.readernest.application.Services
 
         Task<BatchDto> SetStatusAsync(Guid id, BatchStatus status, CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// One-time data repair: moves every still-undelivered <c>ClassSession</c> that's fallen
+        /// out of sync with its own batch's current teacher (left over from a reassignment that
+        /// happened before <see cref="UpdateAsync"/>'s cascade fix existed) onto the batch's
+        /// actual current teacher. Safe to run repeatedly — nothing left to fix is a no-op.
+        /// </summary>
+        Task<ReconcileStaleSessionTeachersResultDto> ReconcileStaleSessionTeachersAsync(CancellationToken cancellationToken = default);
+
         /// <summary>The batch's current student roster (WBS p.17 "Assign Students").</summary>
         Task<IReadOnlyList<BatchStudentDto>> ListEnrollmentsAsync(Guid batchId, CancellationToken cancellationToken = default);
 

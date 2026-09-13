@@ -8240,6 +8240,106 @@ namespace iucs.readernest.tests
             Assert.Equal(batch.TeacherProfileId, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == moving.Id)).TeacherProfileId);
         }
 
+        /// <summary>
+        /// BUG-005 (data repair). The cascade in UpdateAsync only protects reassignments made
+        /// AFTER it shipped — a batch reassigned earlier still has ClassSession rows stuck on the
+        /// old teacher, bypassing UpdateAsync entirely (writing straight to the tracked Batch,
+        /// the way the pre-fix bug's own corruption would have been produced) to simulate exactly
+        /// that pre-existing bad state. ReconcileStaleSessionTeachersAsync must find and fix it.
+        /// </summary>
+        [Fact]
+        public async Task ReconcileStaleSessionTeachers_MovesOrphanedFutureSessionsOntoTheBatchsCurrentTeacher()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var staleTeacherId = batch.TeacherProfileId;
+
+            var newTeacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var newTeacher = new TeacherProfile { UserId = newTeacherUser.Id };
+            _db.Context.Add(newTeacher);
+
+            var future = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = staleTeacherId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(3).AddMinutes(45),
+            };
+            var alreadyDelivered = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = staleTeacherId,
+                Status = SessionStatus.Completed,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-3).AddMinutes(45),
+            };
+            _db.Context.AddRange(future, alreadyDelivered);
+            await _db.Context.SaveChangesAsync();
+
+            // Bypasses UpdateAsync on purpose — reproduces a batch whose Batch row moved on to a
+            // new teacher while its already-generated sessions were left behind, the exact state
+            // a pre-fix reassignment (or any other path that ever wrote Batch.TeacherProfileId
+            // directly) would leave.
+            batch.TeacherProfileId = newTeacher.Id;
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            var result = await CreateBatchService().ReconcileStaleSessionTeachersAsync();
+
+            Assert.Equal(1, result.BatchesFixed);
+            Assert.Equal(1, result.SessionsMoved);
+            Assert.Empty(result.Conflicts);
+
+            _db.Context.ChangeTracker.Clear();
+            Assert.Equal(newTeacher.Id, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == future.Id)).TeacherProfileId);
+            Assert.Equal(staleTeacherId, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == alreadyDelivered.Id)).TeacherProfileId);
+        }
+
+        [Fact]
+        public async Task ReconcileStaleSessionTeachers_SkipsAndReportsABatchThatWouldDoubleBookTheNewTeacher()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var slotStart = DateTime.UtcNow.AddDays(5);
+            var stale = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = slotStart,
+                ScheduledEndAtUtc = slotStart.AddMinutes(45),
+            };
+            _db.Context.Add(stale);
+            await _db.Context.SaveChangesAsync();
+
+            // The batch's CURRENT teacher (what it was reassigned to) is already busy elsewhere
+            // at that exact slot.
+            var (otherBatch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var busyTeacherId = otherBatch.TeacherProfileId;
+            _db.Context.Add(new ClassSession
+            {
+                BatchId = otherBatch.Id,
+                TeacherProfileId = busyTeacherId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = slotStart,
+                ScheduledEndAtUtc = slotStart.AddMinutes(45),
+            });
+            batch.TeacherProfileId = busyTeacherId;
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            var result = await CreateBatchService().ReconcileStaleSessionTeachersAsync();
+
+            Assert.Equal(0, result.BatchesFixed);
+            Assert.Equal(0, result.SessionsMoved);
+            var conflict = Assert.Single(result.Conflicts);
+            Assert.Equal(batch.Id, conflict.BatchId);
+            Assert.Contains("already has a session", conflict.Reason);
+
+            _db.Context.ChangeTracker.Clear();
+            Assert.Equal(stale.TeacherProfileId,
+                (await _db.Context.ClassSessions.FirstAsync(s => s.Id == stale.Id)).TeacherProfileId);
+        }
+
         // ---- Demo room mismatch (reported via screen recording, 2026-09-13) ----
 
         /// <summary>
