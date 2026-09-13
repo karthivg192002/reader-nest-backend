@@ -38,6 +38,25 @@ namespace iucs.readernest.application.Dto.Sessions
         public DateTime ExpiresAtUtc { get; set; }
     }
 
+    /// <summary>
+    /// Everything the headless whiteboard/quiz recording-render bot needs to watch one live
+    /// session's ClassroomHub traffic — see SessionService.GetRecordingRenderJoinAsync. Unlike
+    /// RecordingObserverJoinDto, this carries no Jitsi token/domain at all: the render bot never
+    /// joins Jitsi through a per-request JWT, only via its own fixed hidden-domain XMPP account
+    /// (server-provisioned, never sent to a client) -- it only needs read access to the hub.
+    /// </summary>
+    public class RecordingRenderJoinDto
+    {
+        public Guid SessionId { get; set; }
+
+        public string Room { get; set; } = null!;
+
+        /// <summary>Bearer token for ClassroomHub only (see CreateRecordingObserverHubToken, reused as-is).</summary>
+        public string HubToken { get; set; } = null!;
+
+        public DateTime ExpiresAtUtc { get; set; }
+    }
+
     /// <summary>Non-secret Jitsi settings the classroom screen needs before it joins.</summary>
     public class ClassroomSettingsDto
     {

@@ -1145,6 +1145,38 @@ namespace iucs.readernest.application.Services
             };
         }
 
+        public async Task<RecordingRenderJoinDto?> GetRecordingRenderJoinAsync(string roomName, CancellationToken cancellationToken = default)
+        {
+            // Same "InProgress right now" lookup as GetLiveObserverJoinAsync -- see that
+            // method's own comment for why this is unambiguous on a deployment where a room
+            // can only be one class at a time.
+            var candidates = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.MeetingRoomId == roomName && s.Status == SessionStatus.InProgress)
+                .ToListAsync(cancellationToken);
+
+            if (candidates.Count == 0)
+            {
+                return null;
+            }
+
+            var session = candidates.Count == 1
+                ? candidates[0]
+                : candidates.MinBy(s => s.ActualStartAtUtc ?? s.ScheduledStartAtUtc)!;
+
+            // Same generous ceiling as the recording observer's own token -- a class running
+            // long shouldn't have the render bot's hub access expire mid-capture.
+            var expiresAtUtc = DateTime.UtcNow.AddHours(4);
+            var hubToken = _tokenService.CreateRecordingObserverHubToken(session.Id, expiresAtUtc).AccessToken;
+
+            return new RecordingRenderJoinDto
+            {
+                SessionId = session.Id,
+                Room = roomName,
+                HubToken = hubToken,
+                ExpiresAtUtc = expiresAtUtc,
+            };
+        }
+
         public async Task<ClassroomSettingsDto> GetClassroomSettingsAsync(CancellationToken cancellationToken = default)
         {
             var configJson = await _unitOfWork.Repository<Integration>().Query()

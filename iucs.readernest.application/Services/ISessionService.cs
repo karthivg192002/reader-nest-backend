@@ -135,6 +135,11 @@ namespace iucs.readernest.application.Services
         /// </summary>
         Task<RecordingObserverJoinDto?> GetLiveObserverJoinAsync(string roomName, CancellationToken cancellationToken = default);
 
+        /// <summary>Same live-room lookup as <see cref="GetLiveObserverJoinAsync"/>, for the
+        /// headless whiteboard/quiz recording-render bot instead of Jibri's video observer --
+        /// only a ClassroomHub token, no Jitsi token/domain (see RecordingRenderJoinDto).</summary>
+        Task<RecordingRenderJoinDto?> GetRecordingRenderJoinAsync(string roomName, CancellationToken cancellationToken = default);
+
         /// <summary>Non-secret Jitsi settings (domain, auto-record) for whoever is about to join a live class.</summary>
         Task<ClassroomSettingsDto> GetClassroomSettingsAsync(CancellationToken cancellationToken = default);
 

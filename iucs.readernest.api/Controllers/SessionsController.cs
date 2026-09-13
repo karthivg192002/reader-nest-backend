@@ -124,6 +124,28 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>
+        /// Same anonymous-by-necessity, IP-allowlisted shape as <see cref="GetRecordingObserverJoin"/>
+        /// above, for the headless whiteboard/quiz recording-render bot instead of Jibri's video
+        /// observer -- it runs on the same Jitsi server, so it reuses the same Jibri:AllowedIps
+        /// check rather than a new config section.
+        /// </summary>
+        [HttpGet("recordings/render-join")]
+        [AllowAnonymous]
+        public async Task<ActionResult<RecordingRenderJoinDto>> GetRecordingRenderJoin(
+            [FromQuery] string room,
+            [FromServices] IConfiguration configuration,
+            CancellationToken cancellationToken)
+        {
+            if (!IsFromTrustedJibriHost(configuration))
+            {
+                return Forbid();
+            }
+
+            var join = await _sessionService.GetRecordingRenderJoinAsync(room, cancellationToken);
+            return join is null ? NoContent() : Ok(join);
+        }
+
+        /// <summary>
         /// Jibri:AllowedIps is a CSV of IPs/CIDRs in configuration (the Jitsi server's own
         /// outbound address by default) -- this call's own remote IP, resolved through
         /// UseForwardedHeaders in Program.cs so it reflects the real client rather than an
