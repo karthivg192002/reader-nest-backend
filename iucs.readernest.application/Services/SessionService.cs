@@ -41,7 +41,6 @@ namespace iucs.readernest.application.Services
         private readonly IJitsiTokenService _jitsiTokenService;
         private readonly IClassSessionEventLogService _eventLog;
         private readonly ITokenService _tokenService;
-        private readonly IRecordingRenderClient _recordingRenderClient;
 
         public SessionService(
             IUnitOfWork unitOfWork,
@@ -51,8 +50,7 @@ namespace iucs.readernest.application.Services
             ICurrentUserService currentUser,
             IJitsiTokenService jitsiTokenService,
             IClassSessionEventLogService eventLog,
-            ITokenService tokenService,
-            IRecordingRenderClient recordingRenderClient)
+            ITokenService tokenService)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
@@ -62,7 +60,6 @@ namespace iucs.readernest.application.Services
             _jitsiTokenService = jitsiTokenService;
             _eventLog = eventLog;
             _tokenService = tokenService;
-            _recordingRenderClient = recordingRenderClient;
         }
 
         public async Task<IReadOnlyList<ClassSessionDto>> ListAsync(
@@ -1222,50 +1219,6 @@ namespace iucs.readernest.application.Services
                 ExpiresAtUtc = expiresAtUtc,
             };
         }
-
-        public async Task<RecordingRenderJoinDto?> GetRecordingRenderJoinAsync(string roomName, CancellationToken cancellationToken = default)
-        {
-            // Same "InProgress right now" lookup as GetLiveObserverJoinAsync -- see that
-            // method's own comment for why this is unambiguous on a deployment where a room
-            // can only be one class at a time.
-            var candidates = await _unitOfWork.Repository<ClassSession>().Query()
-                .Where(s => s.MeetingRoomId == roomName && s.Status == SessionStatus.InProgress)
-                .ToListAsync(cancellationToken);
-
-            if (candidates.Count == 0)
-            {
-                return null;
-            }
-
-            var session = candidates.Count == 1
-                ? candidates[0]
-                : candidates.MinBy(s => s.ActualStartAtUtc ?? s.ScheduledStartAtUtc)!;
-
-            // Same generous ceiling as the recording observer's own token -- a class running
-            // long shouldn't have the render bot's hub access expire mid-capture.
-            var expiresAtUtc = DateTime.UtcNow.AddHours(4);
-            var hubToken = _tokenService.CreateRecordingObserverHubToken(session.Id, expiresAtUtc).AccessToken;
-
-            return new RecordingRenderJoinDto
-            {
-                SessionId = session.Id,
-                Room = roomName,
-                HubToken = hubToken,
-                ExpiresAtUtc = expiresAtUtc,
-            };
-        }
-
-        /// <summary>Fires the same moment JitsiLive.tsx's own recordingStatusChanged handler
-        /// sees a real Jibri recording actually start -- see IRecordingRenderClient's own doc
-        /// comment for why this never throws even if the bot is unreachable.</summary>
-        public Task StartRecordingRenderAsync(string room, CancellationToken cancellationToken = default)
-            => _recordingRenderClient.StartAsync(room, cancellationToken);
-
-        /// <summary>Counterpart to <see cref="StartRecordingRenderAsync"/> -- fires when
-        /// recording stops or the teacher leaves, so the bot doesn't keep a browser context
-        /// (and its own Jitsi connection) running for a class that's no longer recording.</summary>
-        public Task StopRecordingRenderAsync(string room, CancellationToken cancellationToken = default)
-            => _recordingRenderClient.StopAsync(room, cancellationToken);
 
         public async Task<ClassroomSettingsDto> GetClassroomSettingsAsync(CancellationToken cancellationToken = default)
         {
