@@ -8140,6 +8140,106 @@ namespace iucs.readernest.tests
             Assert.Contains("Unknown permission module", ex.Message);
         }
 
+        // ---- Teacher-calendar cross-account leak (reported via screen recording, 2026-09-13) ----
+
+        /// <summary>
+        /// BUG-005. Reassigning a batch to a different teacher (UpdateAsync's own Teacher field —
+        /// not a single-session reschedule) only ever wrote the new TeacherProfileId onto the
+        /// Batch row. Every ClassSession already generated for it keeps whatever TeacherProfileId
+        /// GenerateScheduleAsync gave it at creation time, and /api/sessions/mine filters on the
+        /// session's own TeacherProfileId — so the PREVIOUS teacher kept seeing (and could still
+        /// open/start) every one of that batch's not-yet-delivered classes on their own calendar,
+        /// under the batch's current name, after it had been handed to someone else entirely.
+        /// A real cross-account data leak, confirmed via a client screen recording of exactly
+        /// this: a teacher's calendar showing another teacher's sessions.
+        /// </summary>
+        [Fact]
+        public async Task UpdateBatch_ReassigningTeacher_MovesFutureSessions_ButKeepsDeliveredOnesWithWhoeverActuallyTaughtThem()
+        {
+            var (batch, course, _) = await SeedBatchWithSessionAsync(totalSessions: 2, includeSession: false);
+            var originalTeacherId = batch.TeacherProfileId;
+
+            var future = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = originalTeacherId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(3).AddMinutes(45),
+            };
+            var alreadyDelivered = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = originalTeacherId,
+                Status = SessionStatus.Completed,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-3).AddMinutes(45),
+            };
+            _db.Context.AddRange(future, alreadyDelivered);
+            await _db.Context.SaveChangesAsync();
+
+            var newTeacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var newTeacher = new TeacherProfile { UserId = newTeacherUser.Id };
+            _db.Context.Add(newTeacher);
+            await _db.Context.SaveChangesAsync();
+
+            await CreateBatchService().UpdateAsync(batch.Id, new SaveBatchRequest
+            {
+                CourseId = course.Id,
+                TeacherProfileId = newTeacher.Id,
+                Name = batch.Name,
+                Capacity = batch.Capacity,
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            Assert.Equal(newTeacher.Id, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == future.Id)).TeacherProfileId);
+            Assert.Equal(originalTeacherId, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == alreadyDelivered.Id)).TeacherProfileId);
+        }
+
+        [Fact]
+        public async Task UpdateBatch_ReassigningTeacher_BlocksWhenTheNewTeacherAlreadyHasASessionAtThatTime()
+        {
+            var (batch, course, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var slotStart = DateTime.UtcNow.AddDays(5);
+            var moving = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = slotStart,
+                ScheduledEndAtUtc = slotStart.AddMinutes(45),
+            };
+            _db.Context.Add(moving);
+            await _db.Context.SaveChangesAsync();
+
+            // A second, unrelated batch whose own teacher is already booked at the exact same time.
+            var (otherBatch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var busyTeacherId = otherBatch.TeacherProfileId;
+            _db.Context.Add(new ClassSession
+            {
+                BatchId = otherBatch.Id,
+                TeacherProfileId = busyTeacherId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = slotStart,
+                ScheduledEndAtUtc = slotStart.AddMinutes(45),
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var ex = await Assert.ThrowsAsync<DomainValidationException>(() => CreateBatchService().UpdateAsync(batch.Id, new SaveBatchRequest
+            {
+                CourseId = course.Id,
+                TeacherProfileId = busyTeacherId,
+                Name = batch.Name,
+                Capacity = batch.Capacity,
+            }));
+            Assert.Contains("already has a session", ex.Message);
+
+            // Blocked, not half-applied — the session that would have moved stays with its
+            // original teacher rather than silently double-booking the new one.
+            _db.Context.ChangeTracker.Clear();
+            Assert.Equal(batch.TeacherProfileId, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == moving.Id)).TeacherProfileId);
+        }
+
         public void Dispose() => _db.Dispose();
     }
 }

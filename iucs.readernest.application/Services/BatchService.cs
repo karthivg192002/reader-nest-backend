@@ -1,5 +1,6 @@
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Batches;
+using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Billing;
@@ -87,6 +88,79 @@ namespace iucs.readernest.application.Services
                     $"blocked the same way once more than one student is enrolled.");
             }
 
+            var previousTeacherProfileId = batch.TeacherProfileId;
+            var teacherChanged = request.TeacherProfileId != previousTeacherProfileId;
+
+            // Confirmed live: reassigning a batch's teacher here only ever updated the Batch row
+            // itself — every ClassSession already generated for it (GenerateScheduleAsync sets
+            // TeacherProfileId once, from the batch, at creation time and never revisits it) kept
+            // pointing at whoever the teacher was when each session was created. The previous
+            // teacher's own "My Classes" calendar kept showing every one of this batch's
+            // not-yet-delivered sessions — under the batch's current (possibly since renamed)
+            // name — because /api/sessions/mine filters on ClassSession.TeacherProfileId, not
+            // Batch.TeacherProfileId. A real cross-account leak, not just a stale display: the
+            // old teacher could still open and start a class that's no longer theirs.
+            // Only sessions that haven't happened yet move — same scoping SetStatusAsync already
+            // uses for its own dangling-sessions cleanup below — so a session someone already
+            // taught keeps its original teacher for accurate attendance/payout history.
+            // Validated (and the move applied to the tracked ClassSession rows) BEFORE any field
+            // on `batch` itself is mutated below, so a blocked reassignment leaves this whole
+            // update's tracked entities untouched rather than half-applied in memory.
+            List<ClassSession> movingSessions = [];
+            if (teacherChanged)
+            {
+                var now = DateTime.UtcNow;
+                movingSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                    .Where(s => s.BatchId == id
+                        && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                        && s.ScheduledStartAtUtc > now)
+                    .ToListAsync(cancellationToken);
+
+                if (movingSessions.Count > 0)
+                {
+                    // Don't silently double-book the incoming teacher — check their own calendar
+                    // and approved leave against every slot this batch is about to hand them,
+                    // the same two checks SessionService.EnsureTeacherIsFreeAsync runs for a single
+                    // session, just against all of this batch's remaining slots at once. The
+                    // candidate set (this one teacher's own other live sessions) is small, so the
+                    // actual per-slot overlap check runs in memory rather than as a SQL join
+                    // against an already-materialized list.
+                    var moveWindowStart = movingSessions.Min(s => s.ScheduledStartAtUtc);
+                    var moveWindowEnd = movingSessions.Max(s => s.ScheduledEndAtUtc);
+                    var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
+                        .Where(s => s.TeacherProfileId == request.TeacherProfileId
+                            && s.BatchId != id
+                            && (s.Status == SessionStatus.Scheduled
+                                || s.Status == SessionStatus.InProgress
+                                || s.Status == SessionStatus.CarriedForward)
+                            && s.ScheduledStartAtUtc < moveWindowEnd
+                            && s.ScheduledEndAtUtc > moveWindowStart)
+                        .ToListAsync(cancellationToken);
+                    var conflict = otherTeacherSessions
+                        .Where(other => movingSessions.Any(moving =>
+                            other.ScheduledStartAtUtc < moving.ScheduledEndAtUtc && other.ScheduledEndAtUtc > moving.ScheduledStartAtUtc))
+                        .OrderBy(s => s.ScheduledStartAtUtc)
+                        .FirstOrDefault();
+                    if (conflict is not null)
+                    {
+                        throw new DomainValidationException(
+                            $"Can't reassign this batch — the new teacher already has a session from " +
+                            $"{DateTimeDisplay.ToLocal(conflict.ScheduledStartAtUtc)} to {DateTimeDisplay.ToLocal(conflict.ScheduledEndAtUtc)}.");
+                    }
+
+                    var onLeave = await _unitOfWork.Repository<LeaveRequest>().ExistsAsync(
+                        l => l.TeacherProfileId == request.TeacherProfileId
+                            && l.Status == LeaveStatus.Approved
+                            && l.StartAtUtc < moveWindowEnd
+                            && l.EndAtUtc > moveWindowStart,
+                        cancellationToken);
+                    if (onLeave)
+                    {
+                        throw new DomainValidationException("Can't reassign this batch — the new teacher has approved leave overlapping one or more of its remaining sessions.");
+                    }
+                }
+            }
+
             batch.CourseId = request.CourseId;
             batch.TeacherProfileId = request.TeacherProfileId;
             batch.Name = request.Name.Trim();
@@ -94,6 +168,17 @@ namespace iucs.readernest.application.Services
             batch.StartDate = request.StartDate;
             batch.EndDate = request.EndDate;
             batch.DurationMinutesOverride = request.DurationMinutesOverride;
+
+            if (movingSessions.Count > 0)
+            {
+                foreach (var session in movingSessions)
+                {
+                    session.TeacherProfileId = request.TeacherProfileId;
+                }
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
+                    changesJson: $"{{\"batchId\":\"{batch.Id}\",\"teacherReassigned\":true,\"from\":\"{previousTeacherProfileId}\",\"to\":\"{request.TeacherProfileId}\",\"sessionCount\":{movingSessions.Count}}}",
+                    cancellationToken: cancellationToken);
+            }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(Batch), batch.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
