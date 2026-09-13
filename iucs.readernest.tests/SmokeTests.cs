@@ -8240,6 +8240,136 @@ namespace iucs.readernest.tests
             Assert.Equal(batch.TeacherProfileId, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == moving.Id)).TeacherProfileId);
         }
 
+        // ---- Demo room mismatch (reported via screen recording, 2026-09-13) ----
+
+        /// <summary>
+        /// BUG-006. A Demo scheduled from the generic admin/RM Sessions dialog (SessionsController
+        /// -> SessionService.ScheduleAsync) got a brand-new random MeetingRoomId, unrelated to the
+        /// teacher's own fixed personal meeting room -- unlike a Demo booked through Admission's
+        /// dedicated Demo Booking flow, which already used the teacher's personal room
+        /// (DemoBookingService.EnsureTeacherMeetingRoomAsync). The client has been trained to
+        /// always share that one stable personal link for a demo, so when a demo was instead
+        /// scheduled from here, the teacher joined the (correct) session room while the parent --
+        /// handed the teacher's personal link, since this dialog gives nobody any other link to
+        /// share -- landed in a completely different, empty room and sat on Jitsi's own "waiting
+        /// for a moderator" screen forever, with no knock ever reaching the teacher.
+        /// </summary>
+        [Fact]
+        public async Task ScheduleSession_ADemo_UsesTheTeachersFixedPersonalRoom_NotARandomOne()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+            Assert.Null(teacherUser.PersonalMeetingRoomId); // not minted yet
+
+            var start = DateTime.UtcNow.AddDays(2);
+            var dto = await CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+            {
+                TeacherProfileId = teacher.Id,
+                Type = SessionType.Demo,
+                ScheduledStartAtUtc = start,
+                ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            var mintedRoom = (await _db.Context.Users.FirstAsync(u => u.Id == teacherUser.Id)).PersonalMeetingRoomId;
+            Assert.False(string.IsNullOrEmpty(mintedRoom));
+            Assert.Equal(mintedRoom, dto.MeetingRoomId);
+
+            // Scheduling a second demo for the same teacher reuses the exact same room rather
+            // than minting another one -- the whole point is one stable link per teacher.
+            var second = await CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+            {
+                TeacherProfileId = teacher.Id,
+                Type = SessionType.Demo,
+                ScheduledStartAtUtc = start.AddDays(1),
+                ScheduledEndAtUtc = start.AddDays(1).AddMinutes(30),
+            });
+            Assert.Equal(mintedRoom, second.MeetingRoomId);
+        }
+
+        [Fact]
+        public async Task ScheduleSession_ARegularSession_StillGetsItsOwnFreshRoom_NotThePersonalOne()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+
+            var start = DateTime.UtcNow.AddDays(2);
+            var dto = await CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+            {
+                TeacherProfileId = batch.TeacherProfileId,
+                BatchId = batch.Id,
+                Type = SessionType.Regular,
+                ScheduledStartAtUtc = start,
+                ScheduledEndAtUtc = start.AddMinutes(45),
+            });
+
+            Assert.StartsWith("trn-", dto.MeetingRoomId);
+            Assert.DoesNotContain("personal", dto.MeetingRoomId);
+        }
+
+        [Fact]
+        public async Task RescheduleSession_ADemoMovedToADifferentTeacher_FollowsThatTeachersPersonalRoom()
+        {
+            var teacherAUser = await _db.SeedUserAsync($"a-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacherA = new TeacherProfile { UserId = teacherAUser.Id };
+            var teacherBUser = await _db.SeedUserAsync($"b-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacherB = new TeacherProfile { UserId = teacherBUser.Id };
+            _db.Context.AddRange(teacherA, teacherB);
+            await _db.Context.SaveChangesAsync();
+
+            var start = DateTime.UtcNow.AddDays(2);
+            var demo = await CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+            {
+                TeacherProfileId = teacherA.Id,
+                Type = SessionType.Demo,
+                ScheduledStartAtUtc = start,
+                ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+            var originalRoom = demo.MeetingRoomId;
+
+            var reassignedStart = start.AddHours(2);
+            var replacement = await CreateSessionService().RescheduleAsync(demo.Id, new RescheduleSessionRequest
+            {
+                TeacherProfileId = teacherB.Id,
+                ScheduledStartAtUtc = reassignedStart,
+                ScheduledEndAtUtc = reassignedStart.AddMinutes(30),
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            var teacherBsRoom = (await _db.Context.Users.FirstAsync(u => u.Id == teacherBUser.Id)).PersonalMeetingRoomId;
+            Assert.False(string.IsNullOrEmpty(teacherBsRoom));
+            Assert.NotEqual(originalRoom, teacherBsRoom); // actually moved, not left pointing at teacher A's room
+            Assert.Equal(teacherBsRoom, replacement.MeetingRoomId);
+        }
+
+        [Fact]
+        public async Task RescheduleSession_ADemoWithTheSameTeacher_KeepsTheSamePersonalRoom()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var start = DateTime.UtcNow.AddDays(2);
+            var demo = await CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+            {
+                TeacherProfileId = teacher.Id,
+                Type = SessionType.Demo,
+                ScheduledStartAtUtc = start,
+                ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+
+            var newStart = start.AddHours(3);
+            var replacement = await CreateSessionService().RescheduleAsync(demo.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = newStart,
+                ScheduledEndAtUtc = newStart.AddMinutes(30),
+            });
+
+            Assert.Equal(demo.MeetingRoomId, replacement.MeetingRoomId);
+        }
+
         public void Dispose() => _db.Dispose();
     }
 }

@@ -145,6 +145,24 @@ namespace iucs.readernest.application.Services
             await EnsureTeacherIsFreeAsync(
                 request.TeacherProfileId, request.ScheduledStartAtUtc, request.ScheduledEndAtUtc, cancellationToken);
 
+            // Confirmed live via a client screen recording: a Demo scheduled from this generic
+            // Sessions-page dialog (as opposed to Admission's dedicated Demo Booking flow, which
+            // already does this — see DemoBookingService.EnsureTeacherMeetingRoomAsync) got a
+            // brand-new random room here, unrelated to the teacher's own fixed personal meeting
+            // room. The client has since been trained to always share that one stable personal
+            // link for a demo (WBS "One teacher -> one fixed demo link"), so whenever a demo was
+            // instead scheduled from here, the teacher joined the (correct, freshly-generated)
+            // session room while the parent — handed the teacher's personal link, the only link
+            // this dialog ever gave anyone a reason to share — landed in a completely different,
+            // empty room and sat on Jitsi's own "waiting for a moderator" screen forever, with no
+            // knock/notification ever reaching the teacher (she was never in that room to see one).
+            // Routing every Demo through the same fixed personal room this teacher already shares
+            // for every other demo means whichever screen scheduled it, the link she hands out
+            // always points at wherever she's actually going to be.
+            var meetingRoomId = request.Type == SessionType.Demo
+                ? (await EnsureTeacherMeetingRoomAsync(request.TeacherProfileId, cancellationToken)).User.PersonalMeetingRoomId!
+                : $"trn-{Guid.NewGuid():N}";
+
             var session = new ClassSession
             {
                 BatchId = request.BatchId,
@@ -152,8 +170,7 @@ namespace iucs.readernest.application.Services
                 Type = request.Type,
                 ScheduledStartAtUtc = request.ScheduledStartAtUtc,
                 ScheduledEndAtUtc = request.ScheduledEndAtUtc,
-                // One-click join: the room id is generated, never a manual meeting link
-                MeetingRoomId = $"trn-{Guid.NewGuid():N}",
+                MeetingRoomId = meetingRoomId,
             };
             await _unitOfWork.Repository<ClassSession>().AddAsync(session, cancellationToken);
             await _auditLog.StageAsync(AuditAction.Create, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
@@ -224,6 +241,16 @@ namespace iucs.readernest.application.Services
 
             original.Status = SessionStatus.Rescheduled;
 
+            // A Demo's room is the assigned teacher's own fixed personal room (see ScheduleAsync
+            // and DemoBookingService's own reassignment path), so it has to follow a teacher swap
+            // here too — otherwise the parent's already-shared link keeps pointing at the OLD
+            // teacher's room while the new teacher joins from her own, and nobody ends up in the
+            // same place. A Regular session's room has no such meaning (just a one-off generated
+            // id), so it always just carries over unchanged.
+            var meetingRoomId = original.Type == SessionType.Demo && newTeacherId != original.TeacherProfileId
+                ? (await EnsureTeacherMeetingRoomAsync(newTeacherId, cancellationToken)).User.PersonalMeetingRoomId!
+                : original.MeetingRoomId;
+
             // A reschedule is a new calendar entry linked to the original,
             // so history and colour coding stay traceable.
             var replacement = new ClassSession
@@ -233,7 +260,7 @@ namespace iucs.readernest.application.Services
                 Type = original.Type,
                 ScheduledStartAtUtc = request.ScheduledStartAtUtc,
                 ScheduledEndAtUtc = request.ScheduledEndAtUtc,
-                MeetingRoomId = original.MeetingRoomId,
+                MeetingRoomId = meetingRoomId,
                 RescheduledFromSessionId = original.Id,
             };
             await _unitOfWork.Repository<ClassSession>().AddAsync(replacement, cancellationToken);
@@ -835,6 +862,31 @@ namespace iucs.readernest.application.Services
                 subscription.Status = SubscriptionStatus.Expired;
                 subscription.NextBillingAtUtc = null;
             }
+        }
+
+        /// <summary>
+        /// Every teacher's fixed demo room: their permanent personal meeting room (the same one
+        /// GET /api/users/me/meeting-room mints), so a demo's join link is stable regardless of
+        /// which screen scheduled it, rather than a new random room each time. Mints the room on
+        /// first use, same convention as UsersController.MyMeetingRoom and
+        /// DemoBookingService.EnsureTeacherMeetingRoomAsync (this is that same helper,
+        /// duplicated rather than shared — the two services don't have a common base to hang a
+        /// shared helper off of). Caller is responsible for SaveChangesAsync.
+        /// </summary>
+        private async Task<TeacherProfile> EnsureTeacherMeetingRoomAsync(Guid teacherProfileId, CancellationToken cancellationToken)
+        {
+            var teacher = await _unitOfWork.Repository<TeacherProfile>().TrackedQuery()
+                .Include(t => t.User)
+                .FirstOrDefaultAsync(t => t.Id == teacherProfileId, cancellationToken)
+                ?? throw new NotFoundException(nameof(TeacherProfile), teacherProfileId);
+
+            if (string.IsNullOrEmpty(teacher.User.PersonalMeetingRoomId))
+            {
+                teacher.User.PersonalMeetingRoomId = $"trn-personal-{Guid.NewGuid():N}";
+                _unitOfWork.Repository<User>().Update(teacher.User);
+            }
+
+            return teacher;
         }
 
         /// <summary>
