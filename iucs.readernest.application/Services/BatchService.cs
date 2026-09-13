@@ -229,6 +229,93 @@ namespace iucs.readernest.application.Services
             return await GetAsync(batch.Id, cancellationToken);
         }
 
+        public async Task<ReconcileStaleSessionTeachersResultDto> ReconcileStaleSessionTeachersAsync(
+            CancellationToken cancellationToken = default)
+        {
+            var now = DateTime.UtcNow;
+
+            // The cascade in UpdateAsync only started running once that fix shipped — anything
+            // reassigned before then still has ClassSession rows stamped with whoever the
+            // teacher was at generation time, even though the Batch row itself has long since
+            // moved on. Find every such orphaned, still-undelivered session in one query.
+            var staleSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .Include(s => s.Batch)
+                .Where(s => (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                    && s.ScheduledStartAtUtc > now
+                    && s.Batch != null
+                    && s.TeacherProfileId != s.Batch.TeacherProfileId)
+                .ToListAsync(cancellationToken);
+
+            var conflicts = new List<ReconcileStaleSessionTeacherConflictDto>();
+            var sessionsMoved = 0;
+            var batchesFixed = 0;
+
+            foreach (var group in staleSessions.GroupBy(s => s.BatchId))
+            {
+                var movingSessions = group.ToList();
+                var batch = movingSessions[0].Batch!;
+                var newTeacherId = batch.TeacherProfileId;
+
+                // Same double-booking + approved-leave guard UpdateAsync's own reassignment
+                // cascade runs, so this repair can't silently hand the new teacher a conflicting
+                // slot just because the corruption predates them.
+                var moveWindowStart = movingSessions.Min(s => s.ScheduledStartAtUtc);
+                var moveWindowEnd = movingSessions.Max(s => s.ScheduledEndAtUtc);
+                var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.TeacherProfileId == newTeacherId
+                        && s.BatchId != batch.Id
+                        && (s.Status == SessionStatus.Scheduled
+                            || s.Status == SessionStatus.InProgress
+                            || s.Status == SessionStatus.CarriedForward)
+                        && s.ScheduledStartAtUtc < moveWindowEnd
+                        && s.ScheduledEndAtUtc > moveWindowStart)
+                    .ToListAsync(cancellationToken);
+                var conflict = otherTeacherSessions
+                    .Where(other => movingSessions.Any(moving =>
+                        other.ScheduledStartAtUtc < moving.ScheduledEndAtUtc && other.ScheduledEndAtUtc > moving.ScheduledStartAtUtc))
+                    .OrderBy(s => s.ScheduledStartAtUtc)
+                    .FirstOrDefault();
+                if (conflict is not null)
+                {
+                    conflicts.Add(new ReconcileStaleSessionTeacherConflictDto(batch.Id, batch.Name, newTeacherId,
+                        $"New teacher already has a session from {DateTimeDisplay.ToLocal(conflict.ScheduledStartAtUtc)} to {DateTimeDisplay.ToLocal(conflict.ScheduledEndAtUtc)}."));
+                    continue;
+                }
+
+                var onLeave = await _unitOfWork.Repository<LeaveRequest>().ExistsAsync(
+                    l => l.TeacherProfileId == newTeacherId
+                        && l.Status == LeaveStatus.Approved
+                        && l.StartAtUtc < moveWindowEnd
+                        && l.EndAtUtc > moveWindowStart,
+                    cancellationToken);
+                if (onLeave)
+                {
+                    conflicts.Add(new ReconcileStaleSessionTeacherConflictDto(batch.Id, batch.Name, newTeacherId,
+                        "New teacher has approved leave overlapping one or more of this batch's remaining sessions."));
+                    continue;
+                }
+
+                var movedFrom = movingSessions.Select(s => s.TeacherProfileId).Distinct().ToList();
+                foreach (var session in movingSessions)
+                {
+                    session.TeacherProfileId = newTeacherId;
+                }
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
+                    changesJson: $"{{\"batchId\":\"{batch.Id}\",\"staleTeacherReconciled\":true,\"from\":[{string.Join(",", movedFrom.Select(t => $"\"{t}\""))}],\"to\":\"{newTeacherId}\",\"sessionCount\":{movingSessions.Count}}}",
+                    cancellationToken: cancellationToken);
+
+                batchesFixed++;
+                sessionsMoved += movingSessions.Count;
+            }
+
+            if (sessionsMoved > 0)
+            {
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+
+            return new ReconcileStaleSessionTeachersResultDto(batchesFixed, sessionsMoved, conflicts);
+        }
+
         /// <summary>
         /// A Subscription has no direct link to a Batch — only ChildId + PackagePlanId — so
         /// there's no FK this could join on directly. Instead: find the children who were
