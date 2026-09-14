@@ -367,8 +367,18 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok", timestampUtc = DateT
 app.MapGet("/m/{slug}", async (
     string slug,
     iucs.readernest.application.Services.IShortLinkService shortLinks,
+    HttpContext context,
     CancellationToken cancellationToken) =>
 {
+    // A share channel's own link-preview bot (WhatsApp/iMessage/email client fetching this URL
+    // the instant it's pasted, to build a preview card) or an intermediary proxy has no business
+    // caching this redirect -- the whole point of resolving through here on every click (rather
+    // than handing out the final target directly) is that it stays live no matter how long ago
+    // it was shared. Without an explicit no-store, a cached hop here would freeze whoever
+    // actually taps the link onto whatever was resolved at share time instead of click time.
+    context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+    context.Response.Headers.Pragma = "no-cache";
+
     var target = await shortLinks.ResolveAsync(slug, cancellationToken);
     return target is null
         ? Results.NotFound("This link has expired or doesn't exist.")

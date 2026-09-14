@@ -178,6 +178,11 @@ namespace iucs.readernest.api.Controllers
         [EnableRateLimiting("demo-join")]
         public async Task<IActionResult> Join(Guid id, [FromQuery] Guid? p, CancellationToken cancellationToken)
         {
+            // A share channel's own link-preview bot, or an intermediary proxy, has no business
+            // caching this redirect -- see the matching comment on GET /m/{slug} in Program.cs.
+            Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+            Response.Headers.Pragma = "no-cache";
+
             var url = await _demoBookingService.ResolveLiveJoinUrlAsync(id, p, cancellationToken);
             return url is null
                 ? NotFound("This demo booking (or that invitee) no longer exists.")

@@ -20,6 +20,23 @@ namespace iucs.readernest.api.Controllers
         private readonly IRoleService _roleService;
         private readonly IEnrollmentService _enrollmentService;
 
+        // A personal meeting room is meant to be copied once (MyMeetingRoomShortLink's own doc
+        // comment: "Never expires... reused indefinitely") and reused for weeks -- shared over
+        // WhatsApp/email hours or days before it's actually opened, exactly like a Google Meet
+        // personal room link. The JWT minted for it must not become a silent expiry of its own
+        // regardless of the gap between sharing and joining: MeetingRoomJoin (the anonymous
+        // redirect target every shared link ultimately lands on) re-mints on every hit, so this
+        // is meant to be scoped to "now" at actual join time, not share time -- but a messaging
+        // app's own link-preview prefetch (or an in-app browser that resolves a link once and
+        // reuses that resolution) can make the *effective* mint moment earlier than the real
+        // click, so a short window here silently becomes a "link expired" report hours later.
+        // Confirmed live (2026-09-14): shared at 12pm for a 6pm join -- the exact AddHours(6)
+        // this replaces -- reported as "expired" on arrival. Mirrors
+        // DemoBookingService.JoinTokenLifetime's identical fix for the identical bug class on
+        // demo join links. Still bounded, not literally forever, so a leaked token can't be
+        // replayed indefinitely.
+        private static readonly TimeSpan PersonalRoomTokenLifetime = TimeSpan.FromDays(365 * 5);
+
         public UsersController(IUserService userService, IRoleService roleService, IEnrollmentService enrollmentService)
         {
             _userService = userService;
@@ -144,7 +161,7 @@ namespace iucs.readernest.api.Controllers
             // Always moderator: this is the member's own permanent room, nobody else's.
             var token = jitsiTokenService.CreateToken(
                 domain, jitsiConfigJson, user.PersonalMeetingRoomId, $"{user.FirstName} {user.LastName}".Trim(),
-                user.Email, moderator: true, DateTime.UtcNow.AddHours(6));
+                user.Email, moderator: true, DateTime.UtcNow.Add(PersonalRoomTokenLifetime));
 
             return Ok(new { roomId = user.PersonalMeetingRoomId, domain, token });
         }
@@ -190,12 +207,13 @@ namespace iucs.readernest.api.Controllers
 
         /// <summary>
         /// Public, anonymous redirect a guest's invite link points at -- resolves this room's
-        /// live Jitsi URL fresh on every click (a brand new, short-lived token; never a stale
-        /// baked-in one) and 302s there, exactly like DemoBookingsController.Join does for a
-        /// parent's demo link. Deliberately non-moderator: this is the *invite* link handed to
-        /// students/parents, not the room owner's own access (that's the authenticated
-        /// /meet/personal route in-app, which already re-resolves fresh on every load the same
-        /// way). Never expires by design -- see the remarks on MyMeetingRoomShortLink above.
+        /// live Jitsi URL fresh on every click (a brand new PersonalRoomTokenLifetime-lived
+        /// token; never a stale baked-in one) and 302s there, exactly like
+        /// DemoBookingsController.Join does for a parent's demo link. Deliberately non-moderator:
+        /// this is the *invite* link handed to students/parents, not the room owner's own access
+        /// (that's the authenticated /meet/personal route in-app, which already re-resolves
+        /// fresh on every load the same way). Never expires by design -- see the remarks on
+        /// MyMeetingRoomShortLink above and on PersonalRoomTokenLifetime itself.
         /// </summary>
         [HttpGet("{id:guid}/meeting-room/join")]
         [AllowAnonymous]
@@ -206,6 +224,11 @@ namespace iucs.readernest.api.Controllers
             [FromServices] application.Common.Interfaces.IJitsiTokenService jitsiTokenService,
             CancellationToken cancellationToken)
         {
+            // A share channel's own link-preview bot, or an intermediary proxy, has no business
+            // caching this redirect -- see the matching comment on GET /m/{slug} in Program.cs.
+            Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+            Response.Headers.Pragma = "no-cache";
+
             var user = await unitOfWork.Repository<domain.Entities.Users.User>()
                 .FirstOrDefaultAsync(u => u.Id == id, cancellationToken);
             if (user is null || string.IsNullOrEmpty(user.PersonalMeetingRoomId))
@@ -220,7 +243,7 @@ namespace iucs.readernest.api.Controllers
             var domain = application.Helper.JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
             var token = jitsiTokenService.CreateToken(
                 domain, jitsiConfigJson, user.PersonalMeetingRoomId, "Guest",
-                participantEmail: null, moderator: false, DateTime.UtcNow.AddHours(6));
+                participantEmail: null, moderator: false, DateTime.UtcNow.Add(PersonalRoomTokenLifetime));
             var targetUrl = application.Helper.JitsiLinkBuilder.BuildJoinUrl(user.PersonalMeetingRoomId, jitsiConfigJson, token)!;
 
             return Redirect(targetUrl);
