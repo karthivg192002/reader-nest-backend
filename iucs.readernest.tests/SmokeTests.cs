@@ -7419,6 +7419,59 @@ namespace iucs.readernest.tests
         }
 
         /// <summary>
+        /// BatchService.DeleteAsync: a clean batch (no active students) is soft-deleted —
+        /// excluded from every future query via the global IsDeleted filter — and any
+        /// still-scheduled future session is cancelled the same way SetStatusAsync's
+        /// Dormant/Archived transition already does, so nothing is left dangling on a teacher's
+        /// calendar for a batch that no longer exists.
+        /// </summary>
+        [Fact]
+        public async Task DeleteBatch_WithNoActiveStudents_SoftDeletesIt_AndCancelsItsFutureSessions()
+        {
+            var (batch, _, futureSession) = await SeedBatchWithSessionAsync(totalSessions: 4);
+
+            await CreateBatchService().DeleteAsync(batch.Id);
+
+            var (context, _) = _db.CreateConcurrentSession();
+            using (context)
+            {
+                Assert.False(await context.Batches.AnyAsync(b => b.Id == batch.Id)); // excluded by the soft-delete filter
+                var stored = await context.Batches.IgnoreQueryFilters().FirstAsync(b => b.Id == batch.Id);
+                Assert.True(stored.IsDeleted);
+                Assert.NotNull(stored.DeletedAtUtc);
+
+                var session = await context.ClassSessions.FirstAsync(s => s.Id == futureSession.Id);
+                Assert.Equal(SessionStatus.Cancelled, session.Status);
+                Assert.Contains("deleted", session.CancellationReason!, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        /// <summary>
+        /// A batch with an active student can't just vanish — that student would be left
+        /// enrolled in a batch nobody can see or manage anymore. DeleteAsync must refuse instead
+        /// of silently orphaning them, mirroring UpdateAsync's own capacity-below-active-count
+        /// guard.
+        /// </summary>
+        [Fact]
+        public async Task DeleteBatch_WithAnActiveStudent_IsRefused()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 4, includeSession: false);
+            var parentUser = await _db.SeedUserAsync($"bd-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var child = new Child { ParentProfile = new ParentProfile { UserId = parentUser.Id }, FirstName = "Kid", LastName = "Y" };
+            _db.Context.Add(child);
+            _db.Context.Add(new BatchEnrollment { BatchId = batch.Id, Child = child, Status = EnrollmentStatus.Active });
+            await _db.Context.SaveChangesAsync();
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => CreateBatchService().DeleteAsync(batch.Id));
+
+            var (context, _) = _db.CreateConcurrentSession();
+            using (context)
+            {
+                Assert.True(await context.Batches.AnyAsync(b => b.Id == batch.Id)); // untouched
+            }
+        }
+
+        /// <summary>
         /// IntegrationService's secret handling, previously untested and security-relevant:
         /// gateway credentials must never round-trip to the client in the clear, and an admin
         /// saving the form back unchanged must not overwrite the real secret with its mask.
@@ -8240,6 +8293,106 @@ namespace iucs.readernest.tests
             Assert.Equal(batch.TeacherProfileId, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == moving.Id)).TeacherProfileId);
         }
 
+        /// <summary>
+        /// BUG-005 (data repair). The cascade in UpdateAsync only protects reassignments made
+        /// AFTER it shipped — a batch reassigned earlier still has ClassSession rows stuck on the
+        /// old teacher, bypassing UpdateAsync entirely (writing straight to the tracked Batch,
+        /// the way the pre-fix bug's own corruption would have been produced) to simulate exactly
+        /// that pre-existing bad state. ReconcileStaleSessionTeachersAsync must find and fix it.
+        /// </summary>
+        [Fact]
+        public async Task ReconcileStaleSessionTeachers_MovesOrphanedFutureSessionsOntoTheBatchsCurrentTeacher()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var staleTeacherId = batch.TeacherProfileId;
+
+            var newTeacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var newTeacher = new TeacherProfile { UserId = newTeacherUser.Id };
+            _db.Context.Add(newTeacher);
+
+            var future = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = staleTeacherId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(3).AddMinutes(45),
+            };
+            var alreadyDelivered = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = staleTeacherId,
+                Status = SessionStatus.Completed,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-3).AddMinutes(45),
+            };
+            _db.Context.AddRange(future, alreadyDelivered);
+            await _db.Context.SaveChangesAsync();
+
+            // Bypasses UpdateAsync on purpose — reproduces a batch whose Batch row moved on to a
+            // new teacher while its already-generated sessions were left behind, the exact state
+            // a pre-fix reassignment (or any other path that ever wrote Batch.TeacherProfileId
+            // directly) would leave.
+            batch.TeacherProfileId = newTeacher.Id;
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            var result = await CreateBatchService().ReconcileStaleSessionTeachersAsync();
+
+            Assert.Equal(1, result.BatchesFixed);
+            Assert.Equal(1, result.SessionsMoved);
+            Assert.Empty(result.Conflicts);
+
+            _db.Context.ChangeTracker.Clear();
+            Assert.Equal(newTeacher.Id, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == future.Id)).TeacherProfileId);
+            Assert.Equal(staleTeacherId, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == alreadyDelivered.Id)).TeacherProfileId);
+        }
+
+        [Fact]
+        public async Task ReconcileStaleSessionTeachers_SkipsAndReportsABatchThatWouldDoubleBookTheNewTeacher()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var slotStart = DateTime.UtcNow.AddDays(5);
+            var stale = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = slotStart,
+                ScheduledEndAtUtc = slotStart.AddMinutes(45),
+            };
+            _db.Context.Add(stale);
+            await _db.Context.SaveChangesAsync();
+
+            // The batch's CURRENT teacher (what it was reassigned to) is already busy elsewhere
+            // at that exact slot.
+            var (otherBatch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var busyTeacherId = otherBatch.TeacherProfileId;
+            _db.Context.Add(new ClassSession
+            {
+                BatchId = otherBatch.Id,
+                TeacherProfileId = busyTeacherId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = slotStart,
+                ScheduledEndAtUtc = slotStart.AddMinutes(45),
+            });
+            batch.TeacherProfileId = busyTeacherId;
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            var result = await CreateBatchService().ReconcileStaleSessionTeachersAsync();
+
+            Assert.Equal(0, result.BatchesFixed);
+            Assert.Equal(0, result.SessionsMoved);
+            var conflict = Assert.Single(result.Conflicts);
+            Assert.Equal(batch.Id, conflict.BatchId);
+            Assert.Contains("already has a session", conflict.Reason);
+
+            _db.Context.ChangeTracker.Clear();
+            Assert.Equal(stale.TeacherProfileId,
+                (await _db.Context.ClassSessions.FirstAsync(s => s.Id == stale.Id)).TeacherProfileId);
+        }
+
         // ---- Demo room mismatch (reported via screen recording, 2026-09-13) ----
 
         /// <summary>
@@ -8417,6 +8570,103 @@ namespace iucs.readernest.tests
             var schedule = await new ParentPortalService(_db.UnitOfWork).GetScheduleAsync(
                 parentUser.Id, DateTime.UtcNow, DateTime.UtcNow.AddDays(30));
             Assert.Contains(schedule, s => s.Id == replacement.Id);
+        }
+
+        // ---- Session-id resolution across a reschedule (still reported after the DemoBooking
+        // fix above -- a stale id can arrive for reasons besides a stale DemoBooking link, e.g.
+        // a portal tab that was simply already open when the edit happened) ----
+
+        [Fact]
+        public async Task ResolveCurrentSessionId_ANonRescheduledSession_ReturnsItself()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+
+            Assert.Equal(session.Id, await CreateSessionService().ResolveCurrentSessionIdAsync(session.Id));
+        }
+
+        [Fact]
+        public async Task ResolveCurrentSessionId_AMissingSession_ReturnsTheIdUnchanged()
+        {
+            // Lets the caller's own not-found handling fire against the id it actually asked
+            // for, rather than this silently swallowing "that session doesn't exist at all".
+            var bogusId = Guid.NewGuid();
+
+            Assert.Equal(bogusId, await CreateSessionService().ResolveCurrentSessionIdAsync(bogusId));
+        }
+
+        [Fact]
+        public async Task ResolveCurrentSessionId_ARescheduledChain_WalksToTheFinalReplacement_FromAnyLinkInIt()
+        {
+            var (batch, _, original) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var service = CreateSessionService();
+
+            var start = original.ScheduledStartAtUtc.AddDays(1);
+            var firstEdit = await service.RescheduleAsync(original.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = start,
+                ScheduledEndAtUtc = start.AddMinutes(45),
+            });
+            var secondStart = start.AddDays(1);
+            var secondEdit = await service.RescheduleAsync(firstEdit.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = secondStart,
+                ScheduledEndAtUtc = secondStart.AddMinutes(45),
+            });
+
+            // Two edits ago, one edit ago, and the current one itself all resolve to the same,
+            // final, still-live session.
+            Assert.Equal(secondEdit.Id, await service.ResolveCurrentSessionIdAsync(original.Id));
+            Assert.Equal(secondEdit.Id, await service.ResolveCurrentSessionIdAsync(firstEdit.Id));
+            Assert.Equal(secondEdit.Id, await service.ResolveCurrentSessionIdAsync(secondEdit.Id));
+        }
+
+        /// <summary>
+        /// BUG-008. Reported again after BUG-007's DemoBooking-link fix above, this time for the
+        /// far more common cause: a parent's (or teacher's) own portal tab was simply already
+        /// open, showing the class's pre-edit session id, when an admin edited/rescheduled it --
+        /// nothing about that requires a demo or a stale DemoBooking row at all. GetJitsiJoinAsync
+        /// used to look the given id up literally, so this stale id either 403'd outright (once a
+        /// batch/teacher change moved eligibility) or, worse, quietly succeeded against a Regular
+        /// session's still-valid BatchEnrollment match while the *other* side of the call joined
+        /// under the NEW id -- same underlying symptom either way: two different ClassroomHub
+        /// groups for what both people think is the one class, so neither's People roster or
+        /// whiteboard ever reaches the other, even though both land in the same Jitsi room.
+        /// </summary>
+        [Fact]
+        public async Task GetJitsiJoin_WithAStaleRescheduledSessionId_ResolvesAndAuthorizesAgainstTheCurrentSession()
+        {
+            var (batch, _, original) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            // SeedBatchWithSessionAsync's own session starts tomorrow (outside the 10-minute
+            // join window) and has no room yet -- move it to "already started" with a room, so
+            // GetJitsiJoinAsync's own window/room checks don't get in the way of what this test
+            // is actually checking.
+            original.ScheduledStartAtUtc = DateTime.UtcNow.AddMinutes(-5);
+            original.ScheduledEndAtUtc = DateTime.UtcNow.AddMinutes(40);
+            original.MeetingRoomId = "room-original";
+            await _db.Context.SaveChangesAsync();
+
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var child = new Child { ParentProfile = parentProfile, FirstName = "Kid", LastName = "Stale" };
+            _db.Context.AddRange(parentProfile, child);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.Add(new BatchEnrollment { BatchId = batch.Id, ChildId = child.Id, Status = EnrollmentStatus.Active });
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateSessionService();
+            var newStart = DateTime.UtcNow.AddMinutes(5);
+            var replacement = await service.RescheduleAsync(original.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = newStart,
+                ScheduledEndAtUtc = newStart.AddMinutes(45),
+            });
+
+            // The parent's own portal tab still only knows the ORIGINAL id -- it was open
+            // before the edit and never reloaded. That's the whole scenario.
+            var join = await CreateSessionService().GetJitsiJoinAsync(original.Id, parentUser.Id);
+
+            Assert.Equal(replacement.Id, join.SessionId);
+            Assert.Equal(replacement.MeetingRoomId, join.Room);
         }
 
         public void Dispose() => _db.Dispose();

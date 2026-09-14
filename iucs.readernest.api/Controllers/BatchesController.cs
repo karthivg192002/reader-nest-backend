@@ -51,6 +51,15 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _batchService.UpdateAsync(id, request, cancellationToken));
         }
 
+        /// <summary>Soft-deletes the batch — refused while it still has an active student (withdraw them, or move them to another batch, first).</summary>
+        [HttpDelete("{id:guid}")]
+        [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.Delete)]
+        public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
+        {
+            await _batchService.DeleteAsync(id, cancellationToken);
+            return NoContent();
+        }
+
         /// <summary>Automated scheduling: places every course session on the chosen weekdays, skipping holidays.</summary>
         [HttpPost("{id:guid}/generate-schedule")]
         [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Create)]
@@ -60,6 +69,19 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             return Ok(await _sessionService.GenerateScheduleAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>
+        /// One-time data repair for batches reassigned before UpdateAsync's teacher-reassignment
+        /// cascade existed: moves any still-undelivered ClassSession that's out of sync with its
+        /// own batch's current teacher onto that teacher. Safe to call repeatedly.
+        /// </summary>
+        [HttpPost("reconcile-stale-teachers")]
+        [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.Edit)]
+        public async Task<ActionResult<ReconcileStaleSessionTeachersResultDto>> ReconcileStaleTeachers(
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _batchService.ReconcileStaleSessionTeachersAsync(cancellationToken));
         }
 
         [HttpPut("{id:guid}/status")]

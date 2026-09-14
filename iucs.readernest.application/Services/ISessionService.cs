@@ -117,6 +117,21 @@ namespace iucs.readernest.application.Services
         Task<bool> IsSessionParticipantAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Walks a session forward through however many reschedules deep to whatever it's
+        /// actually become — returns `sessionId` itself when it was never rescheduled (the
+        /// overwhelmingly common case) or no longer exists (lets the caller's own not-found
+        /// handling fire normally). See ClassroomHub.JoinSession's own call site: a connection
+        /// that still has a pre-edit session id (e.g. a portal tab that was already open when
+        /// an admin edited the session, and never reloaded) resolves here to the same current
+        /// session id GetJitsiJoinAsync's own resolution would give a fresh caller, so both
+        /// land in the same ClassroomHub group regardless of which id either of them started
+        /// from — the underlying bug being defended against in both places is the same one:
+        /// two people in the same live class, differing only in which one already had a stale
+        /// id cached, ending up unable to see each other in People or on the shared whiteboard.
+        /// </summary>
+        Task<Guid> ResolveCurrentSessionIdAsync(Guid sessionId, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// The room + (when configured) a signed, room-scoped join token for the caller.
         /// Authorized the same way as the ClassroomHub: Admin, the assigned teacher, or a
         /// parent with a child enrolled in the session's batch — anyone else is refused
