@@ -207,19 +207,7 @@ namespace iucs.readernest.application.Services
             // future sessions left to cancel; this only bites the manual/early transition.
             if (status is BatchStatus.Dormant or BatchStatus.Archived)
             {
-                var now = DateTime.UtcNow;
-                var danglingSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
-                    .Where(s => s.BatchId == id
-                        && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
-                        && s.ScheduledStartAtUtc > now)
-                    .ToListAsync(cancellationToken);
-
-                foreach (var session in danglingSessions)
-                {
-                    session.Status = SessionStatus.Cancelled;
-                    session.CancellationReason = $"Batch marked {status}.";
-                }
-
+                await CancelDanglingFutureSessionsAsync(id, $"Batch marked {status}.", cancellationToken);
                 await ExpireSubscriptionsForCompletedBatchAsync(batch, cancellationToken);
             }
 
@@ -227,6 +215,70 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return await GetAsync(batch.Id, cancellationToken);
+        }
+
+        /// <summary>
+        /// Soft-deletes the batch (BaseEntity.IsDeleted — the global query filter in
+        /// ReaderNestDbContext.OnModelCreating then excludes it from every future query). Refused
+        /// while it still has an active student: unlike Archive, which just changes Status and
+        /// leaves the batch fully visible, a deleted batch disappears from every list, and that
+        /// student would be left enrolled in a batch nobody can see or manage anymore — withdraw
+        /// them (or move them to another batch) first. Any still-undelivered session left over
+        /// (e.g. a batch whose last student was withdrawn without RemoveStudentAsync cancelling
+        /// their future sessions) is cancelled the same way SetStatusAsync does for
+        /// Dormant/Archived, so nothing stays on a teacher's or parent's calendar for a batch
+        /// that no longer exists.
+        /// </summary>
+        public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            var batch = await _unitOfWork.Repository<Batch>().GetByIdAsync(id, cancellationToken)
+                ?? throw new NotFoundException(nameof(Batch), id);
+
+            var activeCount = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .CountAsync(e => e.BatchId == id && e.Status == EnrollmentStatus.Active, cancellationToken);
+            if (activeCount > 0)
+            {
+                throw new DomainValidationException(
+                    $"Batch '{batch.Name}' has {activeCount} active student(s); withdraw them (or move them to another batch) before deleting it.");
+            }
+
+            var cancelledSessionCount = await CancelDanglingFutureSessionsAsync(id, "Batch deleted.", cancellationToken);
+
+            _unitOfWork.Repository<Batch>().Remove(batch);
+            // Who deleted it and when are already captured without any extra work here — this
+            // row's own UpdatedBy/DeletedAtUtc (AuditableEntityInterceptor, on every AuditEntity)
+            // and this AuditLog row's own ActorUserId/CreatedAtUtc (AuditLogService.StageAsync)
+            // both record it. changesJson adds the one thing neither of those captures on its
+            // own: what this batch was actually staffed with and how many sessions the deletion
+            // just cancelled, for anyone reviewing the trail later.
+            await _auditLog.StageAsync(AuditAction.Delete, nameof(Batch), batch.Id.ToString(),
+                changesJson: $"{{\"teacherProfileId\":\"{batch.TeacherProfileId}\",\"cancelledSessionCount\":{cancelledSessionCount}}}",
+                cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
+        /// <summary>
+        /// Cancels every still-undelivered (Scheduled/CarriedForward, not yet started) session
+        /// for a batch that's stopped running — shared by SetStatusAsync's Dormant/Archived
+        /// transition and DeleteAsync, so neither leaves a session dangling on a calendar for a
+        /// batch nobody's tracking anymore. Returns how many were cancelled.
+        /// </summary>
+        private async Task<int> CancelDanglingFutureSessionsAsync(Guid batchId, string cancellationReason, CancellationToken cancellationToken)
+        {
+            var now = DateTime.UtcNow;
+            var danglingSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .Where(s => s.BatchId == batchId
+                    && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                    && s.ScheduledStartAtUtc > now)
+                .ToListAsync(cancellationToken);
+
+            foreach (var session in danglingSessions)
+            {
+                session.Status = SessionStatus.Cancelled;
+                session.CancellationReason = cancellationReason;
+            }
+
+            return danglingSessions.Count;
         }
 
         public async Task<ReconcileStaleSessionTeachersResultDto> ReconcileStaleSessionTeachersAsync(

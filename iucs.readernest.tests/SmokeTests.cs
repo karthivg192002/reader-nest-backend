@@ -7419,6 +7419,59 @@ namespace iucs.readernest.tests
         }
 
         /// <summary>
+        /// BatchService.DeleteAsync: a clean batch (no active students) is soft-deleted —
+        /// excluded from every future query via the global IsDeleted filter — and any
+        /// still-scheduled future session is cancelled the same way SetStatusAsync's
+        /// Dormant/Archived transition already does, so nothing is left dangling on a teacher's
+        /// calendar for a batch that no longer exists.
+        /// </summary>
+        [Fact]
+        public async Task DeleteBatch_WithNoActiveStudents_SoftDeletesIt_AndCancelsItsFutureSessions()
+        {
+            var (batch, _, futureSession) = await SeedBatchWithSessionAsync(totalSessions: 4);
+
+            await CreateBatchService().DeleteAsync(batch.Id);
+
+            var (context, _) = _db.CreateConcurrentSession();
+            using (context)
+            {
+                Assert.False(await context.Batches.AnyAsync(b => b.Id == batch.Id)); // excluded by the soft-delete filter
+                var stored = await context.Batches.IgnoreQueryFilters().FirstAsync(b => b.Id == batch.Id);
+                Assert.True(stored.IsDeleted);
+                Assert.NotNull(stored.DeletedAtUtc);
+
+                var session = await context.ClassSessions.FirstAsync(s => s.Id == futureSession.Id);
+                Assert.Equal(SessionStatus.Cancelled, session.Status);
+                Assert.Contains("deleted", session.CancellationReason!, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        /// <summary>
+        /// A batch with an active student can't just vanish — that student would be left
+        /// enrolled in a batch nobody can see or manage anymore. DeleteAsync must refuse instead
+        /// of silently orphaning them, mirroring UpdateAsync's own capacity-below-active-count
+        /// guard.
+        /// </summary>
+        [Fact]
+        public async Task DeleteBatch_WithAnActiveStudent_IsRefused()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 4, includeSession: false);
+            var parentUser = await _db.SeedUserAsync($"bd-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var child = new Child { ParentProfile = new ParentProfile { UserId = parentUser.Id }, FirstName = "Kid", LastName = "Y" };
+            _db.Context.Add(child);
+            _db.Context.Add(new BatchEnrollment { BatchId = batch.Id, Child = child, Status = EnrollmentStatus.Active });
+            await _db.Context.SaveChangesAsync();
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => CreateBatchService().DeleteAsync(batch.Id));
+
+            var (context, _) = _db.CreateConcurrentSession();
+            using (context)
+            {
+                Assert.True(await context.Batches.AnyAsync(b => b.Id == batch.Id)); // untouched
+            }
+        }
+
+        /// <summary>
         /// IntegrationService's secret handling, previously untested and security-relevant:
         /// gateway credentials must never round-trip to the client in the clear, and an admin
         /// saving the form back unchanged must not overwrite the real secret with its mask.

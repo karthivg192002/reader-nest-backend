@@ -16,6 +16,15 @@ namespace iucs.readernest.application.Services
         Task<BatchDto> SetStatusAsync(Guid id, BatchStatus status, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Soft-deletes the batch (excluded from every future query via the global IsDeleted
+        /// filter). Refused while it still has an active student — unlike Archive, a deleted
+        /// batch disappears from every list rather than just changing status, which would strand
+        /// that student with nothing to show for them; withdraw them (or move them to another
+        /// batch) first.
+        /// </summary>
+        Task DeleteAsync(Guid id, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// One-time data repair: moves every still-undelivered <c>ClassSession</c> that's fallen
         /// out of sync with its own batch's current teacher (left over from a reassignment that
         /// happened before <see cref="UpdateAsync"/>'s cascade fix existed) onto the batch's

@@ -51,6 +51,15 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _batchService.UpdateAsync(id, request, cancellationToken));
         }
 
+        /// <summary>Soft-deletes the batch — refused while it still has an active student (withdraw them, or move them to another batch, first).</summary>
+        [HttpDelete("{id:guid}")]
+        [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.Delete)]
+        public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
+        {
+            await _batchService.DeleteAsync(id, cancellationToken);
+            return NoContent();
+        }
+
         /// <summary>Automated scheduling: places every course session on the chosen weekdays, skipping holidays.</summary>
         [HttpPost("{id:guid}/generate-schedule")]
         [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Create)]
