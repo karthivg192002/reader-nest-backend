@@ -97,6 +97,30 @@ namespace iucs.readernest.api.Services
                 return;
             }
 
+            // Prefetched once for the whole cycle instead of 1-3 queries per candidate
+            // (per-session existence checks + a per-orphaned-demo lookup): the candidate set
+            // is already known up front, so there's no reason to round-trip per row.
+            var candidateIds = candidates.Select(s => s.Id).ToList();
+            var teacherPresentSessionIds = (await unitOfWork.Repository<SessionAttendance>().Query()
+                .Where(a => candidateIds.Contains(a.ClassSessionId) && a.TeacherProfileId != null)
+                .Select(a => new { a.ClassSessionId, a.TeacherProfileId })
+                .ToListAsync(cancellationToken))
+                .Where(a => candidates.Any(s => s.Id == a.ClassSessionId && s.TeacherProfileId == a.TeacherProfileId))
+                .Select(a => a.ClassSessionId)
+                .ToHashSet();
+            var studentPresentSessionIds = (await unitOfWork.Repository<SessionAttendance>().Query()
+                .Where(a => candidateIds.Contains(a.ClassSessionId) && a.ChildId != null)
+                .Select(a => a.ClassSessionId)
+                .ToListAsync(cancellationToken))
+                .ToHashSet();
+            var demoBatchlessIds = candidates.Where(s => !s.BatchId.HasValue).Select(s => s.Id).ToList();
+            var demoBookingsBySessionId = demoBatchlessIds.Count == 0
+                ? new Dictionary<Guid, DemoBooking>()
+                : await unitOfWork.Repository<DemoBooking>().Query()
+                    .Include(b => b.Participants)
+                    .Where(b => b.ClassSessionId != null && demoBatchlessIds.Contains(b.ClassSessionId.Value))
+                    .ToDictionaryAsync(b => b.ClassSessionId!.Value, cancellationToken);
+
             var teacherNoShows = 0;
             var studentNoShows = 0;
             foreach (var session in candidates)
@@ -106,9 +130,7 @@ namespace iucs.readernest.api.Services
                 // the rest of the cycle's genuinely overdue sessions from being processed.
                 try
                 {
-                    var teacherPresent = await unitOfWork.Repository<SessionAttendance>().ExistsAsync(
-                        a => a.ClassSessionId == session.Id && a.TeacherProfileId == session.TeacherProfileId,
-                        cancellationToken);
+                    var teacherPresent = teacherPresentSessionIds.Contains(session.Id);
                     if (!teacherPresent)
                     {
                         await sessionService.MarkNoShowSystemAsync(
@@ -121,9 +143,7 @@ namespace iucs.readernest.api.Services
 
                     if (session.BatchId.HasValue)
                     {
-                        var studentPresent = await unitOfWork.Repository<SessionAttendance>().ExistsAsync(
-                            a => a.ClassSessionId == session.Id && a.ChildId != null,
-                            cancellationToken);
+                        var studentPresent = studentPresentSessionIds.Contains(session.Id);
                         if (!studentPresent)
                         {
                             await sessionService.MarkNoShowSystemAsync(
@@ -144,9 +164,7 @@ namespace iucs.readernest.api.Services
                         // payout and carrying the (still bookingless) slot forward, where it would
                         // just repeat the same false no-show every week (see MarkNoShowCoreAsync's
                         // carry-forward comment for the incident this caused).
-                        var demoBooking = await unitOfWork.Repository<DemoBooking>().Query()
-                            .Include(b => b.Participants)
-                            .FirstOrDefaultAsync(b => b.ClassSessionId == session.Id, cancellationToken);
+                        var demoBooking = demoBookingsBySessionId.GetValueOrDefault(session.Id);
                         if (demoBooking is null)
                         {
                             await sessionService.FlagOrphanedDemoSessionAsync(session.Id, cancellationToken);

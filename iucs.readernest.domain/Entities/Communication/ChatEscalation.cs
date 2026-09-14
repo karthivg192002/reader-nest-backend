@@ -12,6 +12,7 @@ namespace iucs.readernest.domain.Entities.Communication
     /// one — there is no per-teacher assignment/routing in this first pass.
     /// </summary>
     [Index(nameof(Status))]
+    [Index(nameof(Status), nameof(CreatedAtUtc))]
     public class ChatEscalation : AuditEntity
     {
         public Guid UserId { get; set; }

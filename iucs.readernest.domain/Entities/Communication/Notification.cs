@@ -11,6 +11,7 @@ namespace iucs.readernest.domain.Entities.Communication
     /// payout statements and bulk mail. High-volume and system-generated, so BaseEntity.
     /// </summary>
     [Index(nameof(RecipientUserId), nameof(Status))]
+    [Index(nameof(RecipientUserId), nameof(CreatedAtUtc))]
     public class Notification : BaseEntity
     {
         public Guid RecipientUserId { get; set; }

@@ -14,6 +14,8 @@ namespace iucs.readernest.domain.Entities.Sessions
     /// </summary>
     [Index(nameof(ScheduledStartAtUtc))]
     [Index(nameof(Status))]
+    [Index(nameof(BatchId), nameof(ScheduledStartAtUtc))]
+    [Index(nameof(TeacherProfileId), nameof(Status))]
     public class ClassSession : AuditEntity
     {
         public Guid? BatchId { get; set; }
