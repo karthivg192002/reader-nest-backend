@@ -7472,6 +7472,32 @@ namespace iucs.readernest.tests
         }
 
         /// <summary>
+        /// ShortLinkService.CreateAsync is idempotent per (creator, target): the
+        /// personal-meeting-room and demo-booking "Copy Link" buttons both call it fresh on
+        /// every click, and before this fix each click minted a brand new slug even though the
+        /// underlying target never changed -- "your link" looked different every time it was
+        /// copied, with no one stable URL the way a Google Meet personal room link works. Also
+        /// confirms a genuinely different target, or a different creator, still gets its own row.
+        /// </summary>
+        [Fact]
+        public async Task ShortLink_SameTargetAndCreator_ReusesTheSameSlug()
+        {
+            var service = new ShortLinkService(_db.UnitOfWork);
+            var userId = Guid.NewGuid();
+            var farFuture = DateTime.UtcNow.AddYears(10);
+
+            var first = await service.CreateAsync("https://app.test/room-a", farFuture, userId);
+            var second = await service.CreateAsync("https://app.test/room-a", farFuture, userId);
+            Assert.Equal(first, second);
+
+            var differentTarget = await service.CreateAsync("https://app.test/room-b", farFuture, userId);
+            Assert.NotEqual(first, differentTarget);
+
+            var differentCreator = await service.CreateAsync("https://app.test/room-a", farFuture, Guid.NewGuid());
+            Assert.NotEqual(first, differentCreator);
+        }
+
+        /// <summary>
         /// IntegrationService's secret handling, previously untested and security-relevant:
         /// gateway credentials must never round-trip to the client in the clear, and an admin
         /// saving the form back unchanged must not overwrite the real secret with its mask.

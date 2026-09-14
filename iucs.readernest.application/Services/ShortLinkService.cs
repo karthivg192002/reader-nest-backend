@@ -23,6 +23,23 @@ namespace iucs.readernest.application.Services
         public async Task<string> CreateAsync(string targetUrl, DateTime expiresAtUtc, Guid createdByUserId, CancellationToken cancellationToken = default)
         {
             var repository = _unitOfWork.Repository<ShortLink>();
+
+            // Idempotent: every caller today (the personal-meeting-room "Copy Link" button,
+            // the demo booking join-link "Copy Link") calls this fresh on every click --
+            // minting a brand new slug each time meant "your link" looked different every
+            // time it was copied, with no one stable URL to hand out the way a Google Meet
+            // personal room link works. Reusing whichever still-live row this same user
+            // already has for this exact target keeps it the same link across repeat
+            // clicks; a genuinely different target (a different demo, a room that changed)
+            // still gets its own row, and an expired one is never reused.
+            var existing = await repository.FirstOrDefaultAsync(
+                s => s.CreatedByUserId == createdByUserId && s.TargetUrl == targetUrl && s.ExpiresAtUtc > DateTime.UtcNow,
+                cancellationToken);
+            if (existing is not null)
+            {
+                return existing.Slug;
+            }
+
             for (var attempt = 0; attempt < MaxCollisionRetries; attempt++)
             {
                 var slug = GenerateSlug();
