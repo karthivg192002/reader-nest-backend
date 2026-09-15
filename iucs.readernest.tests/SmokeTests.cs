@@ -239,6 +239,115 @@ namespace iucs.readernest.tests
                 () => service.GetJitsiJoinAsync(session.Id, billingOnlySubAdmin.Id));
         }
 
+        /// <summary>Shared setup for the Guest Link tests below: a batch+session within the
+        /// join window (SeedBatchWithSessionAsync's own default is a day out, too far for
+        /// GetGuestJoinAsync's -10min/scheduled-end window) plus one actively enrolled child.</summary>
+        private async Task<(ClassSession Session, Child Child)> SeedGuestLinkFixtureAsync()
+        {
+            var (batch, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            session.ScheduledStartAtUtc = DateTime.UtcNow.AddMinutes(5);
+            session.ScheduledEndAtUtc = DateTime.UtcNow.AddMinutes(50);
+            session.MeetingRoomId = "guest-link-room";
+
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            parentUser.FirstName = "Priya";
+            parentUser.LastName = "Sharma";
+            parentUser.Phone = "9876500000";
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var child = new Child { ParentProfile = parentProfile, FirstName = "Aarav", LastName = "Sharma" };
+            _db.Context.AddRange(parentProfile, child);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.Add(new BatchEnrollment { BatchId = batch.Id, ChildId = child.Id, Status = EnrollmentStatus.Active });
+            await _db.Context.SaveChangesAsync();
+
+            return (session, child);
+        }
+
+        [Fact]
+        public async Task GuestLink_Generic_RoundTripsToAGuestJoin_WithPrejoinShown()
+        {
+            var (session, _) = await SeedGuestLinkFixtureAsync();
+            var service = CreateSessionService();
+
+            var link = await service.CreateGuestLinkAsync(session.Id, childId: null);
+            var join = await service.GetGuestJoinAsync(link.Token);
+
+            Assert.Equal("guest-link-room", join.Room);
+            Assert.Equal("Guest", join.DisplayName);
+            Assert.False(join.SkipPrejoin);
+            Assert.Null(join.ChildId);
+        }
+
+        [Fact]
+        public async Task GuestLink_StudentBound_RoundTripsWithNamePresetAndSkipsPrejoin_AndMarksAttendance()
+        {
+            // The "auto-fetch name, skip prejoin, auto-mark attendance" half of the client's
+            // spec (2026-09-15 follow-up) — the generic link above deliberately does none of
+            // this; a teacher marks that case's attendance by hand instead.
+            var (session, child) = await SeedGuestLinkFixtureAsync();
+            var service = CreateSessionService();
+
+            var link = await service.CreateGuestLinkAsync(session.Id, child.Id);
+            var join = await service.GetGuestJoinAsync(link.Token);
+
+            Assert.Equal("Aarav Sharma", join.DisplayName);
+            Assert.True(join.SkipPrejoin);
+            Assert.Equal(child.Id, join.ChildId);
+
+            // Mirrors SessionsController.GuestJoin's own split call (SessionService can't depend
+            // on IAcademicOpsService directly -- see that controller method's doc comment).
+            await CreateAcademicOpsService().CaptureGuestJoinAttendanceAsync(join.SessionId, join.ChildId!.Value);
+
+            var attendance = Assert.Single(_db.Context.SessionAttendances.Where(a => a.ChildId == child.Id));
+            Assert.Equal(AttendanceStatus.Present, attendance.Status);
+        }
+
+        [Fact]
+        public async Task GuestLink_StudentPicker_ListsTheBatchsActiveEnrollments_WithParentContact()
+        {
+            var (session, child) = await SeedGuestLinkFixtureAsync();
+
+            var students = await CreateSessionService().GetGuestLinkStudentsAsync(session.Id);
+
+            var row = Assert.Single(students);
+            Assert.Equal(child.Id, row.ChildId);
+            Assert.Equal("Aarav Sharma", row.ChildName);
+            Assert.Equal("Priya Sharma", row.ParentName);
+            Assert.Equal("9876500000", row.ParentPhone);
+        }
+
+        [Fact]
+        public async Task GuestLink_RejectsAnInvalidToken_AndACompletedSession_EvenWithinTheTokensOwnExpiry()
+        {
+            // The client's own requirement: the link must die the instant the class is marked
+            // Completed (even early), not just at some fixed token expiry -- this is what makes
+            // that actually true: GetGuestJoinAsync re-checks live status on every open rather
+            // than trusting the token's own (deliberately generous) expiry bound.
+            var (session, _) = await SeedGuestLinkFixtureAsync();
+            var service = CreateSessionService();
+            var link = await service.CreateGuestLinkAsync(session.Id, childId: null);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.GetGuestJoinAsync("not-a-real-token"));
+
+            session.Status = SessionStatus.Completed;
+            await _db.Context.SaveChangesAsync();
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.GetGuestJoinAsync(link.Token));
+        }
+
+        [Fact]
+        public async Task GuestLink_CreateRejectsAChildNotActivelyEnrolledInThatSessionsBatch()
+        {
+            var (session, _) = await SeedGuestLinkFixtureAsync();
+            var strangerChildUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var strangerParent = new ParentProfile { UserId = strangerChildUser.Id };
+            var strangerChild = new Child { ParentProfile = strangerParent, FirstName = "Not", LastName = "Enrolled" };
+            _db.Context.AddRange(strangerParent, strangerChild);
+            await _db.Context.SaveChangesAsync();
+
+            await Assert.ThrowsAsync<DomainValidationException>(
+                () => CreateSessionService().CreateGuestLinkAsync(session.Id, strangerChild.Id));
+        }
+
         [Fact]
         public async Task TeacherNoShow_AppliesConfiguredPenaltyPercent()
         {

@@ -87,5 +87,91 @@ namespace iucs.readernest.api.Auth
                 ExpiresAtUtc = expiresAtUtc,
             };
         }
+
+        private const string GuestJoinPurpose = "guest-join";
+        private const string SessionIdClaimType = "sessionId";
+        private const string ChildIdClaimType = "childId";
+
+        public TokenResult CreateGuestJoinToken(Guid sessionId, Guid? childId, DateTime expiresAtUtc)
+        {
+            var claims = new List<Claim>
+            {
+                new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+                new("purpose", GuestJoinPurpose),
+                new(SessionIdClaimType, sessionId.ToString()),
+            };
+            if (childId is Guid cid)
+            {
+                claims.Add(new Claim(ChildIdClaimType, cid.ToString()));
+            }
+
+            var credentials = new SigningCredentials(
+                new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_options.SigningKey)),
+                SecurityAlgorithms.HmacSha256);
+
+            var token = new JwtSecurityToken(
+                issuer: _options.Issuer,
+                audience: _options.Audience,
+                claims: claims,
+                notBefore: DateTime.UtcNow,
+                expires: expiresAtUtc,
+                signingCredentials: credentials);
+
+            return new TokenResult
+            {
+                AccessToken = new JwtSecurityTokenHandler().WriteToken(token),
+                ExpiresAtUtc = expiresAtUtc,
+            };
+        }
+
+        public (Guid SessionId, Guid? ChildId)? ValidateGuestJoinToken(string token)
+        {
+            // This backs a public, [AllowAnonymous] endpoint (SessionsController.GuestJoin) —
+            // unlike every other caller of ValidateToken in this file, the input here can be
+            // anything anyone sends, not just a token this app itself minted. A null/empty
+            // string trips ValidateToken's own ArgumentNullException/ArgumentException before it
+            // ever gets to a SecurityTokenException, which would otherwise surface as an
+            // unhandled 500 instead of the friendly "this link is invalid" 400 every other bad
+            // token already gets below.
+            if (string.IsNullOrEmpty(token))
+            {
+                return null;
+            }
+
+            var handler = new JwtSecurityTokenHandler();
+            ClaimsPrincipal principal;
+            try
+            {
+                principal = handler.ValidateToken(token, new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidIssuer = _options.Issuer,
+                    ValidateAudience = true,
+                    ValidAudience = _options.Audience,
+                    ValidateLifetime = true,
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_options.SigningKey)),
+                    ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
+                    ClockSkew = TimeSpan.FromSeconds(30),
+                }, out _);
+            }
+            catch (SecurityTokenException)
+            {
+                return null;
+            }
+
+            if (principal.FindFirst("purpose")?.Value != GuestJoinPurpose)
+            {
+                return null;
+            }
+
+            if (!Guid.TryParse(principal.FindFirst(SessionIdClaimType)?.Value, out var sessionId))
+            {
+                return null;
+            }
+
+            Guid? childId = Guid.TryParse(principal.FindFirst(ChildIdClaimType)?.Value, out var cid) ? cid : null;
+            return (sessionId, childId);
+        }
     }
 }

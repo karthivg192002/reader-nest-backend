@@ -216,6 +216,43 @@ namespace iucs.readernest.tests
         {
             return new TokenResult { AccessToken = "test-observer-hub-token", ExpiresAtUtc = expiresAtUtc };
         }
+
+        // Not a real JWT -- just enough of a round-trip (encode on create, decode+expiry-check
+        // on validate) for guest-link tests to exercise SessionService's actual branching
+        // (invalid/expired token, bound vs. generic link) without a signing key in play.
+        public TokenResult CreateGuestJoinToken(Guid sessionId, Guid? childId, DateTime expiresAtUtc)
+        {
+            var payload = $"{sessionId}|{childId}|{expiresAtUtc:O}";
+            return new TokenResult
+            {
+                AccessToken = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(payload)),
+                ExpiresAtUtc = expiresAtUtc,
+            };
+        }
+
+        public (Guid SessionId, Guid? ChildId)? ValidateGuestJoinToken(string token)
+        {
+            try
+            {
+                var parts = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(token)).Split('|');
+                if (parts.Length != 3)
+                {
+                    return null;
+                }
+
+                var expiresAtUtc = DateTime.Parse(parts[2], null, System.Globalization.DateTimeStyles.RoundtripKind);
+                if (DateTime.UtcNow > expiresAtUtc)
+                {
+                    return null;
+                }
+
+                return (Guid.Parse(parts[0]), string.IsNullOrEmpty(parts[1]) ? null : Guid.Parse(parts[1]));
+            }
+            catch
+            {
+                return null;
+            }
+        }
     }
 
     /// <summary>Mirrors production's "unconfigured" state (no appId/appSecret) — always returns no token.</summary>

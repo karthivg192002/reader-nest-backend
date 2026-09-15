@@ -18,11 +18,13 @@ namespace iucs.readernest.api.Controllers
 
         private readonly ISessionService _sessionService;
         private readonly IFileStorage _fileStorage;
+        private readonly IAcademicOpsService _academicOpsService;
 
-        public SessionsController(ISessionService sessionService, IFileStorage fileStorage)
+        public SessionsController(ISessionService sessionService, IFileStorage fileStorage, IAcademicOpsService academicOpsService)
         {
             _sessionService = sessionService;
             _fileStorage = fileStorage;
+            _academicOpsService = academicOpsService;
         }
 
         // Staff console only: Teacher and Parent also carry SessionCalendarManagement:View
@@ -85,6 +87,61 @@ namespace iucs.readernest.api.Controllers
         {
             var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
             return Ok(await _sessionService.GetJitsiJoinAsync(id, userId, cancellationToken));
+        }
+
+        /// <summary>
+        /// The session's batch roster for the "Copy Guest Link" student picker (RM/Admin/
+        /// Coordinator Sessions and Calendar screens). Same permission as viewing the session
+        /// itself — deliberately not CourseBatchManagement:View, so an account with only session
+        /// access isn't 403'd just for this popup. Also role-restricted same as List/Get above:
+        /// Teacher and Parent carry SessionCalendarManagement:View too (for their own scoped
+        /// /mine and parent-schedule routes), and HasPermission alone doesn't scope by session
+        /// ownership — without the role check, a teacher or parent could pull the guest-link
+        /// student picker (and mint a link) for a class that isn't theirs.
+        /// </summary>
+        [HttpGet("{id:guid}/guest-link/students")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
+        [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<GuestLinkStudentDto>>> ListGuestLinkStudents(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.GetGuestLinkStudentsAsync(id, cancellationToken));
+        }
+
+        /// <summary>
+        /// Mints a shareable Guest Link token for this session — pass ChildId to bind it to one
+        /// specific enrolled student (auto attendance, skips prejoin), or omit it for a generic
+        /// guest link. Same permission and role restriction as
+        /// <see cref="ListGuestLinkStudents"/> above (see its own doc comment for why the role
+        /// check matters here too, not just HasPermission).
+        /// </summary>
+        [HttpPost("{id:guid}/guest-link")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
+        [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.View)]
+        public async Task<ActionResult<GuestLinkDto>> CreateGuestLink(Guid id, CreateGuestLinkRequest request, CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.CreateGuestLinkAsync(id, request.ChildId, cancellationToken));
+        }
+
+        /// <summary>
+        /// Anonymous landing call the frontend's own "/guest-join" bridge page makes to resolve
+        /// a Guest Link token into a live Jitsi join. Deliberately unauthenticated — the
+        /// caretaker opening the link never logs in — the opaque, signed token itself (see
+        /// JwtTokenService.CreateGuestJoinToken) is the only credential. Marks attendance for the
+        /// bound student, when there is one, same split responsibility ClassroomHub.JoinSession
+        /// already uses between ISessionService (resolve/join) and IAcademicOpsService
+        /// (attendance) — SessionService can't depend on IAcademicOpsService directly, which
+        /// already depends back on ISessionService.
+        /// </summary>
+        [HttpPost("guest-join")]
+        [AllowAnonymous]
+        public async Task<ActionResult<GuestJoinDto>> GuestJoin(GuestJoinRequest request, CancellationToken cancellationToken)
+        {
+            var join = await _sessionService.GetGuestJoinAsync(request.Token, cancellationToken);
+            if (join.ChildId is Guid childId)
+            {
+                await _academicOpsService.CaptureGuestJoinAttendanceAsync(join.SessionId, childId, cancellationToken);
+            }
+            return Ok(join);
         }
 
         /// <summary>

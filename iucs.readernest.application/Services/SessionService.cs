@@ -1229,6 +1229,142 @@ namespace iucs.readernest.application.Services
             };
         }
 
+        public async Task<IReadOnlyList<GuestLinkStudentDto>> GetGuestLinkStudentsAsync(Guid sessionId, CancellationToken cancellationToken = default)
+        {
+            var resolvedSessionId = await ResolveCurrentSessionIdAsync(sessionId, cancellationToken);
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(resolvedSessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+
+            if (session.BatchId is not Guid batchId)
+            {
+                return Array.Empty<GuestLinkStudentDto>();
+            }
+
+            return await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.BatchId == batchId && e.Status == EnrollmentStatus.Active)
+                .Join(_unitOfWork.Repository<Child>().Query(), e => e.ChildId, c => c.Id, (e, c) => c)
+                .Join(_unitOfWork.Repository<ParentProfile>().Query(), c => c.ParentProfileId, p => p.Id, (c, p) => new { Child = c, ParentUserId = p.UserId })
+                .Join(_unitOfWork.Repository<User>().Query(), cp => cp.ParentUserId, u => u.Id, (cp, u) => new GuestLinkStudentDto
+                {
+                    ChildId = cp.Child.Id,
+                    ChildName = (cp.Child.FirstName + " " + cp.Child.LastName).Trim(),
+                    ParentName = (u.FirstName + " " + u.LastName).Trim(),
+                    ParentPhone = u.Phone,
+                })
+                .OrderBy(s => s.ChildName)
+                .ToListAsync(cancellationToken);
+        }
+
+        public async Task<GuestLinkDto> CreateGuestLinkAsync(Guid sessionId, Guid? childId, CancellationToken cancellationToken = default)
+        {
+            var resolvedSessionId = await ResolveCurrentSessionIdAsync(sessionId, cancellationToken);
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(resolvedSessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+
+            if (string.IsNullOrWhiteSpace(session.MeetingRoomId))
+            {
+                throw new DomainValidationException("This session has no meeting room yet.");
+            }
+
+            if (childId is Guid cid)
+            {
+                var isActiveEnrollment = session.BatchId is Guid batchId && await _unitOfWork.Repository<BatchEnrollment>()
+                    .ExistsAsync(e => e.BatchId == batchId && e.ChildId == cid && e.Status == EnrollmentStatus.Active, cancellationToken);
+                if (!isActiveEnrollment)
+                {
+                    throw new DomainValidationException("That student isn't enrolled in this session's batch.");
+                }
+            }
+
+            // Outer safety bound only -- GetGuestJoinAsync re-checks the session's live status/
+            // time on every open, so this just stops a never-used link from staying mintable
+            // indefinitely rather than being the thing that actually governs reuse.
+            var guestToken = _tokenService.CreateGuestJoinToken(session.Id, childId, session.ScheduledEndAtUtc.AddDays(1));
+            return new GuestLinkDto { Token = guestToken.AccessToken };
+        }
+
+        public async Task<GuestJoinDto> GetGuestJoinAsync(string token, CancellationToken cancellationToken = default)
+        {
+            var parsed = _tokenService.ValidateGuestJoinToken(token)
+                ?? throw new DomainValidationException("This link is invalid or has expired.");
+
+            var resolvedSessionId = await ResolveCurrentSessionIdAsync(parsed.SessionId, cancellationToken);
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(resolvedSessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), resolvedSessionId);
+
+            if (string.IsNullOrWhiteSpace(session.MeetingRoomId))
+            {
+                throw new DomainValidationException("This class has no meeting room yet.");
+            }
+
+            // Live status/time check -- deliberately NOT relying on the guest token's own
+            // (generous) expiry alone, so a link dies the instant the class is marked Completed
+            // or Cancelled even if that happens well before its outer expiry bound.
+            var now = DateTime.UtcNow;
+            if (session.Status == SessionStatus.Cancelled)
+            {
+                throw new DomainValidationException("This class was cancelled.");
+            }
+            if (session.Status == SessionStatus.Completed)
+            {
+                throw new DomainValidationException("This class has already ended.");
+            }
+            if (now < session.ScheduledStartAtUtc.AddMinutes(-10))
+            {
+                throw new DomainValidationException("This class hasn't opened for joining yet.");
+            }
+            if (session.Status != SessionStatus.InProgress && now > session.ScheduledEndAtUtc)
+            {
+                throw new DomainValidationException("This class has already ended.");
+            }
+
+            var childId = parsed.ChildId;
+            var displayName = "Guest";
+            if (childId is Guid cid)
+            {
+                var stillEnrolled = session.BatchId is Guid batchId && await _unitOfWork.Repository<BatchEnrollment>()
+                    .ExistsAsync(e => e.BatchId == batchId && e.ChildId == cid && e.Status == EnrollmentStatus.Active, cancellationToken);
+                var child = stillEnrolled ? await _unitOfWork.Repository<Child>().GetByIdAsync(cid, cancellationToken) : null;
+                if (child is not null)
+                {
+                    displayName = $"{child.FirstName} {child.LastName}".Trim();
+                }
+                else
+                {
+                    // Defensive: the student was un-enrolled (or their record removed) after
+                    // this link was generated. Fall back to a generic guest join rather than
+                    // failing outright -- the class itself is still perfectly joinable.
+                    childId = null;
+                }
+            }
+
+            var jitsiConfigJson = await _unitOfWork.Repository<Integration>().Query()
+                .Where(i => i.Key == "jitsi")
+                .Select(i => i.ConfigJson)
+                .FirstOrDefaultAsync(cancellationToken);
+            var domain = JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
+
+            var jitsiToken = _jitsiTokenService.CreateToken(
+                domain,
+                jitsiConfigJson,
+                session.MeetingRoomId,
+                displayName,
+                participantEmail: null,
+                moderator: false,
+                session.ScheduledEndAtUtc.AddHours(2));
+
+            return new GuestJoinDto
+            {
+                SessionId = session.Id,
+                ChildId = childId,
+                Room = session.MeetingRoomId,
+                Domain = domain,
+                Token = jitsiToken,
+                DisplayName = displayName,
+                SkipPrejoin = childId is not null,
+            };
+        }
+
         public async Task<RecordingObserverJoinDto?> GetLiveObserverJoinAsync(string roomName, CancellationToken cancellationToken = default)
         {
             // Disambiguation is simpler than FinalizeJibriRecordingAsync's closest-scheduled-end

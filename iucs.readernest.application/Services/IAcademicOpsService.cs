@@ -59,5 +59,14 @@ namespace iucs.readernest.application.Services
         /// who taught the full class apart from one who joined and left after a few minutes.
         /// </summary>
         Task CaptureLeaveAttendanceAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Guest-link counterpart of <see cref="CaptureJoinAttendanceAsync"/> — called by
+        /// SessionsController.GuestJoin when a student-bound Guest Link is opened. There is no
+        /// authenticated userId behind that join (the caretaker never logs in), so this takes
+        /// the child directly instead of deriving it from whoever is signed in. Same
+        /// best-effort, never-throw contract as the join capture above.
+        /// </summary>
+        Task CaptureGuestJoinAttendanceAsync(Guid sessionId, Guid childId, CancellationToken cancellationToken = default);
     }
 }

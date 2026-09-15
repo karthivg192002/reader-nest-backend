@@ -170,5 +170,34 @@ namespace iucs.readernest.application.Services
 
         /// <summary>Resolves the stored file for download — same participant gate as viewing metadata.</summary>
         Task<SessionPresentationDownloadDto> GetPresentationForDownloadAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default);
+
+        /// <summary>The session's batch roster for the "Copy Guest Link" student picker — see
+        /// GuestLinkStudentDto for why this is scoped off the session's own permission rather
+        /// than requiring CourseBatchManagement:View too. Empty for a Demo (no batch).</summary>
+        Task<IReadOnlyList<GuestLinkStudentDto>> GetGuestLinkStudentsAsync(Guid sessionId, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Mints a shareable Guest Link token for one session (see JwtTokenService.
+        /// CreateGuestJoinToken). Pass <paramref name="childId"/> to bind the link to one
+        /// specific, currently-active enrollment of the session's batch (auto attendance, skips
+        /// prejoin on open — see GetGuestJoinAsync); omit it for a generic guest link. Caller-
+        /// side authorization is the controller's own SessionCalendarManagement:View gate, same
+        /// as viewing the session itself.
+        /// </summary>
+        Task<GuestLinkDto> CreateGuestLinkAsync(Guid sessionId, Guid? childId, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Anonymous resolution of a Guest Link token into a live Jitsi join — called by the
+        /// frontend's own unauthenticated "/guest-join" bridge page, not by a logged-in user.
+        /// Re-checks the session's LIVE status/time on every call (not just the token's own
+        /// baked-in expiry), so a link stops working the moment the class is marked Completed or
+        /// Cancelled, or once its scheduled end has passed — see JwtTokenService.
+        /// CreateGuestJoinToken's doc comment for why the token's own expiry is only a generous
+        /// outer bound. Always mints a non-moderator Jitsi token, regardless of who originally
+        /// generated the link. Throws DomainValidationException (not silently null) for an
+        /// invalid/expired token or a class that isn't currently joinable — the landing page
+        /// shows that message directly, there is no other UI around this call to fall back to.
+        /// </summary>
+        Task<GuestJoinDto> GetGuestJoinAsync(string token, CancellationToken cancellationToken = default);
     }
 }

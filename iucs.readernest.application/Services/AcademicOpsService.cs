@@ -257,6 +257,61 @@ namespace iucs.readernest.application.Services
         }
 
         /// <summary>
+        /// Guest-link counterpart of <see cref="CaptureJoinAttendanceAsync"/>: marks one
+        /// specific child present when they join via a student-bound Guest Link (see
+        /// SessionService.GetGuestJoinAsync) — there is no authenticated userId behind a guest
+        /// join, so this takes the child directly rather than deriving it from whoever is
+        /// signed in. Same best-effort, never-throw contract: a capture hiccup must never stop
+        /// the caretaker's join. Silently skips if the child isn't (still) an active enrollment
+        /// of the session's batch — the same defensive re-check SessionService.GetGuestJoinAsync
+        /// already does before minting the join token, kept here too so this method is correct
+        /// standing on its own.
+        /// </summary>
+        public async Task CaptureGuestJoinAttendanceAsync(Guid sessionId, Guid childId, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken);
+                if (session?.BatchId is not Guid batchId)
+                {
+                    return;
+                }
+
+                var isActiveEnrollment = await _unitOfWork.Repository<BatchEnrollment>()
+                    .ExistsAsync(e => e.BatchId == batchId && e.ChildId == childId && e.Status == EnrollmentStatus.Active, cancellationToken);
+                if (!isActiveEnrollment)
+                {
+                    return;
+                }
+
+                var child = await _unitOfWork.Repository<Child>().GetByIdAsync(childId, cancellationToken);
+                if (child is null)
+                {
+                    return;
+                }
+
+                var wasAlreadyJoined = await _unitOfWork.Repository<SessionAttendance>()
+                    .ExistsAsync(a => a.ClassSessionId == sessionId && a.ChildId == childId, cancellationToken);
+
+                await CaptureAttendanceCoreAsync(
+                    sessionId,
+                    new CaptureAttendanceRequest
+                    {
+                        Entries = [new AttendanceEntryDto { ChildId = childId, Status = AttendanceStatus.Present, JoinedAtUtc = DateTime.UtcNow }],
+                    },
+                    cancellationToken);
+
+                await _eventLog.LogStudentJoinAsync(
+                    session, childId, userId: null, $"{child.FirstName} {child.LastName}".Trim(),
+                    isReconnect: wasAlreadyJoined, cancellationToken);
+            }
+            catch
+            {
+                // Best-effort: a capture hiccup must never fail the guest's join.
+            }
+        }
+
+        /// <summary>
         /// Demo-session counterpart of the SessionAttendance path above: matches the joining
         /// account's email (case-insensitive) against the booking's primary contact
         /// (<see cref="DemoBooking.ParentEmail"/>) or an additional invitee
