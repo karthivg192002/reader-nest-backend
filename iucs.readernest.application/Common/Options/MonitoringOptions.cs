@@ -41,6 +41,17 @@ namespace iucs.readernest.application.Common.Options
         /// <summary>True only for the Jitsi box — queries rn_jitsi_conferences/rn_jitsi_participants for this instance.</summary>
         public bool TracksLiveCalls { get; set; }
 
+        /// <summary>
+        /// Absolute path of this server's own Jibri autoscaler script (each server runs a different one:
+        /// the Jitsi box runs the worker-first/main-fallback overflow watcher, the recording worker runs
+        /// its own busy+1 autoscaler). Empty means this server has no Jibri autoscaler at all -- "Rescale
+        /// now" / "Min warm" are unavailable for it.
+        /// </summary>
+        public string JibriAutoscaleScript { get; set; } = string.Empty;
+
+        /// <summary>Shell variable name inside <see cref="JibriAutoscaleScript"/> that holds the warm-minimum instance count, edited in place by "Min warm" (e.g. "MIN_MAIN" on the Jitsi box, "MIN_REPLICAS" on the worker).</summary>
+        public string JibriMinReplicasVar { get; set; } = string.Empty;
+
         /// <summary>SSH-reachable address for this server, e.g. "204.168.140.222" — NOT necessarily the same as <see cref="Hostname"/> (a public domain) or <see cref="Instance"/> (a Prometheus scrape label, which for a self-scraped box is "host.docker.internal" and isn't externally reachable at all).</summary>
         public string SshHost { get; set; } = string.Empty;
 
