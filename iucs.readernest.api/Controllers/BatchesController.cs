@@ -84,6 +84,20 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _batchService.ReconcileStaleSessionTeachersAsync(cancellationToken));
         }
 
+        /// <summary>
+        /// One-time data repair for batches whose duration was edited before UpdateAsync's
+        /// duration cascade existed: corrects any still-undelivered ClassSession whose real
+        /// length is out of sync with its own batch's current effective duration. Safe to call
+        /// repeatedly.
+        /// </summary>
+        [HttpPost("reconcile-stale-durations")]
+        [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.Edit)]
+        public async Task<ActionResult<ReconcileStaleSessionDurationsResultDto>> ReconcileStaleDurations(
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _batchService.ReconcileStaleSessionDurationsAsync(cancellationToken));
+        }
+
         [HttpPut("{id:guid}/status")]
         [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.Edit)]
         public async Task<ActionResult<BatchDto>> SetStatus(

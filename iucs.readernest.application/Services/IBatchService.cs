@@ -32,6 +32,15 @@ namespace iucs.readernest.application.Services
         /// </summary>
         Task<ReconcileStaleSessionTeachersResultDto> ReconcileStaleSessionTeachersAsync(CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// One-time data repair: corrects the <c>ScheduledEndAtUtc</c> of every still-undelivered
+        /// <c>ClassSession</c> whose real length no longer matches its own batch's current
+        /// effective duration (left over from a duration edit that happened before
+        /// <see cref="UpdateAsync"/>'s cascade fix existed). Safe to run repeatedly — nothing
+        /// left to fix is a no-op.
+        /// </summary>
+        Task<ReconcileStaleSessionDurationsResultDto> ReconcileStaleSessionDurationsAsync(CancellationToken cancellationToken = default);
+
         /// <summary>The batch's current student roster (WBS p.17 "Assign Students").</summary>
         Task<IReadOnlyList<BatchStudentDto>> ListEnrollmentsAsync(Guid batchId, CancellationToken cancellationToken = default);
 

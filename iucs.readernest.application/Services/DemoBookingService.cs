@@ -718,12 +718,7 @@ namespace iucs.readernest.application.Services
                         ["StartAtLocal"] = DateTimeDisplay.ToLocal(result.Session.ScheduledStartAtUtc, result.NewTeacher.User.TimeZoneId),
                         ["EndAtLocal"] = DateTimeDisplay.ToLocal(result.Session.ScheduledEndAtUtc, result.NewTeacher.User.TimeZoneId),
                         ["Reason"] = string.IsNullOrWhiteSpace(request.Reason) ? string.Empty : $"Reason: {request.Reason}",
-                        ["JoinUrl"] = await BuildDemoJoinUrlAsync(
-                            result.Session,
-                            $"{result.NewTeacher.User.FirstName} {result.NewTeacher.User.LastName}".Trim(),
-                            result.NewTeacher.User.Email,
-                            moderator: true,
-                            cancellationToken),
+                        ["JoinUrl"] = BuildTeacherDemoAppJoinUrl(result.Session),
                     },
                     cancellationToken);
 
@@ -1175,6 +1170,25 @@ namespace iucs.readernest.application.Services
         }
 
         /// <summary>
+        /// The teacher's own demo join link points at this app's authenticated in-app classroom
+        /// instead of straight at Jitsi's hosted client (what BuildDemoJoinUrlAsync above builds
+        /// for the parent/lead, who has no account to authenticate with). Confirmed live: a demo
+        /// opened from this link had no Whiteboard/Slides — those only ever render inside
+        /// JitsiLive's InteractivePanel, over an authenticated ClassroomHub connection, which a
+        /// bare Jitsi redirect never establishes. The teacher already has a real login, so
+        /// /teacher/live/:sessionId (gated by RequireAuth, which bounces to /login and back if
+        /// they aren't already signed in) gets them the exact same full interactive classroom a
+        /// regular class uses. This also can't go stale the way a baked-in domain/token could:
+        /// JitsiLive re-resolves the room fresh via its own getJitsiJoin(sessionId) call on every
+        /// open, rather than trusting anything carried in the link itself.
+        /// </summary>
+        private string BuildTeacherDemoAppJoinUrl(ClassSession session)
+        {
+            var frontendBaseUrl = (_configuration["Frontend:BaseUrl"] ?? "http://localhost:5173").TrimEnd('/');
+            return $"{frontendBaseUrl}/teacher/live/{session.Id}";
+        }
+
+        /// <summary>
         /// Sends (or re-sends) the demo's join link to the parent and every extra invitee —
         /// always the same room (session.MeetingRoomId, the teacher's fixed personal room).
         /// Used by CreateAsync, ReassignTeacherAsync (the room changes with the teacher, so the
@@ -1239,7 +1253,7 @@ namespace iucs.readernest.application.Services
                 {
                     ["ChildName"] = booking.ChildName,
                     ["WhenLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc, teacher.User.TimeZoneId),
-                    ["JoinUrl"] = await BuildDemoJoinUrlAsync(session, teacherName, teacher.User.Email, moderator: true, cancellationToken),
+                    ["JoinUrl"] = BuildTeacherDemoAppJoinUrl(session),
                 };
                 if (extraPlaceholders is not null)
                 {

@@ -90,6 +90,7 @@ namespace iucs.readernest.application.Services
 
             var previousTeacherProfileId = batch.TeacherProfileId;
             var teacherChanged = request.TeacherProfileId != previousTeacherProfileId;
+            var previousDurationOverride = batch.DurationMinutesOverride;
 
             // Confirmed live: reassigning a batch's teacher here only ever updated the Batch row
             // itself — every ClassSession already generated for it (GenerateScheduleAsync sets
@@ -161,6 +162,64 @@ namespace iucs.readernest.application.Services
                 }
             }
 
+            // Same staleness bug as the teacher cascade above, for duration: GenerateScheduleAsync
+            // bakes DurationMinutesOverride (or the course default) into each ClassSession's
+            // ScheduledEndAtUtc once, at generation time, and refuses to run again once sessions
+            // exist. Editing the batch's duration afterward — e.g. correcting a batch created
+            // with the course's 45-minute default down to its real 35 minutes — used to only ever
+            // update this Batch row; every already-generated session kept its original end time
+            // forever, so the teacher's calendar (which computes duration from the real
+            // start/end timestamps, not from the batch) kept showing the stale figure. Push the
+            // new duration onto every still-undelivered session, same as the teacher move does.
+            var effectivePreviousDuration = previousDurationOverride ?? course.DurationMinutes;
+            var effectiveNewDuration = request.DurationMinutesOverride ?? course.DurationMinutes;
+            var durationChanged = effectiveNewDuration != effectivePreviousDuration;
+
+            // The teacher-reassignment query above already fetched exactly this session set
+            // (same batch, same Scheduled/CarriedForward-and-still-future filter) — reuse it
+            // instead of querying twice when both changed in the same request.
+            List<ClassSession> durationSessions = teacherChanged ? movingSessions : [];
+            if (durationChanged && !teacherChanged)
+            {
+                var durationNow = DateTime.UtcNow;
+                durationSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                    .Where(s => s.BatchId == id
+                        && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                        && s.ScheduledStartAtUtc > durationNow)
+                    .ToListAsync(cancellationToken);
+            }
+
+            if (durationChanged && durationSessions.Count > 0)
+            {
+                // Extending duration can push a session into whatever the (possibly
+                // just-reassigned) teacher already has booked right after it — same
+                // double-booking guard as the teacher move, checked against the NEW end times
+                // before anything is mutated.
+                var finalTeacherId = request.TeacherProfileId;
+                var moveWindowStart = durationSessions.Min(s => s.ScheduledStartAtUtc);
+                var moveWindowEnd = durationSessions.Max(s => s.ScheduledStartAtUtc.AddMinutes(effectiveNewDuration));
+                var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.TeacherProfileId == finalTeacherId
+                        && s.BatchId != id
+                        && (s.Status == SessionStatus.Scheduled
+                            || s.Status == SessionStatus.InProgress
+                            || s.Status == SessionStatus.CarriedForward)
+                        && s.ScheduledStartAtUtc < moveWindowEnd
+                        && s.ScheduledEndAtUtc > moveWindowStart)
+                    .ToListAsync(cancellationToken);
+                var durationConflict = otherTeacherSessions
+                    .Where(other => durationSessions.Any(moving =>
+                        other.ScheduledStartAtUtc < moving.ScheduledStartAtUtc.AddMinutes(effectiveNewDuration) && other.ScheduledEndAtUtc > moving.ScheduledStartAtUtc))
+                    .OrderBy(s => s.ScheduledStartAtUtc)
+                    .FirstOrDefault();
+                if (durationConflict is not null)
+                {
+                    throw new DomainValidationException(
+                        $"Can't change this batch's duration — extending it would overlap the teacher's session from " +
+                        $"{DateTimeDisplay.ToLocal(durationConflict.ScheduledStartAtUtc)} to {DateTimeDisplay.ToLocal(durationConflict.ScheduledEndAtUtc)}.");
+                }
+            }
+
             batch.CourseId = request.CourseId;
             batch.TeacherProfileId = request.TeacherProfileId;
             batch.Name = request.Name.Trim();
@@ -177,6 +236,17 @@ namespace iucs.readernest.application.Services
                 }
                 await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
                     changesJson: $"{{\"batchId\":\"{batch.Id}\",\"teacherReassigned\":true,\"from\":\"{previousTeacherProfileId}\",\"to\":\"{request.TeacherProfileId}\",\"sessionCount\":{movingSessions.Count}}}",
+                    cancellationToken: cancellationToken);
+            }
+
+            if (durationChanged && durationSessions.Count > 0)
+            {
+                foreach (var session in durationSessions)
+                {
+                    session.ScheduledEndAtUtc = session.ScheduledStartAtUtc.AddMinutes(effectiveNewDuration);
+                }
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
+                    changesJson: $"{{\"batchId\":\"{batch.Id}\",\"durationReconciled\":true,\"from\":{effectivePreviousDuration},\"to\":{effectiveNewDuration},\"sessionCount\":{durationSessions.Count}}}",
                     cancellationToken: cancellationToken);
             }
 
@@ -366,6 +436,86 @@ namespace iucs.readernest.application.Services
             }
 
             return new ReconcileStaleSessionTeachersResultDto(batchesFixed, sessionsMoved, conflicts);
+        }
+
+        public async Task<ReconcileStaleSessionDurationsResultDto> ReconcileStaleSessionDurationsAsync(
+            CancellationToken cancellationToken = default)
+        {
+            var now = DateTime.UtcNow;
+
+            // Same shape of staleness as ReconcileStaleSessionTeachersAsync, for duration: a
+            // batch whose DurationMinutesOverride was edited (or whose course's DurationMinutes
+            // it fell back to has changed) after its schedule was generated left every
+            // already-generated, still-undelivered ClassSession stamped with the old end time —
+            // UpdateAsync's cascade only applies to edits made after that fix shipped. Compare
+            // each session's real (start, end) gap against what the batch says it should be
+            // today and collect anything that no longer matches.
+            var candidateSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .Include(s => s.Batch).ThenInclude(b => b!.Course)
+                .Where(s => (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                    && s.ScheduledStartAtUtc > now
+                    && s.Batch != null)
+                .ToListAsync(cancellationToken);
+
+            var staleSessions = candidateSessions
+                .Where(s => s.ScheduledEndAtUtc != s.ScheduledStartAtUtc.AddMinutes(
+                    s.Batch!.DurationMinutesOverride ?? s.Batch.Course.DurationMinutes))
+                .ToList();
+
+            var conflicts = new List<ReconcileStaleSessionDurationConflictDto>();
+            var sessionsFixed = 0;
+            var batchesFixed = 0;
+
+            foreach (var group in staleSessions.GroupBy(s => s.BatchId))
+            {
+                var sessions = group.ToList();
+                var batch = sessions[0].Batch!;
+                var effectiveDuration = batch.DurationMinutesOverride ?? batch.Course.DurationMinutes;
+
+                // Same double-booking guard as the teacher-move repair: don't silently push a
+                // session into whatever this batch's teacher already has booked right after it
+                // just because the corruption predates this fix.
+                var moveWindowStart = sessions.Min(s => s.ScheduledStartAtUtc);
+                var moveWindowEnd = sessions.Max(s => s.ScheduledStartAtUtc.AddMinutes(effectiveDuration));
+                var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.TeacherProfileId == batch.TeacherProfileId
+                        && s.BatchId != batch.Id
+                        && (s.Status == SessionStatus.Scheduled
+                            || s.Status == SessionStatus.InProgress
+                            || s.Status == SessionStatus.CarriedForward)
+                        && s.ScheduledStartAtUtc < moveWindowEnd
+                        && s.ScheduledEndAtUtc > moveWindowStart)
+                    .ToListAsync(cancellationToken);
+                var conflict = otherTeacherSessions
+                    .Where(other => sessions.Any(moving =>
+                        other.ScheduledStartAtUtc < moving.ScheduledStartAtUtc.AddMinutes(effectiveDuration) && other.ScheduledEndAtUtc > moving.ScheduledStartAtUtc))
+                    .OrderBy(s => s.ScheduledStartAtUtc)
+                    .FirstOrDefault();
+                if (conflict is not null)
+                {
+                    conflicts.Add(new ReconcileStaleSessionDurationConflictDto(batch.Id, batch.Name, effectiveDuration,
+                        $"Correcting the duration would overlap the teacher's session from {DateTimeDisplay.ToLocal(conflict.ScheduledStartAtUtc)} to {DateTimeDisplay.ToLocal(conflict.ScheduledEndAtUtc)}."));
+                    continue;
+                }
+
+                foreach (var session in sessions)
+                {
+                    session.ScheduledEndAtUtc = session.ScheduledStartAtUtc.AddMinutes(effectiveDuration);
+                }
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
+                    changesJson: $"{{\"batchId\":\"{batch.Id}\",\"staleDurationReconciled\":true,\"to\":{effectiveDuration},\"sessionCount\":{sessions.Count}}}",
+                    cancellationToken: cancellationToken);
+
+                batchesFixed++;
+                sessionsFixed += sessions.Count;
+            }
+
+            if (sessionsFixed > 0)
+            {
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+
+            return new ReconcileStaleSessionDurationsResultDto(batchesFixed, sessionsFixed, conflicts);
         }
 
         /// <summary>
