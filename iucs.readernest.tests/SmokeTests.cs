@@ -3538,9 +3538,22 @@ namespace iucs.readernest.tests
 
             var url = await demoService.ResolveLiveJoinUrlAsync(dto.Id, participantId: null);
 
+            // 2026-09-15 fix: this now points at the app's own "/guest-join" bridge (so the
+            // parent gets the real interactive classroom, not a bare Jitsi call) rather than a
+            // raw Jitsi URL with the room id literally in it -- resolve the token it carries the
+            // same way the anonymous landing page would, to confirm it's still the right room.
             Assert.NotNull(url);
-            Assert.Contains(dto.MeetingRoomId!, url);
+            Assert.Contains("/guest-join?token=", url);
+            var join = await CreateSessionService().GetGuestJoinAsync(ExtractGuestJoinToken(url!));
+            Assert.Equal(dto.MeetingRoomId, join.Room);
+            Assert.Equal("Lead Parent", join.DisplayName);
+            Assert.True(join.SkipPrejoin);
         }
+
+        /// <summary>Pulls the ?token= value back out of a "/guest-join?token=..." URL, same as
+        /// the frontend's own useSearchParams().get("token") would.</summary>
+        private static string ExtractGuestJoinToken(string guestJoinUrl) =>
+            Uri.UnescapeDataString(guestJoinUrl.Split("token=")[1]);
 
         [Fact]
         public async Task ResolveLiveJoinUrl_UnknownBooking_ReturnsNull()
@@ -3574,8 +3587,12 @@ namespace iucs.readernest.tests
 
             var url = await demoService.ResolveLiveJoinUrlAsync(dto.Id, participantId: null);
 
+            // Same "no time-based cutoff" contract as before, now proven all the way through the
+            // new bridge token too: GetGuestJoinAsync deliberately skips its own expiry/live-
+            // status gate for a "named guest" (demo) link, unlike an RM-generated Guest Link.
             Assert.NotNull(url);
-            Assert.Contains(dto.MeetingRoomId!, url);
+            var join = await CreateSessionService().GetGuestJoinAsync(ExtractGuestJoinToken(url!));
+            Assert.Equal(dto.MeetingRoomId, join.Room);
         }
 
         [Fact]

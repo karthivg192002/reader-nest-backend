@@ -30,17 +30,24 @@ namespace iucs.readernest.application.Common.Interfaces
 
         /// <summary>
         /// A shareable "Guest Link" bridge token (see SessionService.CreateGuestLinkAsync /
-        /// GetGuestJoinAsync) — opaque and signed, carries just enough (a "purpose" claim, the
-        /// session id, and an optional child id) to resolve back to a live Jitsi join without a
-        /// logged-in user behind it. Never registered with the normal ASP.NET auth pipeline the
-        /// way a user's access token is — <see cref="ValidateGuestJoinToken"/> parses it
-        /// directly, since the guest-join endpoint is anonymous by design and this token is
-        /// never meant to authenticate into anything else. <paramref name="expiresAtUtc"/> is
-        /// only a generous outer safety bound so an unused link doesn't stay mintable forever;
-        /// the real "does this link still work" gate is GetGuestJoinAsync's own live check of
-        /// the session's current status/time on every open.
+        /// CreateGuestLinkForParticipantAsync / GetGuestJoinAsync) — opaque and signed, carries
+        /// just enough (a "purpose" claim, the session id, and either a child id or a raw
+        /// name/email pair) to resolve back to a live Jitsi join without a logged-in user behind
+        /// it. Never registered with the normal ASP.NET auth pipeline the way a user's access
+        /// token is — <see cref="ValidateGuestJoinToken"/> parses it directly, since the
+        /// guest-join endpoint is anonymous by design and this token is never meant to
+        /// authenticate into anything else. <paramref name="expiresAtUtc"/> is only a generous
+        /// outer safety bound for a <paramref name="childId"/>-bound link so an unused one
+        /// doesn't stay mintable forever; the real "does this link still work" gate is
+        /// GetGuestJoinAsync's own live check of the session's current status/time on every
+        /// open. <paramref name="guestName"/>/<paramref name="guestEmail"/> are for a participant
+        /// with no Child/BatchEnrollment row to resolve a name from at all (a Demo lead, via
+        /// DemoBookingService) — mutually exclusive with <paramref name="childId"/> in practice
+        /// (a caller sets at most one), and GetGuestJoinAsync deliberately skips its own
+        /// expiry/live-status gate for this shape of link, matching the Demo join redirect's own
+        /// long-standing "never expires, still works weeks later" contract it replaces.
         /// </summary>
-        TokenResult CreateGuestJoinToken(Guid sessionId, Guid? childId, DateTime expiresAtUtc);
+        TokenResult CreateGuestJoinToken(Guid sessionId, Guid? childId, DateTime expiresAtUtc, string? guestName = null, string? guestEmail = null);
 
         /// <summary>
         /// Parses/validates a token minted by <see cref="CreateGuestJoinToken"/>. Returns null
@@ -48,7 +55,7 @@ namespace iucs.readernest.application.Common.Interfaces
         /// claim) — SessionService.GetGuestJoinAsync treats all of those identically to "this
         /// link doesn't exist."
         /// </summary>
-        (Guid SessionId, Guid? ChildId)? ValidateGuestJoinToken(string token);
+        (Guid SessionId, Guid? ChildId, string? GuestName, string? GuestEmail)? ValidateGuestJoinToken(string token);
 
         /// <summary>
         /// A ClassroomHub-only token for a Guest Link join (see SessionService.GetGuestJoinAsync

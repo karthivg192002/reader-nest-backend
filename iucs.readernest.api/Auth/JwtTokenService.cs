@@ -92,6 +92,8 @@ namespace iucs.readernest.api.Auth
         private const string GuestClassroomPurpose = "guest-classroom";
         private const string SessionIdClaimType = "sessionId";
         private const string ChildIdClaimType = "childId";
+        private const string GuestNameClaimType = "guestName";
+        private const string GuestEmailClaimType = "guestEmail";
 
         public TokenResult CreateGuestClassroomHubToken(Guid sessionId, Guid? childId, string participantName, DateTime expiresAtUtc)
         {
@@ -131,7 +133,7 @@ namespace iucs.readernest.api.Auth
             };
         }
 
-        public TokenResult CreateGuestJoinToken(Guid sessionId, Guid? childId, DateTime expiresAtUtc)
+        public TokenResult CreateGuestJoinToken(Guid sessionId, Guid? childId, DateTime expiresAtUtc, string? guestName = null, string? guestEmail = null)
         {
             var claims = new List<Claim>
             {
@@ -142,6 +144,14 @@ namespace iucs.readernest.api.Auth
             if (childId is Guid cid)
             {
                 claims.Add(new Claim(ChildIdClaimType, cid.ToString()));
+            }
+            if (!string.IsNullOrWhiteSpace(guestName))
+            {
+                claims.Add(new Claim(GuestNameClaimType, guestName));
+            }
+            if (!string.IsNullOrWhiteSpace(guestEmail))
+            {
+                claims.Add(new Claim(GuestEmailClaimType, guestEmail));
             }
 
             var credentials = new SigningCredentials(
@@ -163,7 +173,7 @@ namespace iucs.readernest.api.Auth
             };
         }
 
-        public (Guid SessionId, Guid? ChildId)? ValidateGuestJoinToken(string token)
+        public (Guid SessionId, Guid? ChildId, string? GuestName, string? GuestEmail)? ValidateGuestJoinToken(string token)
         {
             // This backs a public, [AllowAnonymous] endpoint (SessionsController.GuestJoin) —
             // unlike every other caller of ValidateToken in this file, the input here can be
@@ -210,7 +220,9 @@ namespace iucs.readernest.api.Auth
             }
 
             Guid? childId = Guid.TryParse(principal.FindFirst(ChildIdClaimType)?.Value, out var cid) ? cid : null;
-            return (sessionId, childId);
+            var guestName = principal.FindFirst(GuestNameClaimType)?.Value;
+            var guestEmail = principal.FindFirst(GuestEmailClaimType)?.Value;
+            return (sessionId, childId, guestName, guestEmail);
         }
     }
 }

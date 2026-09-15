@@ -1283,6 +1283,29 @@ namespace iucs.readernest.application.Services
             return new GuestLinkDto { Token = guestToken.AccessToken };
         }
 
+        public async Task<GuestLinkDto> CreateGuestLinkForParticipantAsync(Guid sessionId, string guestName, string? guestEmail, CancellationToken cancellationToken = default)
+        {
+            var resolvedSessionId = await ResolveCurrentSessionIdAsync(sessionId, cancellationToken);
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(resolvedSessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+
+            if (string.IsNullOrWhiteSpace(session.MeetingRoomId))
+            {
+                throw new DomainValidationException("This session has no meeting room yet.");
+            }
+
+            // A long-lived outer bound, not the AddDays(1)-past-scheduled-end one
+            // CreateGuestLinkAsync above uses -- GetGuestJoinAsync deliberately skips its own
+            // live-status gate for this "named guest" token shape (see that method's own
+            // comment), so this outer expiry is the only thing bounding it at all, and it needs
+            // to outlive "revisited weeks later" the same way the DemoBookingService redirect
+            // this replaces always has (its own old JoinTokenLifetime was 5 years, for the same
+            // "still bounded, not literally forever" reasoning).
+            var guestToken = _tokenService.CreateGuestJoinToken(
+                session.Id, childId: null, DateTime.UtcNow.AddYears(5), guestName, guestEmail);
+            return new GuestLinkDto { Token = guestToken.AccessToken };
+        }
+
         public async Task<GuestJoinDto> GetGuestJoinAsync(string token, CancellationToken cancellationToken = default)
         {
             var parsed = _tokenService.ValidateGuestJoinToken(token)
@@ -1297,29 +1320,42 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("This class has no meeting room yet.");
             }
 
-            // Live status/time check -- deliberately NOT relying on the guest token's own
-            // (generous) expiry alone, so a link dies the instant the class is marked Completed
-            // or Cancelled even if that happens well before its outer expiry bound.
-            var now = DateTime.UtcNow;
-            if (session.Status == SessionStatus.Cancelled)
+            // A "named guest" link (DemoBookingService.CreateGuestLinkForParticipantAsync -- a
+            // Demo lead's own join link, no Child/BatchEnrollment row to check) deliberately
+            // skips the live status/time gate below entirely: it replaces the old raw-Jitsi demo
+            // redirect, which had no such gate either ("Deliberately no time-based cutoff: a demo
+            // that ran long, got revisited weeks later for a recap, or whose invite just sat
+            // unopened all still resolve" -- see ResolveLiveJoinUrlAsync's own doc comment). Only
+            // a childId-bound or generic RM/Admin/Coordinator Guest Link -- the client's explicit
+            // "expires at session end/Completed" requirement -- gets the strict check.
+            var isNamedGuest = !string.IsNullOrWhiteSpace(parsed.GuestName);
+            if (!isNamedGuest)
             {
-                throw new DomainValidationException("This class was cancelled.");
-            }
-            if (session.Status == SessionStatus.Completed)
-            {
-                throw new DomainValidationException("This class has already ended.");
-            }
-            if (now < session.ScheduledStartAtUtc.AddMinutes(-10))
-            {
-                throw new DomainValidationException("This class hasn't opened for joining yet.");
-            }
-            if (session.Status != SessionStatus.InProgress && now > session.ScheduledEndAtUtc)
-            {
-                throw new DomainValidationException("This class has already ended.");
+                // Live status/time check -- deliberately NOT relying on the guest token's own
+                // (generous) expiry alone, so a link dies the instant the class is marked
+                // Completed or Cancelled even if that happens well before its outer expiry bound.
+                var now = DateTime.UtcNow;
+                if (session.Status == SessionStatus.Cancelled)
+                {
+                    throw new DomainValidationException("This class was cancelled.");
+                }
+                if (session.Status == SessionStatus.Completed)
+                {
+                    throw new DomainValidationException("This class has already ended.");
+                }
+                if (now < session.ScheduledStartAtUtc.AddMinutes(-10))
+                {
+                    throw new DomainValidationException("This class hasn't opened for joining yet.");
+                }
+                if (session.Status != SessionStatus.InProgress && now > session.ScheduledEndAtUtc)
+                {
+                    throw new DomainValidationException("This class has already ended.");
+                }
             }
 
             var childId = parsed.ChildId;
             var displayName = "Guest";
+            string? participantEmail = null;
             if (childId is Guid cid)
             {
                 var stillEnrolled = session.BatchId is Guid batchId && await _unitOfWork.Repository<BatchEnrollment>()
@@ -1337,6 +1373,11 @@ namespace iucs.readernest.application.Services
                     childId = null;
                 }
             }
+            else if (isNamedGuest)
+            {
+                displayName = parsed.GuestName!;
+                participantEmail = parsed.GuestEmail;
+            }
 
             var jitsiConfigJson = await _unitOfWork.Repository<Integration>().Query()
                 .Where(i => i.Key == "jitsi")
@@ -1344,21 +1385,28 @@ namespace iucs.readernest.application.Services
                 .FirstOrDefaultAsync(cancellationToken);
             var domain = JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
 
+            // Based on "now", not session.ScheduledEndAtUtc: a named-guest (demo) join can
+            // legitimately happen weeks after that timestamp (see isNamedGuest's own comment
+            // above), and a token minted with an already-past expiry would be DOA. A couple of
+            // hours past the moment of THIS open still covers a live class running long, same
+            // intent the old ScheduledEndAtUtc-based expiry had for the still-time-gated case.
+            var perOpenExpiresAtUtc = DateTime.UtcNow.AddHours(2);
+
             var jitsiToken = _jitsiTokenService.CreateToken(
                 domain,
                 jitsiConfigJson,
                 session.MeetingRoomId,
                 displayName,
-                participantEmail: null,
+                participantEmail,
                 moderator: false,
-                session.ScheduledEndAtUtc.AddHours(2));
+                perOpenExpiresAtUtc);
 
             // Lets the landing page join the same interactive classroom (whiteboard, quiz,
             // roster, gamification) an ordinary logged-in student would -- see
             // CreateGuestClassroomHubToken's own doc comment for why this is a second, distinct
             // token from jitsiToken above (Jitsi's own call vs. this app's ClassroomHub).
             var hubToken = _tokenService.CreateGuestClassroomHubToken(
-                session.Id, childId, displayName, session.ScheduledEndAtUtc.AddHours(2));
+                session.Id, childId, displayName, perOpenExpiresAtUtc);
 
             return new GuestJoinDto
             {
@@ -1368,7 +1416,7 @@ namespace iucs.readernest.application.Services
                 Domain = domain,
                 Token = jitsiToken,
                 DisplayName = displayName,
-                SkipPrejoin = childId is not null,
+                SkipPrejoin = childId is not null || isNamedGuest,
                 HubToken = hubToken.AccessToken,
             };
         }

@@ -876,6 +876,13 @@ namespace iucs.readernest.application.Services
         /// make this return null are the booking/session/room not existing, or an unrelated
         /// participant id. (The link dies the moment the booking itself is deleted -- see
         /// DeleteAsync -- not on any clock.)
+        /// Points at the app's own "/guest-join" bridge page now, not straight at Jitsi's hosted
+        /// client the way this used to (see CreateGuestLinkForParticipantAsync) -- confirmed live
+        /// that a bare Jitsi redirect left the parent/lead with no Whiteboard/Slides at all, the
+        /// same gap BuildTeacherDemoAppJoinUrl below already fixed for the teacher's own copy of
+        /// this link. SessionService.GetGuestJoinAsync recognizes a "named guest" token (carries
+        /// a name/email instead of a childId) and deliberately skips its own expiry/live-status
+        /// gate for it, preserving the "no time-based cutoff" contract this doc comment promises.
         /// </summary>
         public async Task<string?> ResolveLiveJoinUrlAsync(Guid bookingId, Guid? participantId, CancellationToken cancellationToken = default)
         {
@@ -907,7 +914,10 @@ namespace iucs.readernest.application.Services
                 participantEmail = booking.ParentEmail;
             }
 
-            return await BuildDemoJoinUrlAsync(session, participantName, participantEmail, moderator: false, cancellationToken);
+            var guestLink = await _sessionService.CreateGuestLinkForParticipantAsync(
+                session.Id, participantName, participantEmail, cancellationToken);
+            var frontendBaseUrl = (_configuration["Frontend:BaseUrl"] ?? "http://localhost:5173").TrimEnd('/');
+            return $"{frontendBaseUrl}/guest-join?token={Uri.EscapeDataString(guestLink.Token)}";
         }
 
         /// <summary>
@@ -1137,50 +1147,18 @@ namespace iucs.readernest.application.Services
         }
 
         /// <summary>
-        /// Builds one recipient's signed join URL for a demo, against the demo's fixed room
-        /// (session.MeetingRoomId — the teacher's permanent personal room). No account exists
-        /// yet for a demo lead, so each invitee gets their own token (name + email baked in,
-        /// expiring a couple of hours past the demo) instead of a bare room name that would
-        /// work forever for anyone who ever saw the email.
-        /// </summary>
-        // No appId/appSecret configured on this deployment's "jitsi" Integration today means
-        // CreateToken already returns null (unsigned join) regardless of this value -- but if
-        // JWT room auth is ever turned on, a token minted with this expiry must not itself
-        // become the next dead-link bug. "No expire" only meant not tying the link's window to
-        // ScheduledEndAtUtc; still bounded (not literally forever) so a leaked token can't be
-        // replayed indefinitely.
-        private static readonly TimeSpan JoinTokenLifetime = TimeSpan.FromDays(365 * 5);
-
-        private async Task<string> BuildDemoJoinUrlAsync(
-            ClassSession session, string participantName, string participantEmail, bool moderator, CancellationToken cancellationToken)
-        {
-            var jitsiConfigJson = await _unitOfWork.Repository<Integration>().Query()
-                .Where(i => i.Key == "jitsi")
-                .Select(i => i.ConfigJson)
-                .FirstOrDefaultAsync(cancellationToken);
-            var domain = JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
-            return JitsiLinkBuilder.BuildJoinUrl(
-                session.MeetingRoomId,
-                jitsiConfigJson,
-                _jitsiTokenService.CreateToken(
-                    domain, jitsiConfigJson, session.MeetingRoomId!, participantName, participantEmail,
-                    moderator, DateTime.UtcNow.Add(JoinTokenLifetime)),
-                participantName)
-                ?? "#";
-        }
-
-        /// <summary>
-        /// The teacher's own demo join link points at this app's authenticated in-app classroom
-        /// instead of straight at Jitsi's hosted client (what BuildDemoJoinUrlAsync above builds
-        /// for the parent/lead, who has no account to authenticate with). Confirmed live: a demo
-        /// opened from this link had no Whiteboard/Slides — those only ever render inside
-        /// JitsiLive's InteractivePanel, over an authenticated ClassroomHub connection, which a
-        /// bare Jitsi redirect never establishes. The teacher already has a real login, so
-        /// /teacher/live/:sessionId (gated by RequireAuth, which bounces to /login and back if
-        /// they aren't already signed in) gets them the exact same full interactive classroom a
-        /// regular class uses. This also can't go stale the way a baked-in domain/token could:
-        /// JitsiLive re-resolves the room fresh via its own getJitsiJoin(sessionId) call on every
-        /// open, rather than trusting anything carried in the link itself.
+        /// The teacher's own demo join link points at this app's authenticated in-app classroom,
+        /// via /teacher/live/:sessionId (gated by RequireAuth, which bounces to /login and back
+        /// if they aren't already signed in) — the teacher already has a real login, so there's
+        /// no need for the token-carrying bridge ResolveLiveJoinUrlAsync's own "/guest-join" link
+        /// now sends the parent/lead through (see CreateGuestLinkForParticipantAsync). Both paths
+        /// land in the exact same full interactive classroom a regular class uses; confirmed live
+        /// once, when only this half of the pair worked, that skipping either one (a bare Jitsi
+        /// redirect) left the opener with no Whiteboard/Slides at all — those only ever render
+        /// inside JitsiLive's InteractivePanel, over an authenticated ClassroomHub connection a
+        /// bare redirect never establishes. This also can't go stale the way a baked-in domain/
+        /// token could: JitsiLive re-resolves the room fresh via its own getJitsiJoin(sessionId)
+        /// call on every open, rather than trusting anything carried in the link itself.
         /// </summary>
         private string BuildTeacherDemoAppJoinUrl(ClassSession session)
         {

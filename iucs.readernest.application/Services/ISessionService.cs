@@ -187,6 +187,19 @@ namespace iucs.readernest.application.Services
         Task<GuestLinkDto> CreateGuestLinkAsync(Guid sessionId, Guid? childId, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Mints a Guest Link token for a participant identified by name (and optionally email)
+        /// rather than an enrolled Child — for DemoBookingService, whose lead may have no
+        /// Child/BatchEnrollment row at all. GetGuestJoinAsync recognizes this shape of link
+        /// (carries a "guestName" claim) and deliberately skips its own expiry/live-status gate
+        /// for it, matching the Demo join redirect's long-standing "never expires, still works
+        /// weeks later" contract this replaces — unlike <see cref="CreateGuestLinkAsync"/>'s
+        /// links, which do expire at the session's end/Completion per the client's own
+        /// requirement for that feature. Always joins as a non-moderator with prejoin skipped
+        /// (the name is already known), same as a childId-bound Guest Link.
+        /// </summary>
+        Task<GuestLinkDto> CreateGuestLinkForParticipantAsync(Guid sessionId, string guestName, string? guestEmail, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Anonymous resolution of a Guest Link token into a live Jitsi join — called by the
         /// frontend's own unauthenticated "/guest-join" bridge page, not by a logged-in user.
         /// Re-checks the session's LIVE status/time on every call (not just the token's own

@@ -224,10 +224,13 @@ namespace iucs.readernest.tests
 
         // Not a real JWT -- just enough of a round-trip (encode on create, decode+expiry-check
         // on validate) for guest-link tests to exercise SessionService's actual branching
-        // (invalid/expired token, bound vs. generic link) without a signing key in play.
-        public TokenResult CreateGuestJoinToken(Guid sessionId, Guid? childId, DateTime expiresAtUtc)
+        // (invalid/expired token, bound/generic/named-guest link) without a signing key in play.
+        // '|' as a field separator is fine here (never appears in test data); a real name/email
+        // containing it would need proper encoding, which is exactly why JwtTokenService uses
+        // real JWT claims instead of this test-only shortcut.
+        public TokenResult CreateGuestJoinToken(Guid sessionId, Guid? childId, DateTime expiresAtUtc, string? guestName = null, string? guestEmail = null)
         {
-            var payload = $"{sessionId}|{childId}|{expiresAtUtc:O}";
+            var payload = $"{sessionId}|{childId}|{expiresAtUtc:O}|{guestName}|{guestEmail}";
             return new TokenResult
             {
                 AccessToken = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(payload)),
@@ -235,12 +238,12 @@ namespace iucs.readernest.tests
             };
         }
 
-        public (Guid SessionId, Guid? ChildId)? ValidateGuestJoinToken(string token)
+        public (Guid SessionId, Guid? ChildId, string? GuestName, string? GuestEmail)? ValidateGuestJoinToken(string token)
         {
             try
             {
                 var parts = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(token)).Split('|');
-                if (parts.Length != 3)
+                if (parts.Length != 5)
                 {
                     return null;
                 }
@@ -251,7 +254,11 @@ namespace iucs.readernest.tests
                     return null;
                 }
 
-                return (Guid.Parse(parts[0]), string.IsNullOrEmpty(parts[1]) ? null : Guid.Parse(parts[1]));
+                return (
+                    Guid.Parse(parts[0]),
+                    string.IsNullOrEmpty(parts[1]) ? null : Guid.Parse(parts[1]),
+                    string.IsNullOrEmpty(parts[3]) ? null : parts[3],
+                    string.IsNullOrEmpty(parts[4]) ? null : parts[4]);
             }
             catch
             {

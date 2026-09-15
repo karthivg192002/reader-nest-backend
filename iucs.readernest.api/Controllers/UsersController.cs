@@ -31,10 +31,11 @@ namespace iucs.readernest.api.Controllers
         // reuses that resolution) can make the *effective* mint moment earlier than the real
         // click, so a short window here silently becomes a "link expired" report hours later.
         // Confirmed live (2026-09-14): shared at 12pm for a 6pm join -- the exact AddHours(6)
-        // this replaces -- reported as "expired" on arrival. Mirrors
-        // DemoBookingService.JoinTokenLifetime's identical fix for the identical bug class on
-        // demo join links. Still bounded, not literally forever, so a leaked token can't be
-        // replayed indefinitely.
+        // this replaces -- reported as "expired" on arrival. Mirrors the same "still bounded,
+        // not literally forever" 5-year outer expiry SessionService.
+        // CreateGuestLinkForParticipantAsync uses for demo join links (its own GetGuestJoinAsync
+        // skips the usual per-session expiry check for that link shape entirely) -- the identical
+        // fix for the identical bug class.
         private static readonly TimeSpan PersonalRoomTokenLifetime = TimeSpan.FromDays(365 * 5);
 
         public UsersController(IUserService userService, IRoleService roleService, IEnrollmentService enrollmentService)
