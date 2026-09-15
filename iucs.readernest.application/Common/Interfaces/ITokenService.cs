@@ -49,5 +49,18 @@ namespace iucs.readernest.application.Common.Interfaces
         /// link doesn't exist."
         /// </summary>
         (Guid SessionId, Guid? ChildId)? ValidateGuestJoinToken(string token);
+
+        /// <summary>
+        /// A ClassroomHub-only token for a Guest Link join (see SessionService.GetGuestJoinAsync
+        /// and JitsiLive.tsx's `hubToken` prop) — same shape/purpose as
+        /// <see cref="CreateRecordingObserverHubToken"/> (a throwaway subject, scoped to one
+        /// <paramref name="sessionId"/> via claims Program.cs's OnTokenValidated and
+        /// ClassroomHub.JoinSession both special-case), but for a real caretaker rejoining the
+        /// interactive classroom as an ordinary student participant rather than Jibri's headless
+        /// observer: the room roster, whiteboard, quiz and gamification all need this to behave
+        /// like a normal join, not a silent one. <paramref name="participantName"/> is the same
+        /// name GetGuestJoinAsync already resolved (the enrolled child's name, or "Guest").
+        /// </summary>
+        TokenResult CreateGuestClassroomHubToken(Guid sessionId, Guid? childId, string participantName, DateTime expiresAtUtc);
     }
 }

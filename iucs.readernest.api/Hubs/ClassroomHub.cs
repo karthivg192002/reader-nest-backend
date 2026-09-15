@@ -127,8 +127,15 @@ namespace iucs.readernest.api.Hubs
             // presence, must match the room being joined -- otherwise one observer token could
             // be replayed to silently watch a different class's whiteboard/quiz traffic.
             var isRecordingObserver = Context.User?.FindFirstValue("purpose") == "recording-observer";
+            // A Guest Link caretaker (see CreateGuestClassroomHubToken / SessionService.
+            // GetGuestJoinAsync) is the same shape of "no real logged-in user" as the recording
+            // observer above -- same sessionId-scope check, same bypass of IsSessionParticipantAsync
+            // -- but joins as an ordinary participant (roster, whiteboard, quiz) rather than a
+            // silent one, so it needs its own name/role handling below rather than reusing
+            // isRecordingObserver's.
+            var isGuest = Context.User?.FindFirstValue("purpose") == "guest-classroom";
             Guid userId;
-            if (isRecordingObserver)
+            if (isRecordingObserver || isGuest)
             {
                 var tokenSessionId = Context.User?.FindFirstValue("sessionId");
                 if (tokenSessionId != sessionId)
@@ -166,6 +173,12 @@ namespace iucs.readernest.api.Hubs
             }
 
             var name = isRecordingObserver ? "Recording" : (string.IsNullOrWhiteSpace(displayName) ? UserName : displayName.Trim());
+            // isGuest deliberately falls into the same "student" branch a real logged-in student
+            // would -- the whole point of the Guest Link's interactive join is that it behaves
+            // like an ordinary student, not a special observer-style role (IsTeacher reads
+            // Context.User's role claim, which a guest's synthetic token never carries, so this
+            // would already evaluate to "student" even without isGuest called out explicitly --
+            // spelled out anyway so this reads as an intentional choice, not a coincidence).
             var role = isRecordingObserver ? "observer" : (IsTeacher ? "teacher" : "student");
 
             // A room that goes fully empty (everyone disconnects, even momentarily) has its
@@ -233,8 +246,14 @@ namespace iucs.readernest.api.Hubs
             // is confirmed to genuinely belong to this session. Best-effort by design (see the
             // method's own doc comment); never allowed to affect the join that already succeeded.
             // Skipped for the recording observer -- its userId is a throwaway synthetic id with
-            // no real attendance to record.
-            if (!isRecordingObserver)
+            // no real attendance to record. Also skipped for a guest: a student-bound Guest Link
+            // already had its attendance captured once, by SessionsController.GuestJoin calling
+            // CaptureGuestJoinAttendanceAsync directly BEFORE the caretaker's browser ever opens
+            // this hub connection -- CaptureJoinAttendanceAsync here would be a no-op anyway
+            // (userId is this guest's own throwaway synthetic id, not a real Parent/Teacher
+            // account it could resolve attendance against), so skipping it outright avoids a
+            // pointless DB lookup on every guest join, not just a correctness fix.
+            if (!isRecordingObserver && !isGuest)
             {
                 await _academicOpsService.CaptureJoinAttendanceAsync(sessionGuid, userId, Context.ConnectionAborted);
             }

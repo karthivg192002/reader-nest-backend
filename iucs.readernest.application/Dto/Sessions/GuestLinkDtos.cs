@@ -69,9 +69,20 @@ namespace iucs.readernest.application.Dto.Sessions
         /// <summary>Pre-filled with the enrolled child's name for a student-bound link; "Guest" for a generic one.</summary>
         public string DisplayName { get; set; } = null!;
 
-        /// <summary>True for a student-bound link — the landing page skips Jitsi's prejoin
-        /// screen entirely and joins straight in with DisplayName already set. False for a
-        /// generic guest link, which still shows prejoin so the opener types their own name.</summary>
+        /// <summary>True for a student-bound link — the landing page skips its own name-entry
+        /// step entirely and joins straight in with DisplayName already set. False for a
+        /// generic guest link, which asks the opener to type their own name first.</summary>
         public bool SkipPrejoin { get; set; }
+
+        /// <summary>
+        /// ClassroomHub-only token (see JwtTokenService.CreateGuestClassroomHubToken) — lets the
+        /// guest-join landing page render the full in-app interactive classroom (whiteboard,
+        /// quiz, roster, gamification) via JitsiLive's `hubToken` prop, the same mechanism
+        /// Jibri's recording-observer page already uses, rather than dropping the caretaker into
+        /// a bare Jitsi call with none of it. Unlike <see cref="Token"/> (the Jitsi join token,
+        /// which needs the "jitsi" Integration's appId/appSecret configured), this is signed with
+        /// this app's own always-present JWT key, so it's never null.
+        /// </summary>
+        public string HubToken { get; set; } = null!;
     }
 }

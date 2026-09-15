@@ -217,6 +217,11 @@ namespace iucs.readernest.tests
             return new TokenResult { AccessToken = "test-observer-hub-token", ExpiresAtUtc = expiresAtUtc };
         }
 
+        public TokenResult CreateGuestClassroomHubToken(Guid sessionId, Guid? childId, string participantName, DateTime expiresAtUtc)
+        {
+            return new TokenResult { AccessToken = "test-guest-hub-token", ExpiresAtUtc = expiresAtUtc };
+        }
+
         // Not a real JWT -- just enough of a round-trip (encode on create, decode+expiry-check
         // on validate) for guest-link tests to exercise SessionService's actual branching
         // (invalid/expired token, bound vs. generic link) without a signing key in play.

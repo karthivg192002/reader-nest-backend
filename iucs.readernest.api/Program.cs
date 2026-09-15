@@ -171,6 +171,16 @@ builder.Services
                     return;
                 }
 
+                // Same reasoning as the recording-observer bypass just above, for a Guest Link's
+                // ClassroomHub token (see CreateGuestClassroomHubToken / SessionService.
+                // GetGuestJoinAsync): a caretaker joining via a shared link has no real User row
+                // behind them either, and ClassroomHub.JoinSession does its own sessionId-scoped
+                // check for this purpose in place of the normal participant check.
+                if (context.Principal?.FindFirstValue("purpose") == "guest-classroom")
+                {
+                    return;
+                }
+
                 var userIdClaim = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
                 if (!Guid.TryParse(userIdClaim, out var userId))
                 {

@@ -89,8 +89,47 @@ namespace iucs.readernest.api.Auth
         }
 
         private const string GuestJoinPurpose = "guest-join";
+        private const string GuestClassroomPurpose = "guest-classroom";
         private const string SessionIdClaimType = "sessionId";
         private const string ChildIdClaimType = "childId";
+
+        public TokenResult CreateGuestClassroomHubToken(Guid sessionId, Guid? childId, string participantName, DateTime expiresAtUtc)
+        {
+            // A throwaway subject, same convention as CreateRecordingObserverHubToken just above
+            // — nothing ever looks this id up as a real user.
+            var syntheticUserId = Guid.NewGuid();
+            var claims = new List<Claim>
+            {
+                new(JwtRegisteredClaimNames.Sub, syntheticUserId.ToString()),
+                new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+                new(ClaimTypes.NameIdentifier, syntheticUserId.ToString()),
+                new(ClaimTypes.Name, participantName),
+                new("purpose", GuestClassroomPurpose),
+                new(SessionIdClaimType, sessionId.ToString()),
+            };
+            if (childId is Guid cid)
+            {
+                claims.Add(new Claim(ChildIdClaimType, cid.ToString()));
+            }
+
+            var credentials = new SigningCredentials(
+                new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_options.SigningKey)),
+                SecurityAlgorithms.HmacSha256);
+
+            var token = new JwtSecurityToken(
+                issuer: _options.Issuer,
+                audience: _options.Audience,
+                claims: claims,
+                notBefore: DateTime.UtcNow,
+                expires: expiresAtUtc,
+                signingCredentials: credentials);
+
+            return new TokenResult
+            {
+                AccessToken = new JwtSecurityTokenHandler().WriteToken(token),
+                ExpiresAtUtc = expiresAtUtc,
+            };
+        }
 
         public TokenResult CreateGuestJoinToken(Guid sessionId, Guid? childId, DateTime expiresAtUtc)
         {

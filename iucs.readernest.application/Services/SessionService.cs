@@ -1353,6 +1353,13 @@ namespace iucs.readernest.application.Services
                 moderator: false,
                 session.ScheduledEndAtUtc.AddHours(2));
 
+            // Lets the landing page join the same interactive classroom (whiteboard, quiz,
+            // roster, gamification) an ordinary logged-in student would -- see
+            // CreateGuestClassroomHubToken's own doc comment for why this is a second, distinct
+            // token from jitsiToken above (Jitsi's own call vs. this app's ClassroomHub).
+            var hubToken = _tokenService.CreateGuestClassroomHubToken(
+                session.Id, childId, displayName, session.ScheduledEndAtUtc.AddHours(2));
+
             return new GuestJoinDto
             {
                 SessionId = session.Id,
@@ -1362,6 +1369,7 @@ namespace iucs.readernest.application.Services
                 Token = jitsiToken,
                 DisplayName = displayName,
                 SkipPrejoin = childId is not null,
+                HubToken = hubToken.AccessToken,
             };
         }
 

@@ -276,6 +276,10 @@ namespace iucs.readernest.tests
             Assert.Equal("Guest", join.DisplayName);
             Assert.False(join.SkipPrejoin);
             Assert.Null(join.ChildId);
+            // The ClassroomHub token that lets the landing page join the real interactive
+            // classroom (whiteboard/quiz/roster), not just a bare Jitsi call -- both link types
+            // get one, not just the student-bound case below.
+            Assert.False(string.IsNullOrEmpty(join.HubToken));
         }
 
         [Fact]
@@ -293,6 +297,7 @@ namespace iucs.readernest.tests
             Assert.Equal("Aarav Sharma", join.DisplayName);
             Assert.True(join.SkipPrejoin);
             Assert.Equal(child.Id, join.ChildId);
+            Assert.False(string.IsNullOrEmpty(join.HubToken));
 
             // Mirrors SessionsController.GuestJoin's own split call (SessionService can't depend
             // on IAcademicOpsService directly -- see that controller method's doc comment).
