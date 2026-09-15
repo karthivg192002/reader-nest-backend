@@ -1,8 +1,10 @@
 using iucs.readernest.api.Auth;
+using iucs.readernest.api.Hubs;
 using iucs.readernest.application.Dto.Monitoring;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 
 namespace iucs.readernest.api.Controllers
 {
@@ -14,12 +16,18 @@ namespace iucs.readernest.api.Controllers
         private readonly IMonitoringService _monitoringService;
         private readonly IServerLogService _serverLogService;
         private readonly IServerControlService _serverControlService;
+        private readonly IHubContext<ClassroomHub> _classroomHub;
 
-        public MonitoringController(IMonitoringService monitoringService, IServerLogService serverLogService, IServerControlService serverControlService)
+        public MonitoringController(
+            IMonitoringService monitoringService,
+            IServerLogService serverLogService,
+            IServerControlService serverControlService,
+            IHubContext<ClassroomHub> classroomHub)
         {
             _monitoringService = monitoringService;
             _serverLogService = serverLogService;
             _serverControlService = serverControlService;
+            _classroomHub = classroomHub;
         }
 
         [HttpGet("summary")]
@@ -80,6 +88,29 @@ namespace iucs.readernest.api.Controllers
             {
                 return BadRequest(new { message = ex.Message });
             }
+        }
+
+        /// <summary>
+        /// Tells every browser currently connected to a live class to show a dismissible
+        /// "an update is available" prompt, so a deploy actually reaches people already
+        /// mid-session without waiting for their next natural page load. Deliberately a
+        /// gentle, dismissible notification -- not a forced reload -- since an unannounced
+        /// refresh would drop a teacher/student straight out of an active Jitsi call
+        /// (camera, mic, recording continuity, everything) with no warning. Only reaches
+        /// ClassroomHub's own connections (live classes), not every open tab app-wide --
+        /// there's no such app-wide channel today, and this is the case that actually
+        /// matters: someone sitting on a static page with no live real-time connection
+        /// picks up a new deploy on their next navigation anyway.
+        /// </summary>
+        [HttpPost("broadcast-reload")]
+        [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.Edit)]
+        public async Task<ActionResult> BroadcastReload([FromQuery] string? message, CancellationToken cancellationToken)
+        {
+            await _classroomHub.Clients.All.SendAsync(
+                "ReloadRequested",
+                string.IsNullOrWhiteSpace(message) ? "An update is available." : message,
+                cancellationToken);
+            return Ok();
         }
 
         /// <summary>Runs the Jibri autoscaler immediately instead of waiting out its next cron minute.</summary>
