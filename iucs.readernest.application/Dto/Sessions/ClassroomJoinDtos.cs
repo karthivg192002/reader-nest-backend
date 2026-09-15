@@ -27,6 +27,13 @@ namespace iucs.readernest.application.Dto.Sessions
         /// time's up. Nothing about the call itself is cut off at this time (see
         /// Docs/LONG_DURATION_SESSIONS.md); it's advisory only.</summary>
         public DateTime ScheduledEndAtUtc { get; set; }
+
+        /// <summary>True for a Demo-type session. Auto-recording is scoped to real, Regular
+        /// classes only ("don't record demo and personal link, only record session and class") —
+        /// the classroom screen needs this to know which kind of session it just joined, since
+        /// the Personal Meeting Room never calls this endpoint at all (no sessionId behind it)
+        /// and is excluded that way instead.</summary>
+        public bool IsDemo { get; set; }
     }
 
     /// <summary>
