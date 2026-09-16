@@ -224,7 +224,7 @@ namespace iucs.readernest.api.Services
                 var existingSuspensions = await unitOfWork.Repository<FeeSuspension>().Query()
                     .Where(s => overdueParentIds.Contains(s.ParentProfileId)
                         && (s.Status == SuspensionStatus.Active
-                            || (s.Status == SuspensionStatus.Lifted && overdueInvoiceIds.Contains(s.InvoiceId))))
+                            || (s.Status == SuspensionStatus.Lifted && s.InvoiceId != null && overdueInvoiceIds.Contains(s.InvoiceId.Value))))
                     .Select(s => new { s.ParentProfileId, s.ChildId, s.Status, s.InvoiceId })
                     .ToListAsync(cancellationToken);
 
