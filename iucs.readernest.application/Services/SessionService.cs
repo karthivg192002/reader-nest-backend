@@ -1334,7 +1334,22 @@ namespace iucs.readernest.application.Services
             // Outer safety bound only -- GetGuestJoinAsync re-checks the session's live status/
             // time on every open, so this just stops a never-used link from staying mintable
             // indefinitely rather than being the thing that actually governs reuse.
-            var guestToken = _tokenService.CreateGuestJoinToken(session.Id, childId, session.ScheduledEndAtUtc.AddDays(1));
+            //
+            // Bug fixed 2026-09-16: for a session whose scheduled end is already more than a day
+            // in the past (nothing stops an admin/RM from opening "Copy Guest Link" on an old,
+            // completed session), ScheduledEndAtUtc.AddDays(1) lands BEFORE DateTime.UtcNow --
+            // JwtSecurityToken's constructor requires expires > notBefore (notBefore being "now"
+            // below in JwtTokenService) and throws otherwise, which surfaced as an unhandled 500
+            // ("Couldn't create the guest link — An unexpected error occurred") in production.
+            // Clamped to never be earlier than a short margin past now, same "still bounded, not
+            // a real gate" reasoning as this comment already describes -- GetGuestJoinAsync's own
+            // live-status check is what actually rejects joining a long-over class, not this.
+            var guestLinkExpiresAtUtc = session.ScheduledEndAtUtc.AddDays(1);
+            if (guestLinkExpiresAtUtc <= DateTime.UtcNow)
+            {
+                guestLinkExpiresAtUtc = DateTime.UtcNow.AddHours(1);
+            }
+            var guestToken = _tokenService.CreateGuestJoinToken(session.Id, childId, guestLinkExpiresAtUtc);
             return new GuestLinkDto { Token = guestToken.AccessToken };
         }
 
