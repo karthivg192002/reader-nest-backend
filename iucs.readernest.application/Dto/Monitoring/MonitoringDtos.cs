@@ -43,6 +43,12 @@ namespace iucs.readernest.application.Dto.Monitoring
         public int MinInstances { get; set; }
         /// <summary>Ceiling derived from the Jitsi box's actual CPU/RAM, not a fixed number -- grows on its own if the box is resized.</summary>
         public int MaxInstances { get; set; }
+        /// <summary>Last ~1h, ~2-minute steps -- the same window as CpuHistory/MemoryHistory.
+        /// Empty when this server has no Jibri fleet. Pair with TotalHistory (rather than the
+        /// single current TotalInstances) since the fleet autoscales -- "3 busy" only reads as
+        /// "at capacity" against however many were actually online at that same moment.</summary>
+        public IReadOnlyList<TimeSeriesPointDto> BusyHistory { get; set; } = [];
+        public IReadOnlyList<TimeSeriesPointDto> TotalHistory { get; set; } = [];
     }
 
     /// <summary>One sample of a Prometheus range query (a trend chart data point).</summary>
