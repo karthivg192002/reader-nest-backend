@@ -502,13 +502,24 @@ namespace iucs.readernest.application.Services
             var memHistoryTask = _prometheus.QueryRangeAsync(
                 baseUrl, $"100 * (1 - node_memory_MemAvailable_bytes{{instance=\"{instanceLabel}\"}} / node_memory_MemTotal_bytes{{instance=\"{instanceLabel}\"}})",
                 historyStart, now, historyStep, cancellationToken);
+            // Same ~1h/2min window as CPU/memory history, but for recorder occupancy --
+            // requested after several live incidents (recording dropped, voice glitching)
+            // where the only capacity signal available was a single "at capacity" snapshot
+            // or a 7-day-average percentage (recordingAtCapacity7dTask below), neither of
+            // which shows *when* a specific incident's capacity crunch actually happened.
+            var recorderBusyHistoryTask = hasJibriFleet
+                ? _prometheus.QueryRangeAsync(baseUrl, $"rn_jibri_instances_busy{{instance=\"{instanceLabel}\"}}", historyStart, now, historyStep, cancellationToken)
+                : Task.FromResult<IReadOnlyList<(DateTime Timestamp, double Value)>>([]);
+            var recorderTotalHistoryTask = hasJibriFleet
+                ? _prometheus.QueryRangeAsync(baseUrl, $"rn_jibri_instances_total{{instance=\"{instanceLabel}\"}}", historyStart, now, historyStep, cancellationToken)
+                : Task.FromResult<IReadOnlyList<(DateTime Timestamp, double Value)>>([]);
             // deriv() is a real linear-regression rate over the window, not a naive two-point
             // delta -- exactly Prometheus's own tool for "is this trending toward a problem."
             var diskAvailBytesTask = _prometheus.QueryScalarAsync(
                 baseUrl, $"node_filesystem_avail_bytes{{instance=\"{instanceLabel}\",mountpoint=\"/\",fstype!=\"tmpfs\"}}", cancellationToken);
             var diskTrendTask = _prometheus.QueryScalarAsync(
                 baseUrl, $"deriv(node_filesystem_avail_bytes{{instance=\"{instanceLabel}\",mountpoint=\"/\",fstype!=\"tmpfs\"}}[6h])", cancellationToken);
-            await Task.WhenAll(cpuHistoryTask, memHistoryTask, diskAvailBytesTask, diskTrendTask);
+            await Task.WhenAll(cpuHistoryTask, memHistoryTask, diskAvailBytesTask, diskTrendTask, recorderBusyHistoryTask, recorderTotalHistoryTask);
 
             // Week-over-week trend, not a fake day-countdown -- CPU and recording load are
             // bursty real-time signals, unlike disk fill's smooth accumulation, so a linear
@@ -596,6 +607,8 @@ namespace iucs.readernest.application.Services
                         BusyInstances = (int)(await jibriBusyTask ?? 0),
                         MinInstances = (int)(await jibriMinTask ?? 1),
                         MaxInstances = (int)(await jibriMaxTask ?? jibriTotal.Value),
+                        BusyHistory = (await recorderBusyHistoryTask).Select(p => new TimeSeriesPointDto { Timestamp = p.Timestamp, Value = Math.Max(0, p.Value) }).ToList(),
+                        TotalHistory = (await recorderTotalHistoryTask).Select(p => new TimeSeriesPointDto { Timestamp = p.Timestamp, Value = Math.Max(0, p.Value) }).ToList(),
                     }
                     : null,
             };

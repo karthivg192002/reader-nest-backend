@@ -18,6 +18,34 @@ namespace iucs.readernest.application.Dto.Sessions
         public DateTime CreatedAtUtc { get; set; }
     }
 
+    /// <summary>One row of the admin-wide Recordings list (ListAllRecordingsAsync) -- the
+    /// per-session recording plus just enough of its class's own detail (title, teacher, when)
+    /// for that page to render a card without a second round-trip per row.</summary>
+    public class RecordingListItemDto
+    {
+        public Guid Id { get; set; }
+
+        public Guid ClassSessionId { get; set; }
+
+        public string StorageUrl { get; set; } = null!;
+
+        public int? DurationSeconds { get; set; }
+
+        public DateTime? ExpiresAtUtc { get; set; }
+
+        public DateTime CreatedAtUtc { get; set; }
+
+        /// <summary>Batch name for a Regular class, null for a Demo -- same fallback the
+        /// frontend's toFrontendSession already applies ("Demo — {child}" / "Class session").</summary>
+        public string? BatchName { get; set; }
+
+        public SessionType SessionType { get; set; }
+
+        public string TeacherName { get; set; } = null!;
+
+        public DateTime ScheduledStartAtUtc { get; set; }
+    }
+
     /// <summary>Registers a finished Jitsi/Jibri recording that landed in cloud storage.</summary>
     public class RegisterRecordingRequest
     {
