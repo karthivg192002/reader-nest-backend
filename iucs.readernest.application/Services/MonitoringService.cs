@@ -358,19 +358,23 @@ namespace iucs.readernest.application.Services
                 ? _prometheus.QueryScalarAsync(baseUrl, $"jitsi_jvb_current_endpoints{{instance=\"{instanceLabel}\"}}", cancellationToken)
                 : Task.FromResult<double?>(null);
 
-            // rn_jibri_instances_total/busy come from the textfile-collector autoscaler script
-            // on the Jitsi box (/opt/rn-monitoring/jibri-autoscale.sh) -- same publishing pattern
-            // as rn_service_active above, not a native Jibri Prometheus endpoint.
-            var jibriTotalTask = server.TracksLiveCalls
+            // rn_jibri_instances_total/busy come from each server's own textfile-collector
+            // autoscaler script (jibri-overflow-watcher.sh on the Jitsi box, jibri-worker-autoscale.sh
+            // on the recording worker) -- same publishing pattern as rn_service_active above, not a
+            // native Jibri Prometheus endpoint. Gated on HasJibriFleet, NOT TracksLiveCalls: the
+            // worker runs a real Jibri fleet but never tracks JVB/live-call metrics itself, so gating
+            // this on TracksLiveCalls (as it used to be) silently hid every recorder detail for it.
+            var hasJibriFleet = !string.IsNullOrWhiteSpace(server.JibriAutoscaleScript);
+            var jibriTotalTask = hasJibriFleet
                 ? _prometheus.QueryScalarAsync(baseUrl, $"rn_jibri_instances_total{{instance=\"{instanceLabel}\"}}", cancellationToken)
                 : Task.FromResult<double?>(null);
-            var jibriBusyTask = server.TracksLiveCalls
+            var jibriBusyTask = hasJibriFleet
                 ? _prometheus.QueryScalarAsync(baseUrl, $"rn_jibri_instances_busy{{instance=\"{instanceLabel}\"}}", cancellationToken)
                 : Task.FromResult<double?>(null);
-            var jibriMinTask = server.TracksLiveCalls
+            var jibriMinTask = hasJibriFleet
                 ? _prometheus.QueryScalarAsync(baseUrl, $"rn_jibri_min_replicas{{instance=\"{instanceLabel}\"}}", cancellationToken)
                 : Task.FromResult<double?>(null);
-            var jibriMaxTask = server.TracksLiveCalls
+            var jibriMaxTask = hasJibriFleet
                 ? _prometheus.QueryScalarAsync(baseUrl, $"rn_jibri_max_replicas{{instance=\"{instanceLabel}\"}}", cancellationToken)
                 : Task.FromResult<double?>(null);
 
@@ -518,7 +522,7 @@ namespace iucs.readernest.application.Services
             var cpuAvgPrev7dTask = _prometheus.QueryScalarAsync(baseUrl, cpuAvgExpr(" offset 7d"), cancellationToken);
             var cpuPeak7dTask = _prometheus.QueryScalarAsync(
                 baseUrl, $"max_over_time((100 - (avg(rate(node_cpu_seconds_total{{instance=\"{instanceLabel}\",mode=\"idle\"}}[5m])) * 100))[7d:15m])", cancellationToken);
-            var recordingAtCapacity7dTask = server.TracksLiveCalls
+            var recordingAtCapacity7dTask = hasJibriFleet
                 ? _prometheus.QueryScalarAsync(
                     baseUrl, $"avg_over_time((rn_jibri_instances_busy{{instance=\"{instanceLabel}\"}} >= bool rn_jibri_max_replicas{{instance=\"{instanceLabel}\"}})[7d:1m]) * 100", cancellationToken)
                 : Task.FromResult<double?>(null);
@@ -585,7 +589,7 @@ namespace iucs.readernest.application.Services
                     : null,
                 // No data (jibriTotal null) means the autoscaler script hasn't published a
                 // metrics file yet on this box -- surface as absent, not "0 recorders".
-                RecorderStatus = server.TracksLiveCalls && jibriTotal is not null
+                RecorderStatus = hasJibriFleet && jibriTotal is not null
                     ? new RecorderStatusDto
                     {
                         TotalInstances = (int)jibriTotal.Value,
