@@ -73,6 +73,14 @@ namespace iucs.readernest.application.Services
             Guid sessionId,
             CancellationToken cancellationToken = default);
 
+        /// <summary>Admin-wide Recordings page — every registered recording, paged, optionally
+        /// filtered to one calendar date (by the class's own ScheduledStartAtUtc).</summary>
+        Task<iucs.readernest.application.Dto.Common.PagedResult<RecordingListItemDto>> ListAllRecordingsAsync(
+            int page,
+            int pageSize,
+            DateOnly? date,
+            CancellationToken cancellationToken = default);
+
         /// <summary>
         /// Removes a recording's record (Admin only — see <see cref="Common.Exceptions.ForbiddenException"/>).
         /// Only unregisters it here; the underlying file in storage is left untouched, since

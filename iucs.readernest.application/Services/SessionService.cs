@@ -1,6 +1,7 @@
 using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
+using iucs.readernest.application.Dto.Common;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
@@ -718,6 +719,60 @@ namespace iucs.readernest.application.Services
                 .ToListAsync(cancellationToken);
 
             return recordings.Select(ToRecordingDto).ToList();
+        }
+
+        /// <summary>Admin-wide Recordings page: every registered recording across every class,
+        /// one query instead of a completed-session list plus one ListRecordingsAsync call per
+        /// session (confirmed live as the page's actual "Loading recordings..." bottleneck once
+        /// there were enough completed classes). Unlike ListRecordingsAsync (parent/teacher-
+        /// facing), this deliberately does NOT filter out expired recordings -- an admin
+        /// managing/removing a stray recording needs to find it regardless of whether a parent
+        /// could still view it.</summary>
+        public async Task<PagedResult<RecordingListItemDto>> ListAllRecordingsAsync(
+            int page,
+            int pageSize,
+            DateOnly? date,
+            CancellationToken cancellationToken = default)
+        {
+            page = Math.Max(1, page);
+            pageSize = Math.Clamp(pageSize, 1, 100);
+
+            var query = _unitOfWork.Repository<SessionRecording>().Query()
+                .Include(r => r.ClassSession).ThenInclude(s => s.Batch)
+                .Include(r => r.ClassSession).ThenInclude(s => s.TeacherProfile).ThenInclude(t => t.User)
+                .AsQueryable();
+
+            if (date is { } d)
+            {
+                var startUtc = d.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+                var endUtc = startUtc.AddDays(1);
+                query = query.Where(r => r.ClassSession.ScheduledStartAtUtc >= startUtc && r.ClassSession.ScheduledStartAtUtc < endUtc);
+            }
+
+            query = query.OrderByDescending(r => r.CreatedAtUtc);
+
+            var totalCount = await query.CountAsync(cancellationToken);
+            var page_ = await query.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(cancellationToken);
+
+            return new PagedResult<RecordingListItemDto>
+            {
+                Items = page_.Select(r => new RecordingListItemDto
+                {
+                    Id = r.Id,
+                    ClassSessionId = r.ClassSessionId,
+                    StorageUrl = r.StorageUrl,
+                    DurationSeconds = r.DurationSeconds,
+                    ExpiresAtUtc = r.ExpiresAtUtc,
+                    CreatedAtUtc = r.CreatedAtUtc,
+                    BatchName = r.ClassSession.Batch?.Name,
+                    SessionType = r.ClassSession.Type,
+                    TeacherName = $"{r.ClassSession.TeacherProfile.User.FirstName} {r.ClassSession.TeacherProfile.User.LastName}".Trim(),
+                    ScheduledStartAtUtc = r.ClassSession.ScheduledStartAtUtc,
+                }).ToList(),
+                TotalCount = totalCount,
+                Page = page,
+                PageSize = pageSize,
+            };
         }
 
         public async Task DeleteRecordingAsync(
