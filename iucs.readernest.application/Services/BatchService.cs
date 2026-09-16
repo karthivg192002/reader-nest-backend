@@ -576,12 +576,26 @@ namespace iucs.readernest.application.Services
                 .OrderBy(c => c.FirstName).ThenBy(c => c.LastName)
                 .ToListAsync(cancellationToken);
 
+            // Course(s) each candidate is already enrolled in elsewhere -- the client-reported
+            // "can't tell which profile belongs to which course" case: a same-named child can
+            // legitimately have two Child rows (one per course they're enrolled in), and this is
+            // the only signal the picker has to tell them apart besides parent name/email.
+            var candidateIds = candidates.Select(c => c.Id).ToList();
+            var coursesByChild = (await _unitOfWork.Repository<BatchEnrollment>().Query()
+                    .Where(e => candidateIds.Contains(e.ChildId) && e.Status == EnrollmentStatus.Active)
+                    .Select(e => new { e.ChildId, CourseName = e.Batch.Course.Name })
+                    .ToListAsync(cancellationToken))
+                .GroupBy(e => e.ChildId)
+                .ToDictionary(g => g.Key, g => string.Join(", ", g.Select(x => x.CourseName).Distinct()));
+
             return candidates.Select(c => new UnassignedChildDto
             {
                 ChildId = c.Id,
                 ChildName = $"{c.FirstName} {c.LastName}".Trim(),
                 ParentName = c.ParentProfile?.User is { } u ? $"{u.FirstName} {u.LastName}".Trim() : "—",
+                ParentEmail = c.ParentProfile?.User?.Email,
                 AcademicLevel = c.AcademicLevel,
+                CurrentCourses = coursesByChild.TryGetValue(c.Id, out var names) && names.Length > 0 ? names : null,
             }).ToList();
         }
 

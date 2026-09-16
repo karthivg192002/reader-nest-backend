@@ -33,9 +33,14 @@ namespace iucs.readernest.application.Services
             // Loaded once for the whole sibling group and matched per child in memory below --
             // same reasoning as the batch/session/attendance queries further down. A suspension
             // with ChildId null applies to every child; one with ChildId set only to that child.
-            var activeSuspensions = await _unitOfWork.Repository<FeeSuspension>().Query()
-                .Where(s => s.ParentProfileId == parent.Id && s.Status == SuspensionStatus.Active)
-                .ToListAsync(cancellationToken);
+            // Bypassed entirely while fee-default suspension is disabled (BillingSettings) --
+            // the centre isn't tracking fees through the portal yet, so no child/account should
+            // ever read as suspended even if FeeSuspension rows exist from before this was off.
+            var activeSuspensions = await BillingSettings.IsSuspensionEnabledAsync(_unitOfWork, cancellationToken)
+                ? await _unitOfWork.Repository<FeeSuspension>().Query()
+                    .Where(s => s.ParentProfileId == parent.Id && s.Status == SuspensionStatus.Active)
+                    .ToListAsync(cancellationToken)
+                : new List<FeeSuspension>();
             var accountWideSuspension = activeSuspensions.FirstOrDefault(s => s.ChildId is null);
 
             // Same reasoning: per-child invoice status (a sibling's overdue invoice must never
