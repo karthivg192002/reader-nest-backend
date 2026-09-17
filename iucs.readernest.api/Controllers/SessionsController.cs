@@ -262,6 +262,20 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _sessionService.CompleteAsync(id, request, cancellationToken));
         }
 
+        /// <summary>Edits a completed session's notes after the fact -- teacher feedback: "the
+        /// report-writing option is also not visible after the session if we do not complete
+        /// the report immediately." Re-emails the updated notes to the batch's parents the same
+        /// way completing the class with notes already does.</summary>
+        [HttpPut("{id:guid}/summary")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<ActionResult<ClassSessionDto>> UpdateSummary(
+            Guid id,
+            UpdateSessionSummaryRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.UpdateSummaryAsync(id, request.Summary, cancellationToken));
+        }
+
         /// <summary>
         /// Marks a teacher/student no-show: the payout impact accrues and a
         /// carried-forward replacement session is returned.

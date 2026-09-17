@@ -374,6 +374,42 @@ namespace iucs.readernest.application.Services
             return await GetAsync(session.Id, cancellationToken);
         }
 
+        /// <summary>Teacher feedback: "the report-writing option is also not visible after the
+        /// session if we do not complete the report immediately at the end of the class." A
+        /// completed session's Summary could only ever be set once, at CompleteAsync time -- a
+        /// teacher who skipped it there (or only got the auto-generated engagement-stats
+        /// fallback) had no way back in. This is the way back in: same session-participant
+        /// ownership check as CompleteAsync, but only touches Summary, and re-emails it to the
+        /// batch's parents the same way a same-time summary already does -- a class's real notes
+        /// showing up a day late is still far more useful to a parent than never.</summary>
+        public async Task<ClassSessionDto> UpdateSummaryAsync(
+            Guid id,
+            string summary,
+            CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .FirstOrDefaultAsync(s => s.Id == id, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), id);
+
+            await EnsureSessionParticipantAsync(session, cancellationToken);
+
+            if (session.Status != SessionStatus.Completed)
+            {
+                throw new DomainValidationException("Only a completed session's notes can be edited this way — use Complete Class to end and record notes for an in-progress one.");
+            }
+
+            session.Summary = summary.Trim();
+            await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            if (session.BatchId.HasValue)
+            {
+                await SendSummaryToParentsAsync(session, cancellationToken);
+            }
+
+            return await GetAsync(session.Id, cancellationToken);
+        }
+
         private async Task SendSummaryToParentsAsync(ClassSession session, CancellationToken cancellationToken)
         {
             var parents = await _unitOfWork.Repository<BatchEnrollment>().Query()

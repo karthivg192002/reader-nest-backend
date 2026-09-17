@@ -34,6 +34,13 @@ namespace iucs.readernest.application.Services
             CompleteSessionRequest? request = null,
             CancellationToken cancellationToken = default);
 
+        /// <summary>Edits a completed session's notes after the fact — see the implementation's
+        /// own doc comment for why this exists separately from CompleteAsync.</summary>
+        Task<ClassSessionDto> UpdateSummaryAsync(
+            Guid id,
+            string summary,
+            CancellationToken cancellationToken = default);
+
         Task<IReadOnlyList<ClassSessionDto>> GenerateScheduleAsync(
             Guid batchId,
             GenerateScheduleRequest request,

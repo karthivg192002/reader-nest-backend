@@ -130,6 +130,17 @@ namespace iucs.readernest.application.Dto.Sessions
         public string? Summary { get; set; }
     }
 
+    /// <summary>Editing a completed session's notes after the fact -- see
+    /// ISessionService.UpdateSummaryAsync's own doc comment for why this exists separately
+    /// from CompleteSessionRequest. Required (unlike Summary above) -- there's no reason to
+    /// call this endpoint at all except to set real notes.</summary>
+    public class UpdateSessionSummaryRequest
+    {
+        [Required]
+        [MaxLength(2000)]
+        public string Summary { get; set; } = null!;
+    }
+
     public enum NoShowParty
     {
         Teacher,
