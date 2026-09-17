@@ -418,6 +418,71 @@ namespace iucs.readernest.application.Services
             }).ToList();
         }
 
+        /// <summary>See ParentRecordingDto's own doc comment for the N+1 pattern this replaces
+        /// (one enrollment/suspension check plus one query per completed session) with a single
+        /// bulk query, the same fix already applied to the admin and teacher Recordings pages.</summary>
+        public async Task<IReadOnlyList<ParentRecordingDto>> GetMyRecordingsAsync(
+            Guid parentUserId, CancellationToken cancellationToken = default)
+        {
+            var parent = await GetParentAsync(parentUserId, cancellationToken);
+
+            var enrollments = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.Child.ParentProfileId == parent.Id && e.Status == EnrollmentStatus.Active)
+                .Select(e => new { e.BatchId, e.ChildId })
+                .ToListAsync(cancellationToken);
+            if (enrollments.Count == 0)
+            {
+                return [];
+            }
+
+            var batchIds = enrollments.Select(e => e.BatchId).Distinct().ToList();
+            var childIdsByBatch = enrollments
+                .GroupBy(e => e.BatchId)
+                .ToDictionary(g => g.Key, g => (IReadOnlyList<Guid>)g.Select(e => e.ChildId).ToList());
+
+            // Same rule as SuspensionCheck.IsChildBlockedAsync (a batch stays reachable as long
+            // as at least one of this parent's children in it isn't blocked), computed once for
+            // every child up front instead of once per session's recording lookup.
+            var suspensionsEnabled = await BillingSettings.IsSuspensionEnabledAsync(_unitOfWork, cancellationToken);
+            var activeSuspendedChildIds = suspensionsEnabled
+                ? await _unitOfWork.Repository<FeeSuspension>().Query()
+                    .Where(s => s.ParentProfileId == parent.Id && s.Status == SuspensionStatus.Active)
+                    .Select(s => s.ChildId)
+                    .ToListAsync(cancellationToken)
+                : [];
+            var accountWideBlocked = suspensionsEnabled && activeSuspendedChildIds.Contains(null);
+            var blockedChildIds = activeSuspendedChildIds.Where(id => id.HasValue).Select(id => id!.Value).ToHashSet();
+
+            bool BatchAllowed(Guid batchId) =>
+                !accountWideBlocked
+                && childIdsByBatch.TryGetValue(batchId, out var kids)
+                && kids.Any(id => !blockedChildIds.Contains(id));
+
+            var now = DateTime.UtcNow;
+            var recordings = await _unitOfWork.Repository<SessionRecording>().Query()
+                .Include(r => r.ClassSession).ThenInclude(s => s.Batch)
+                .Where(r => r.ClassSession.BatchId != null && batchIds.Contains(r.ClassSession.BatchId.Value)
+                    && (r.ExpiresAtUtc == null || r.ExpiresAtUtc > now))
+                .OrderByDescending(r => r.CreatedAtUtc)
+                .ToListAsync(cancellationToken);
+
+            return recordings
+                .Where(r => BatchAllowed(r.ClassSession.BatchId!.Value))
+                .Select(r => new ParentRecordingDto
+                {
+                    Id = r.Id,
+                    ClassSessionId = r.ClassSessionId,
+                    StorageUrl = r.StorageUrl,
+                    DurationSeconds = r.DurationSeconds,
+                    ExpiresAtUtc = r.ExpiresAtUtc,
+                    CreatedAtUtc = r.CreatedAtUtc,
+                    BatchName = r.ClassSession.Batch?.Name,
+                    ScheduledStartAtUtc = r.ClassSession.ScheduledStartAtUtc,
+                    ChildIds = childIdsByBatch.GetValueOrDefault(r.ClassSession.BatchId!.Value, []),
+                })
+                .ToList();
+        }
+
         private async Task<ParentProfile> GetParentAsync(Guid parentUserId, CancellationToken cancellationToken)
         {
             return await _unitOfWork.Repository<ParentProfile>()

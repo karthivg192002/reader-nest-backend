@@ -32,6 +32,36 @@ namespace iucs.readernest.application.Dto.Portal
         public Guid? SuspendedInvoiceId { get; set; }
     }
 
+    /// <summary>
+    /// One recording watchable by the signed-in parent, across every one of their children's
+    /// batches in a single call -- parent/Recordings.tsx used to fetch the parent's whole
+    /// schedule then call GET /api/parent-portal/sessions/{id}/recordings once per completed
+    /// session, the identical N+1 shape already found and fixed on the admin and teacher
+    /// Recordings pages (see RecordingListItemDto). ChildIds carries every one of this parent's
+    /// own children placed in the recording's batch, so the page can still filter to whichever
+    /// child is currently selected without a second round trip per session.
+    /// </summary>
+    public class ParentRecordingDto
+    {
+        public Guid Id { get; set; }
+
+        public Guid ClassSessionId { get; set; }
+
+        public string StorageUrl { get; set; } = null!;
+
+        public int? DurationSeconds { get; set; }
+
+        public DateTime? ExpiresAtUtc { get; set; }
+
+        public DateTime CreatedAtUtc { get; set; }
+
+        public string? BatchName { get; set; }
+
+        public DateTime ScheduledStartAtUtc { get; set; }
+
+        public IReadOnlyList<Guid> ChildIds { get; set; } = [];
+    }
+
     public class ParentDashboardDto
     {
         public Guid ParentProfileId { get; set; }
