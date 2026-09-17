@@ -721,17 +721,21 @@ namespace iucs.readernest.application.Services
             return recordings.Select(ToRecordingDto).ToList();
         }
 
-        /// <summary>Admin-wide Recordings page: every registered recording across every class,
-        /// one query instead of a completed-session list plus one ListRecordingsAsync call per
-        /// session (confirmed live as the page's actual "Loading recordings..." bottleneck once
-        /// there were enough completed classes). Unlike ListRecordingsAsync (parent/teacher-
-        /// facing), this deliberately does NOT filter out expired recordings -- an admin
-        /// managing/removing a stray recording needs to find it regardless of whether a parent
-        /// could still view it.</summary>
+        /// <summary>Admin-wide (teacherUserId null) or one teacher's own (teacherUserId set)
+        /// Recordings page: every registered recording in scope, one query instead of a
+        /// completed-session list plus one ListRecordingsAsync call per session (confirmed live
+        /// as the admin page's actual "Loading recordings..." bottleneck once there were enough
+        /// completed classes -- TeacherRecordings.tsx had the identical N+1 shape, just scoped
+        /// to "my classes", so it was only ever a matter of time before the same slowdown showed
+        /// up there too as any one teacher's own history grew). Unlike ListRecordingsAsync
+        /// (parent-facing), this deliberately does NOT filter out expired recordings -- both an
+        /// admin and a teacher managing their own past classes need to find one regardless of
+        /// whether a parent could still view it.</summary>
         public async Task<PagedResult<RecordingListItemDto>> ListAllRecordingsAsync(
             int page,
             int pageSize,
             DateOnly? date,
+            Guid? teacherUserId,
             CancellationToken cancellationToken = default)
         {
             page = Math.Max(1, page);
@@ -741,6 +745,11 @@ namespace iucs.readernest.application.Services
                 .Include(r => r.ClassSession).ThenInclude(s => s.Batch)
                 .Include(r => r.ClassSession).ThenInclude(s => s.TeacherProfile).ThenInclude(t => t.User)
                 .AsQueryable();
+
+            if (teacherUserId is { } tuid)
+            {
+                query = query.Where(r => r.ClassSession.TeacherProfile.UserId == tuid);
+            }
 
             if (date is { } d)
             {

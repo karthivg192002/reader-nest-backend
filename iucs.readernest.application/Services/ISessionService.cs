@@ -73,12 +73,14 @@ namespace iucs.readernest.application.Services
             Guid sessionId,
             CancellationToken cancellationToken = default);
 
-        /// <summary>Admin-wide Recordings page — every registered recording, paged, optionally
-        /// filtered to one calendar date (by the class's own ScheduledStartAtUtc).</summary>
+        /// <summary>Admin-wide (teacherUserId null) or one teacher's own (teacherUserId set)
+        /// Recordings page — every registered recording in scope, paged, optionally filtered to
+        /// one calendar date (by the class's own ScheduledStartAtUtc).</summary>
         Task<iucs.readernest.application.Dto.Common.PagedResult<RecordingListItemDto>> ListAllRecordingsAsync(
             int page,
             int pageSize,
             DateOnly? date,
+            Guid? teacherUserId,
             CancellationToken cancellationToken = default);
 
         /// <summary>

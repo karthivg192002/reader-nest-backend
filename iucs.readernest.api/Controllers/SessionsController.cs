@@ -350,7 +350,23 @@ namespace iucs.readernest.api.Controllers
             [FromQuery] DateOnly? date,
             CancellationToken cancellationToken)
         {
-            return Ok(await _sessionService.ListAllRecordingsAsync(page <= 0 ? 1 : page, pageSize <= 0 ? 20 : pageSize, date, cancellationToken));
+            return Ok(await _sessionService.ListAllRecordingsAsync(page <= 0 ? 1 : page, pageSize <= 0 ? 20 : pageSize, date, null, cancellationToken));
+        }
+
+        /// <summary>A teacher's own Recordings page — same paged query as the admin-wide one
+        /// above, scoped to this caller's own classes. TeacherRecordings.tsx had the identical
+        /// completed-session-list-plus-per-session-lookup N+1 shape the admin page did; fixed the
+        /// same way, just filtered rather than institution-wide.</summary>
+        [HttpGet("mine/recordings")]
+        [Authorize(Roles = nameof(UserRole.Teacher))]
+        public async Task<ActionResult<iucs.readernest.application.Dto.Common.PagedResult<RecordingListItemDto>>> ListMyRecordings(
+            [FromQuery] int page,
+            [FromQuery] int pageSize,
+            [FromQuery] DateOnly? date,
+            CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _sessionService.ListAllRecordingsAsync(page <= 0 ? 1 : page, pageSize <= 0 ? 20 : pageSize, date, userId, cancellationToken));
         }
 
         /// <summary>Deletes a registered recording. Admin only — unregisters the row; the underlying file in storage is left untouched.</summary>
