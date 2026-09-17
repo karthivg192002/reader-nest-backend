@@ -721,6 +721,22 @@ namespace iucs.readernest.application.Services
                 ? candidates[0]
                 : candidates.MinBy(s => Math.Abs(((s.ActualEndAtUtc ?? s.ScheduledEndAtUtc) - now).Ticks))!;
 
+            // The finalize-recording.sh script on the video server retries this call once on any
+            // failure, including a plain network timeout -- confirmed real in production: a slow
+            // response (e.g. the backend under load) can mean the first attempt actually
+            // succeeded here before the caller ever saw that, so the retry arrives as a genuine
+            // second call for a file already registered. Without this check each retry created
+            // another SessionRecording row for the exact same file, which is exactly what turned
+            // one real recording into 3-5 duplicate "Recording" entries on a single class in the
+            // admin/teacher UI. Same file for the same session is the identity here, not a new id
+            // each register call earns.
+            var existing = await _unitOfWork.Repository<SessionRecording>().Query()
+                .FirstOrDefaultAsync(r => r.ClassSessionId == session.Id && r.StorageUrl == storageUrl, cancellationToken);
+            if (existing is not null)
+            {
+                return ToRecordingDto(existing);
+            }
+
             var recording = new SessionRecording
             {
                 ClassSessionId = session.Id,
