@@ -595,29 +595,37 @@ namespace iucs.readernest.application.Services
 
             var batchIds = enrollments.Select(e => e.BatchId).Distinct().ToList();
 
-            // Course-progress side: how many of each batch's sessions have actually run,
-            // regardless of which child is being looked at -- every child in the same batch
-            // shares this number, so it's one grouped query instead of one per enrollment.
-            var completedByBatch = await _unitOfWork.Repository<ClassSession>().Query()
+            // Course-progress side: every completed session's own start time, per batch --
+            // needed as the real "how many classes actually ran" denominator below, not just a
+            // count, since a child who enrolled partway through must only be judged against
+            // sessions that ran after they joined. Every child in the same batch shares this
+            // list, so it's one grouped query instead of one per enrollment.
+            var completedSessionsByBatch = await _unitOfWork.Repository<ClassSession>().Query()
                 .Where(s => s.BatchId.HasValue && batchIds.Contains(s.BatchId.Value) && s.Status == SessionStatus.Completed)
-                .GroupBy(s => s.BatchId!.Value)
-                .Select(g => new { BatchId = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(g => g.BatchId, g => g.Count, cancellationToken);
+                .Select(s => new { BatchId = s.BatchId!.Value, s.ScheduledStartAtUtc })
+                .ToListAsync(cancellationToken);
+            var completedByBatch = completedSessionsByBatch
+                .GroupBy(s => s.BatchId)
+                .ToDictionary(g => g.Key, g => g.Select(s => s.ScheduledStartAtUtc).ToList());
 
-            // Attendance side: per (child, batch) pair, since that's the actual grain the page
-            // needs -- same child in two different batches has two independent attendance
-            // records. Joins through ClassSession for BatchId since SessionAttendance itself
-            // only carries ClassSessionId.
+            // Attendance side: Present rows only, per (child, batch) pair -- a child who never
+            // joined and was never manually marked Absent has NO row at all (auto-capture only
+            // ever writes Present; Absent is a manual teacher entry — see
+            // AcademicOpsService.CaptureAttendanceCoreAsync), so the "how many classes ran"
+            // denominator above must come from actual completed sessions, never from counting
+            // attendance rows -- that would silently undercount a chronically absent child down
+            // to "no sessions yet" instead of flagging them, the exact opposite of what this
+            // page exists for.
             var childIds = enrollments.Select(e => e.ChildId).Distinct().ToList();
-            var attendanceRows = await _unitOfWork.Repository<SessionAttendance>().Query()
+            var presentRows = await _unitOfWork.Repository<SessionAttendance>().Query()
                 .Where(a => a.ParticipantType == ParticipantType.Student
+                    && a.Status == AttendanceStatus.Present
                     && a.ChildId.HasValue && childIds.Contains(a.ChildId.Value)
                     && a.ClassSession.BatchId.HasValue && batchIds.Contains(a.ClassSession.BatchId.Value))
                 .Select(a => new
                 {
                     a.ChildId,
                     BatchId = a.ClassSession.BatchId!.Value,
-                    a.Status,
                     a.ClassSession.ScheduledStartAtUtc,
                     a.JoinedAtUtc,
                 })
@@ -625,11 +633,11 @@ namespace iucs.readernest.application.Services
 
             return enrollments.Select(e =>
             {
-                var completed = completedByBatch.GetValueOrDefault(e.BatchId);
+                var completedDates = completedByBatch.GetValueOrDefault(e.BatchId, []);
+                var completed = completedDates.Count;
                 var totalSessions = e.Batch.Course.TotalSessions;
-                var forThisChildAndBatch = attendanceRows.Where(a => a.ChildId == e.ChildId && a.BatchId == e.BatchId).ToList();
-                var sinceEnrollment = forThisChildAndBatch.Count(a => a.ScheduledStartAtUtc >= e.CreatedAtUtc);
-                var present = forThisChildAndBatch.Where(a => a.Status == AttendanceStatus.Present && a.ScheduledStartAtUtc >= e.CreatedAtUtc).ToList();
+                var sinceEnrollment = completedDates.Count(d => d >= e.CreatedAtUtc);
+                var present = presentRows.Where(a => a.ChildId == e.ChildId && a.BatchId == e.BatchId && a.ScheduledStartAtUtc >= e.CreatedAtUtc).ToList();
 
                 return new TeacherStudentDto
                 {
