@@ -103,6 +103,7 @@ namespace iucs.readernest.domain.Data
         public DbSet<EmailTemplate> EmailTemplates => Set<EmailTemplate>();
         public DbSet<ProgressReport> ProgressReports => Set<ProgressReport>();
         public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
+        public DbSet<DataDeletionLog> DataDeletionLogs => Set<DataDeletionLog>();
 
         // "Ask a Doubt" chatbot
         public DbSet<ChatFaq> ChatFaqs => Set<ChatFaq>();
