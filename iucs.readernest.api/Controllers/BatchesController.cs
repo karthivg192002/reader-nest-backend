@@ -1,8 +1,10 @@
+using System.Security.Claims;
 using iucs.readernest.api.Auth;
 using iucs.readernest.application.Dto.Batches;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace iucs.readernest.api.Controllers
@@ -122,6 +124,17 @@ namespace iucs.readernest.api.Controllers
         public async Task<ActionResult<IReadOnlyList<UnassignedChildDto>>> ListUnassigned(Guid id, CancellationToken cancellationToken)
         {
             return Ok(await _batchService.ListUnassignedStudentsAsync(id, cancellationToken));
+        }
+
+        /// <summary>A teacher's own "My Students" roster — see TeacherStudentDto's own doc
+        /// comment for the feedback this answers. Same "mine" shape as SessionsController's
+        /// mine/recordings: caller identity from the token, not a route parameter.</summary>
+        [HttpGet("mine/students")]
+        [Authorize(Roles = nameof(UserRole.Teacher))]
+        public async Task<ActionResult<IReadOnlyList<TeacherStudentDto>>> ListMyStudents(CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _batchService.ListMyStudentsAsync(userId, cancellationToken));
         }
 
         /// <summary>Places a child in the batch (rejected once the batch is at capacity).</summary>

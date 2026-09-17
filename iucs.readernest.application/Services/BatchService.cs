@@ -563,6 +563,94 @@ namespace iucs.readernest.application.Services
             return enrollments.Select(e => e.ToDto()).ToList();
         }
 
+        /// <summary>Teacher's own "My Students" page — see TeacherStudentDto's own doc comment
+        /// for the feedback this answers. One row per active enrollment across every batch
+        /// this teacher is assigned to, with per-batch progress and per-child attendance
+        /// computed via grouped queries rather than one lookup per child (the exact N+1 shape
+        /// already found and fixed elsewhere this session).</summary>
+        public async Task<IReadOnlyList<TeacherStudentDto>> ListMyStudentsAsync(Guid teacherUserId, CancellationToken cancellationToken = default)
+        {
+            var teacherProfileId = await _unitOfWork.Repository<TeacherProfile>().Query()
+                .Where(t => t.UserId == teacherUserId)
+                .Select(t => (Guid?)t.Id)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (teacherProfileId is null)
+            {
+                return [];
+            }
+
+            var enrollments = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.Status == EnrollmentStatus.Active
+                    && e.Batch.TeacherProfileId == teacherProfileId
+                    && !e.Batch.IsDeleted)
+                .Include(e => e.Child).ThenInclude(c => c.ParentProfile).ThenInclude(p => p.User)
+                .Include(e => e.Batch).ThenInclude(b => b.Course)
+                .OrderBy(e => e.Child.FirstName).ThenBy(e => e.Child.LastName)
+                .ToListAsync(cancellationToken);
+
+            if (enrollments.Count == 0)
+            {
+                return [];
+            }
+
+            var batchIds = enrollments.Select(e => e.BatchId).Distinct().ToList();
+
+            // Course-progress side: how many of each batch's sessions have actually run,
+            // regardless of which child is being looked at -- every child in the same batch
+            // shares this number, so it's one grouped query instead of one per enrollment.
+            var completedByBatch = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.BatchId.HasValue && batchIds.Contains(s.BatchId.Value) && s.Status == SessionStatus.Completed)
+                .GroupBy(s => s.BatchId!.Value)
+                .Select(g => new { BatchId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(g => g.BatchId, g => g.Count, cancellationToken);
+
+            // Attendance side: per (child, batch) pair, since that's the actual grain the page
+            // needs -- same child in two different batches has two independent attendance
+            // records. Joins through ClassSession for BatchId since SessionAttendance itself
+            // only carries ClassSessionId.
+            var childIds = enrollments.Select(e => e.ChildId).Distinct().ToList();
+            var attendanceRows = await _unitOfWork.Repository<SessionAttendance>().Query()
+                .Where(a => a.ParticipantType == ParticipantType.Student
+                    && a.ChildId.HasValue && childIds.Contains(a.ChildId.Value)
+                    && a.ClassSession.BatchId.HasValue && batchIds.Contains(a.ClassSession.BatchId.Value))
+                .Select(a => new
+                {
+                    a.ChildId,
+                    BatchId = a.ClassSession.BatchId!.Value,
+                    a.Status,
+                    a.ClassSession.ScheduledStartAtUtc,
+                    a.JoinedAtUtc,
+                })
+                .ToListAsync(cancellationToken);
+
+            return enrollments.Select(e =>
+            {
+                var completed = completedByBatch.GetValueOrDefault(e.BatchId);
+                var totalSessions = e.Batch.Course.TotalSessions;
+                var forThisChildAndBatch = attendanceRows.Where(a => a.ChildId == e.ChildId && a.BatchId == e.BatchId).ToList();
+                var sinceEnrollment = forThisChildAndBatch.Count(a => a.ScheduledStartAtUtc >= e.CreatedAtUtc);
+                var present = forThisChildAndBatch.Where(a => a.Status == AttendanceStatus.Present && a.ScheduledStartAtUtc >= e.CreatedAtUtc).ToList();
+
+                return new TeacherStudentDto
+                {
+                    ChildId = e.ChildId,
+                    ChildName = $"{e.Child.FirstName} {e.Child.LastName}".Trim(),
+                    ParentName = $"{e.Child.ParentProfile.User.FirstName} {e.Child.ParentProfile.User.LastName}".Trim(),
+                    AcademicLevel = e.Child.AcademicLevel,
+                    BatchId = e.BatchId,
+                    BatchName = e.Batch.Name,
+                    CourseName = e.Batch.Course.Name,
+                    EnrolledAtUtc = e.CreatedAtUtc,
+                    TotalSessions = totalSessions,
+                    CompletedSessions = completed,
+                    RemainingSessions = Math.Max(0, totalSessions - completed),
+                    SessionsSinceEnrollment = sinceEnrollment,
+                    AttendedCount = present.Count,
+                    LastAttendedAtUtc = present.Count > 0 ? present.Max(a => a.JoinedAtUtc) : null,
+                };
+            }).ToList();
+        }
+
         public async Task<IReadOnlyList<UnassignedChildDto>> ListUnassignedStudentsAsync(Guid batchId, CancellationToken cancellationToken = default)
         {
             var alreadyEnrolledChildIds = await _unitOfWork.Repository<BatchEnrollment>().Query()
