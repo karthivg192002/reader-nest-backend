@@ -299,6 +299,20 @@ namespace iucs.readernest.application.Dto.Monitoring
         public DateTime FetchedAtUtc { get; set; }
     }
 
+    /// <summary>
+    /// Today's (IST) real batch classes vs. how many actually have a registered recording --
+    /// same "started, not still live, no session_recordings row" definition used to trace
+    /// individual sync failures by hand. StillProcessing is deliberately not counted as a
+    /// failure: a class that ended a minute ago hasn't failed, it just hasn't synced yet.
+    /// </summary>
+    public class RecordingSummaryDto
+    {
+        public int Started { get; set; }
+        public int Succeeded { get; set; }
+        public int Failed { get; set; }
+        public int StillProcessing { get; set; }
+    }
+
     /// <summary>Everything the Server Monitoring dashboard needs in one call.</summary>
     public class MonitoringSummaryDto
     {
@@ -311,6 +325,7 @@ namespace iucs.readernest.application.Dto.Monitoring
         public int ConcurrentClassroomUsers { get; set; }
         public int ActiveClassCount { get; set; }
         public List<AlertDto> ActiveAlerts { get; set; } = new();
+        public RecordingSummaryDto TodayRecordings { get; set; } = new();
         public DateTime GeneratedAtUtc { get; set; }
     }
 }

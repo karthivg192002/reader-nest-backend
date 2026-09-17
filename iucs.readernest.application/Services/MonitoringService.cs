@@ -47,8 +47,9 @@ namespace iucs.readernest.application.Services
             var databaseTask = CheckDatabaseAsync(cancellationToken);
             var insightsTask = GetDatabaseInsightsAsync(cancellationToken);
             var alertsTask = _prometheus.GetActiveAlertsAsync(_options.PrometheusBaseUrl, cancellationToken);
+            var recordingsTask = GetTodayRecordingSummaryAsync(cancellationToken);
 
-            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask));
+            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask).Append(recordingsTask));
             var (dbHealthy, dbLatencyMs) = await databaseTask;
 
             return new MonitoringSummaryDto
@@ -75,7 +76,51 @@ namespace iucs.readernest.application.Services
                     .OrderByDescending(a => a.Severity == "critical")
                     .ThenBy(a => a.ActiveSince)
                     .ToList(),
+                TodayRecordings = await recordingsTask,
                 GeneratedAtUtc = DateTime.UtcNow,
+            };
+        }
+
+        /// <summary>
+        /// Same "started, not still live, no session_recordings row" definition used all night
+        /// to trace individual sync failures by hand (real batch classes only -- no demo/
+        /// personal-link noise) -- now surfaced on the dashboard instead of a one-off SQL query.
+        /// </summary>
+        private async Task<RecordingSummaryDto> GetTodayRecordingSummaryAsync(CancellationToken cancellationToken)
+        {
+            // "Today" in IST, same boundary GetTodaySessionsAsync already uses.
+            var istNow = DateTime.UtcNow.AddHours(5).AddMinutes(30);
+            var dayStartUtc = istNow.Date.AddHours(-5).AddMinutes(-30);
+            var dayEndUtc = dayStartUtc.AddDays(1);
+
+            var started = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.Type == SessionType.Regular
+                    && s.BatchId != null
+                    && s.ScheduledStartAtUtc >= dayStartUtc
+                    && s.ScheduledStartAtUtc < dayEndUtc
+                    && s.ActualStartAtUtc != null)
+                .Select(s => new { s.Id, s.Status })
+                .ToListAsync(cancellationToken);
+
+            if (started.Count == 0)
+            {
+                return new RecordingSummaryDto();
+            }
+
+            var startedIds = started.Select(s => s.Id).ToList();
+            var recordedIds = (await _unitOfWork.Repository<SessionRecording>().Query()
+                .Where(r => startedIds.Contains(r.ClassSessionId))
+                .Select(r => r.ClassSessionId)
+                .Distinct()
+                .ToListAsync(cancellationToken))
+                .ToHashSet();
+
+            return new RecordingSummaryDto
+            {
+                Started = started.Count,
+                Succeeded = started.Count(s => recordedIds.Contains(s.Id)),
+                Failed = started.Count(s => s.Status != SessionStatus.InProgress && !recordedIds.Contains(s.Id)),
+                StillProcessing = started.Count(s => s.Status == SessionStatus.InProgress && !recordedIds.Contains(s.Id)),
             };
         }
 
