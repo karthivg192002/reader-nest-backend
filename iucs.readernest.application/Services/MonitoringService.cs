@@ -47,10 +47,16 @@ namespace iucs.readernest.application.Services
             var databaseTask = CheckDatabaseAsync(cancellationToken);
             var insightsTask = GetDatabaseInsightsAsync(cancellationToken);
             var alertsTask = _prometheus.GetActiveAlertsAsync(_options.PrometheusBaseUrl, cancellationToken);
-            var recordingsTask = GetTodayRecordingSummaryAsync(cancellationToken);
 
-            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask).Append(recordingsTask));
+            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask));
             var (dbHealthy, dbLatencyMs) = await databaseTask;
+            // Sequential, not joined into the WhenAll above: this also queries via _unitOfWork,
+            // and CheckDatabaseAsync already does too -- both use the same scoped DbContext,
+            // which throws "a second operation was started on this context instance before a
+            // previous operation completed" the instant two EF queries on it actually run
+            // concurrently (confirmed live: this exact crash took down the whole /summary
+            // endpoint, not just this one field, the first time these ran side by side).
+            var todayRecordings = await GetTodayRecordingSummaryAsync(cancellationToken);
 
             return new MonitoringSummaryDto
             {
@@ -76,7 +82,7 @@ namespace iucs.readernest.application.Services
                     .OrderByDescending(a => a.Severity == "critical")
                     .ThenBy(a => a.ActiveSince)
                     .ToList(),
-                TodayRecordings = await recordingsTask,
+                TodayRecordings = todayRecordings,
                 GeneratedAtUtc = DateTime.UtcNow,
             };
         }
