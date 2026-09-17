@@ -340,6 +340,27 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task GuestLink_CreateSucceeds_ForASessionThatEndedMoreThanADayAgo()
+        {
+            // Bug caught live in production 2026-09-16: opening "Copy Guest Link" on an old,
+            // already-over session (nothing in the admin UI stops that) used to throw an
+            // unhandled exception -- CreateGuestLinkAsync minted the token's expiry as
+            // ScheduledEndAtUtc.AddDays(1), which lands BEFORE "now" once the session is more
+            // than a day in the past, and JwtSecurityToken's constructor requires expires to be
+            // after notBefore ("now"). Surfaced to the RM/admin as a generic 500
+            // ("An unexpected error occurred"), not the specific message an AppException would
+            // have shown.
+            var (session, _) = await SeedGuestLinkFixtureAsync();
+            session.ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-3);
+            session.ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-3).AddMinutes(45);
+            await _db.Context.SaveChangesAsync();
+
+            var link = await CreateSessionService().CreateGuestLinkAsync(session.Id, childId: null);
+
+            Assert.False(string.IsNullOrEmpty(link.Token));
+        }
+
+        [Fact]
         public async Task GuestLink_CreateRejectsAChildNotActivelyEnrolledInThatSessionsBatch()
         {
             var (session, _) = await SeedGuestLinkFixtureAsync();

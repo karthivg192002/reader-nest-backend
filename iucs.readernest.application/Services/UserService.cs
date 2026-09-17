@@ -299,6 +299,20 @@ namespace iucs.readernest.application.Services
                 user.TimeZoneId = request.TimeZoneId;
             }
 
+            if (!string.IsNullOrWhiteSpace(request.Email))
+            {
+                var newEmail = request.Email.Trim().ToLowerInvariant();
+                if (newEmail != user.Email)
+                {
+                    if (await _unitOfWork.Repository<User>().ExistsAsync(u => u.Email == newEmail && u.Id != id, cancellationToken))
+                    {
+                        throw new ConflictException($"A user with email '{newEmail}' already exists.");
+                    }
+
+                    user.Email = newEmail;
+                }
+            }
+
             if (request.DepartmentId.HasValue && user.TeacherProfile is not null)
             {
                 user.TeacherProfile.DepartmentId = request.DepartmentId.Value;

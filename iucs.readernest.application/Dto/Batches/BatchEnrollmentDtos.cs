@@ -28,7 +28,13 @@ namespace iucs.readernest.application.Dto.Batches
 
         public string ParentName { get; set; } = null!;
 
+        /// <summary>Lets the "Assign students" picker tell apart two same-named children (e.g. real duplicates from migration, or one child enrolled separately per course) without an extra lookup.</summary>
+        public string? ParentEmail { get; set; }
+
         public string? AcademicLevel { get; set; }
+
+        /// <summary>Course name(s) this child is currently actively enrolled in elsewhere, comma-joined; null if not enrolled anywhere yet.</summary>
+        public string? CurrentCourses { get; set; }
     }
 
     public class AssignStudentRequest

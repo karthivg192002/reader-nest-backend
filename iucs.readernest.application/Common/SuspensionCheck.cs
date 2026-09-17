@@ -13,10 +13,13 @@ namespace iucs.readernest.application.Common
     /// </summary>
     public static class SuspensionCheck
     {
-        public static Task<bool> IsChildBlockedAsync(
+        public static async Task<bool> IsChildBlockedAsync(
             IUnitOfWork unitOfWork, Guid parentProfileId, Guid childId, CancellationToken cancellationToken = default)
         {
-            return unitOfWork.Repository<FeeSuspension>().ExistsAsync(
+            if (!await BillingSettings.IsSuspensionEnabledAsync(unitOfWork, cancellationToken))
+                return false;
+
+            return await unitOfWork.Repository<FeeSuspension>().ExistsAsync(
                 s => s.ParentProfileId == parentProfileId
                     && s.Status == SuspensionStatus.Active
                     && (s.ChildId == null || s.ChildId == childId),
@@ -24,10 +27,13 @@ namespace iucs.readernest.application.Common
         }
 
         /// <summary>For contexts with no specific child (a family-level check) -- true only for an account-wide suspension.</summary>
-        public static Task<bool> IsAccountBlockedAsync(
+        public static async Task<bool> IsAccountBlockedAsync(
             IUnitOfWork unitOfWork, Guid parentProfileId, CancellationToken cancellationToken = default)
         {
-            return unitOfWork.Repository<FeeSuspension>().ExistsAsync(
+            if (!await BillingSettings.IsSuspensionEnabledAsync(unitOfWork, cancellationToken))
+                return false;
+
+            return await unitOfWork.Repository<FeeSuspension>().ExistsAsync(
                 s => s.ParentProfileId == parentProfileId && s.Status == SuspensionStatus.Active && s.ChildId == null,
                 cancellationToken);
         }
