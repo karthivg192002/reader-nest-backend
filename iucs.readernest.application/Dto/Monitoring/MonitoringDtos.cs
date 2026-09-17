@@ -213,6 +213,8 @@ namespace iucs.readernest.application.Dto.Monitoring
         public int AttendedCount { get; set; }
         /// <summary>Teacher (1) + actively-enrolled batch students at the time of this query -- the roster this session was expected to draw from.</summary>
         public int ExpectedCount { get; set; }
+        /// <summary>True once a session_recordings row exists for this session. Only meaningful for a real batch class that has actually started -- always false for demo/personal-link sessions, which are never recorded by design.</summary>
+        public bool HasRecording { get; set; }
     }
 
     /// <summary>Historical CPU/memory usage for one server over an admin-selected window (see GetHistoryAsync).</summary>

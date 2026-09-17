@@ -304,6 +304,12 @@ namespace iucs.readernest.application.Services
                 .ToListAsync(cancellationToken))
                 .GroupBy(a => a.ClassSessionId)
                 .ToDictionary(g => g.Key, g => g.Count());
+            var recordedIds = (await _unitOfWork.Repository<SessionRecording>().Query()
+                .Where(r => sessionIds.Contains(r.ClassSessionId))
+                .Select(r => r.ClassSessionId)
+                .Distinct()
+                .ToListAsync(cancellationToken))
+                .ToHashSet();
 
             return sessions.Select(s => new SessionHistoryEntryDto
             {
@@ -318,6 +324,7 @@ namespace iucs.readernest.application.Services
                 Status = s.Status.ToString(),
                 AttendedCount = attendedCounts.TryGetValue(s.Id, out var count) ? count : 0,
                 ExpectedCount = 1 + (s.Batch?.Enrollments.Count(e => e.Status == EnrollmentStatus.Active) ?? 0),
+                HasRecording = recordedIds.Contains(s.Id),
             }).ToList();
         }
 
