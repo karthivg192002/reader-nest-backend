@@ -135,6 +135,15 @@ namespace iucs.readernest.api.Hubs
             // isRecordingObserver's.
             var isGuest = Context.User?.FindFirstValue("purpose") == "guest-classroom";
             Guid userId;
+            // A Personal Meeting Room has no ClassSession row at all -- the frontend hands this
+            // hub the owner's own account id as the "sessionId" (PersonalMeetingRoom.tsx), so a
+            // real logged-in user joining a room keyed by their OWN id is, by construction,
+            // always that room's owner: there's nothing to look up in IsSessionParticipantAsync
+            // (there's no session to be "a participant of"), and no reschedule-remap concept
+            // applies to a room that's permanent by design. Set after the isRecordingObserver/
+            // isGuest branch below resolves userId, since a guest joining someone ELSE's
+            // personal room must never take this path.
+            var isPersonalRoomOwner = false;
             if (isRecordingObserver || isGuest)
             {
                 var tokenSessionId = Context.User?.FindFirstValue("sessionId");
@@ -152,23 +161,27 @@ namespace iucs.readernest.api.Hubs
                     throw new HubException("Not signed in.");
                 }
 
-                // See ISessionService.ResolveCurrentSessionIdAsync's own doc comment: a
-                // connection arriving with a pre-edit session id (e.g. a portal tab that was
-                // already open when an admin edited/rescheduled the class, never reloaded)
-                // is transparently redirected to whatever the class turned into, so it lands
-                // in the very same ClassroomHub group a fresh caller resolving the same class
-                // right now would — rather than either getting refused outright (once a stale
-                // id's own DemoBooking link has moved on, as RescheduleAsync now keeps it doing)
-                // or, worse, being silently authorized and grouped apart from everyone who
-                // already has the current id (a Regular/batch session's own BatchEnrollment
-                // check still passes against a stale-but-same-batch id either way).
-                sessionGuid = await _sessionService.ResolveCurrentSessionIdAsync(sessionGuid, Context.ConnectionAborted);
-                sessionId = sessionGuid.ToString();
-
-                if (!await _sessionService.IsSessionParticipantAsync(sessionGuid, userId, Context.ConnectionAborted))
+                isPersonalRoomOwner = sessionGuid == userId;
+                if (!isPersonalRoomOwner)
                 {
-                    await _eventLog.LogJoinDeniedAsync(sessionGuid, userId, "Not a participant of this session.", CancellationToken.None);
-                    throw new HubException("You do not have access to this session.");
+                    // See ISessionService.ResolveCurrentSessionIdAsync's own doc comment: a
+                    // connection arriving with a pre-edit session id (e.g. a portal tab that was
+                    // already open when an admin edited/rescheduled the class, never reloaded)
+                    // is transparently redirected to whatever the class turned into, so it lands
+                    // in the very same ClassroomHub group a fresh caller resolving the same class
+                    // right now would — rather than either getting refused outright (once a stale
+                    // id's own DemoBooking link has moved on, as RescheduleAsync now keeps it doing)
+                    // or, worse, being silently authorized and grouped apart from everyone who
+                    // already has the current id (a Regular/batch session's own BatchEnrollment
+                    // check still passes against a stale-but-same-batch id either way).
+                    sessionGuid = await _sessionService.ResolveCurrentSessionIdAsync(sessionGuid, Context.ConnectionAborted);
+                    sessionId = sessionGuid.ToString();
+
+                    if (!await _sessionService.IsSessionParticipantAsync(sessionGuid, userId, Context.ConnectionAborted))
+                    {
+                        await _eventLog.LogJoinDeniedAsync(sessionGuid, userId, "Not a participant of this session.", CancellationToken.None);
+                        throw new HubException("You do not have access to this session.");
+                    }
                 }
             }
 
@@ -179,19 +192,26 @@ namespace iucs.readernest.api.Hubs
             // Context.User's role claim, which a guest's synthetic token never carries, so this
             // would already evaluate to "student" even without isGuest called out explicitly --
             // spelled out anyway so this reads as an intentional choice, not a coincidence).
-            var role = isRecordingObserver ? "observer" : (IsTeacher ? "teacher" : "student");
+            // isPersonalRoomOwner always reads as "teacher" here regardless of the account's own
+            // role (Parent/Teacher/Admin can all have a personal room) -- you're always the host
+            // of your own room, and the whiteboard-grant/quiz-launch/star-award controls below
+            // are gated on this role, not on the account's real UserRole.
+            var role = isRecordingObserver ? "observer" : (isPersonalRoomOwner || IsTeacher ? "teacher" : "student");
 
             // A room that goes fully empty (everyone disconnects, even momentarily) has its
             // in-memory Scores wiped in RemoveFromSessionAsync below — reseed from the durable
             // leaderboard on the FIRST join of a fresh room so a rejoin never shows the class's
             // already-earned stars resetting to zero (StudentAward rows are untouched either way;
-            // only this ephemeral cache was ever at risk of looking wrong).
+            // only this ephemeral cache was ever at risk of looking wrong). Skipped for a personal
+            // room -- sessionGuid there is the owner's own account id, never a real ClassSession,
+            // so GetLeaderboardAsync could only ever come back empty; skipping avoids a pointless
+            // DB round-trip on every personal-room join.
             var isNewRoom = !Rooms.ContainsKey(sessionId);
             var room = Rooms.GetOrAdd(sessionId, _ => new ConcurrentDictionary<string, ParticipantState>());
             room[Context.ConnectionId] = new ParticipantState(name, role, HandRaised: false);
             Context.Items["sessionId"] = sessionId;
 
-            if (isNewRoom)
+            if (isNewRoom && !isPersonalRoomOwner)
             {
                 var persisted = await _gamificationService.GetLeaderboardAsync(sessionGuid, top: 50, Context.ConnectionAborted);
                 if (persisted.Count > 0)
@@ -252,8 +272,10 @@ namespace iucs.readernest.api.Hubs
             // this hub connection -- CaptureJoinAttendanceAsync here would be a no-op anyway
             // (userId is this guest's own throwaway synthetic id, not a real Parent/Teacher
             // account it could resolve attendance against), so skipping it outright avoids a
-            // pointless DB lookup on every guest join, not just a correctness fix.
-            if (!isRecordingObserver && !isGuest)
+            // pointless DB lookup on every guest join, not just a correctness fix. Also skipped
+            // for a personal room owner -- sessionGuid there is an account id, not a ClassSession,
+            // so there's no attendance row to capture at all.
+            if (!isRecordingObserver && !isGuest && !isPersonalRoomOwner)
             {
                 await _academicOpsService.CaptureJoinAttendanceAsync(sessionGuid, userId, Context.ConnectionAborted);
             }
