@@ -74,6 +74,22 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>
+        /// Edits a batch's already-generated schedule from now on (new weekday/time pattern
+        /// and/or remaining session count) — the "Manage" dialog's answer to a schedule that
+        /// already has sessions, where GenerateSchedule above refuses to run. Only still-upcoming
+        /// sessions are touched; anything already completed/in progress is untouched.
+        /// </summary>
+        [HttpPut("{id:guid}/schedule")]
+        [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Edit)]
+        public async Task<ActionResult<IReadOnlyList<ClassSessionDto>>> UpdateFutureSchedule(
+            Guid id,
+            UpdateFutureScheduleRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.UpdateFutureScheduleAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>
         /// One-time data repair for batches reassigned before UpdateAsync's teacher-reassignment
         /// cascade existed: moves any still-undelivered ClassSession that's out of sync with its
         /// own batch's current teacher onto that teacher. Safe to call repeatedly.

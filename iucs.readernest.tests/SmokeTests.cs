@@ -4833,6 +4833,187 @@ namespace iucs.readernest.tests
             }));
         }
 
+        // ---- UpdateFutureSchedule: partial schedule edits for a batch with existing sessions ----
+
+        [Fact]
+        public async Task UpdateFutureSchedule_TimeOnlyChange_MovesOnlyUpcomingSessions_LeavesCompletedAlone()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 3, includeSession: false);
+
+            var day7 = DateTime.UtcNow.AddDays(7);
+            var start1 = new DateTime(day7.Year, day7.Month, day7.Day, 10, 0, 0, DateTimeKind.Utc);
+            var day14 = DateTime.UtcNow.AddDays(14);
+            var start2 = new DateTime(day14.Year, day14.Month, day14.Day, 10, 0, 0, DateTimeKind.Utc);
+
+            var future1 = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = start1,
+                ScheduledEndAtUtc = start1.AddMinutes(45),
+            };
+            var future2 = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = start2,
+                ScheduledEndAtUtc = start2.AddMinutes(45),
+            };
+            var past = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Completed,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-3).AddMinutes(45),
+            };
+            _db.Context.AddRange(future1, future2, past);
+            await _db.Context.SaveChangesAsync();
+
+            await CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                Slots = [new GenerateScheduleSlot { DayOfWeek = start1.DayOfWeek, StartTimeUtc = new TimeOnly(2, 0) }],
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            var reloaded1 = await _db.Context.ClassSessions.FirstAsync(s => s.Id == future1.Id);
+            var reloaded2 = await _db.Context.ClassSessions.FirstAsync(s => s.Id == future2.Id);
+            var reloadedPast = await _db.Context.ClassSessions.FirstAsync(s => s.Id == past.Id);
+
+            Assert.Equal(new TimeOnly(2, 0), TimeOnly.FromDateTime(reloaded1.ScheduledStartAtUtc));
+            Assert.Equal(DateOnly.FromDateTime(start1), DateOnly.FromDateTime(reloaded1.ScheduledStartAtUtc));
+            Assert.Equal(new TimeOnly(2, 0), TimeOnly.FromDateTime(reloaded2.ScheduledStartAtUtc));
+            Assert.Equal(DateOnly.FromDateTime(start2), DateOnly.FromDateTime(reloaded2.ScheduledStartAtUtc));
+            Assert.Equal(TimeOnly.FromDateTime(past.ScheduledStartAtUtc), TimeOnly.FromDateTime(reloadedPast.ScheduledStartAtUtc));
+            Assert.Equal(SessionStatus.Completed, reloadedPast.Status);
+        }
+
+        [Fact]
+        public async Task UpdateFutureSchedule_WeekdayPatternChange_RegeneratesRemainingSessions_CancellingOldOnes()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 3, includeSession: false);
+
+            var day7 = DateTime.UtcNow.AddDays(7);
+            var oldDay = day7.DayOfWeek;
+            var oldSessions = new List<ClassSession>();
+            for (var i = 0; i < 3; i++)
+            {
+                var d = day7.AddDays(7 * i);
+                var start = new DateTime(d.Year, d.Month, d.Day, 10, 0, 0, DateTimeKind.Utc);
+                var s = new ClassSession
+                {
+                    BatchId = batch.Id,
+                    TeacherProfileId = batch.TeacherProfileId,
+                    Status = SessionStatus.Scheduled,
+                    ScheduledStartAtUtc = start,
+                    ScheduledEndAtUtc = start.AddMinutes(45),
+                };
+                oldSessions.Add(s);
+                _db.Context.Add(s);
+            }
+            await _db.Context.SaveChangesAsync();
+
+            var newDay = oldDay == DayOfWeek.Saturday ? DayOfWeek.Sunday : oldDay + 1;
+
+            await CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                Slots = [new GenerateScheduleSlot { DayOfWeek = newDay, StartTimeUtc = new TimeOnly(3, 0) }],
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            foreach (var old in oldSessions)
+            {
+                var reloaded = await _db.Context.ClassSessions.FirstAsync(s => s.Id == old.Id);
+                Assert.Equal(SessionStatus.Cancelled, reloaded.Status);
+                Assert.Equal("Schedule adjusted", reloaded.CancellationReason);
+            }
+
+            var newSessions = await _db.Context.ClassSessions
+                .Where(s => s.BatchId == batch.Id && s.Status == SessionStatus.Scheduled)
+                .ToListAsync();
+            Assert.Equal(3, newSessions.Count);
+            Assert.All(newSessions, s => Assert.Equal(newDay, s.ScheduledStartAtUtc.DayOfWeek));
+            Assert.All(newSessions, s => Assert.Equal(new TimeOnly(3, 0), TimeOnly.FromDateTime(s.ScheduledStartAtUtc)));
+        }
+
+        [Fact]
+        public async Task UpdateFutureSchedule_TimeOnlyChange_BlocksWhenNewTimeDoubleBooksTheTeacher()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var day7 = DateTime.UtcNow.AddDays(7);
+            var originalStart = new DateTime(day7.Year, day7.Month, day7.Day, 10, 0, 0, DateTimeKind.Utc);
+            var moving = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = originalStart,
+                ScheduledEndAtUtc = originalStart.AddMinutes(45),
+            };
+            _db.Context.Add(moving);
+
+            // A second batch with the SAME teacher, already booked at the time this update would
+            // move `moving` to — the cross-batch double-booking check this shares with
+            // BatchService.UpdateAsync's own duration/teacher cascades.
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var otherCourse = new Course
+            {
+                CourseCategory = category,
+                Name = "Other course",
+                Type = CourseType.Group,
+                DurationMinutes = 45,
+                Price = 100,
+                TotalSessions = 1,
+                DepartmentId = WellKnownDepartments.Phonics,
+            };
+            var otherBatch = new Batch { Course = otherCourse, TeacherProfileId = batch.TeacherProfileId, Name = "Other batch", Capacity = 5 };
+            var newStart = new DateTime(day7.Year, day7.Month, day7.Day, 14, 0, 0, DateTimeKind.Utc);
+            var busy = new ClassSession
+            {
+                Batch = otherBatch,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = newStart,
+                ScheduledEndAtUtc = newStart.AddMinutes(45),
+            };
+            _db.Context.AddRange(category, otherCourse, otherBatch, busy);
+            await _db.Context.SaveChangesAsync();
+
+            var ex = await Assert.ThrowsAsync<DomainValidationException>(() => CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                Slots = [new GenerateScheduleSlot { DayOfWeek = originalStart.DayOfWeek, StartTimeUtc = new TimeOnly(14, 0) }],
+            }));
+            Assert.Contains("already has a session", ex.Message);
+
+            _db.Context.ChangeTracker.Clear();
+            var reloaded = await _db.Context.ClassSessions.FirstAsync(s => s.Id == moving.Id);
+            Assert.Equal(TimeOnly.FromDateTime(originalStart), TimeOnly.FromDateTime(reloaded.ScheduledStartAtUtc));
+        }
+
+        [Fact]
+        public async Task UpdateFutureSchedule_ThrowsWhenTheBatchHasNoUpcomingSessions()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var past = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Completed,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-3).AddMinutes(45),
+            };
+            _db.Context.Add(past);
+            await _db.Context.SaveChangesAsync();
+
+            var ex = await Assert.ThrowsAsync<DomainValidationException>(() => CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                Slots = [new GenerateScheduleSlot { DayOfWeek = DayOfWeek.Monday, StartTimeUtc = new TimeOnly(4, 0) }],
+            }));
+            Assert.Contains("no upcoming sessions", ex.Message);
+        }
+
         [Fact]
         public async Task CompleteSession_AccruesPayoutEarning_AtConfiguredRate()
         {
@@ -6364,6 +6545,43 @@ namespace iucs.readernest.tests
             var dashboard = await new ParentPortalService(_db.UnitOfWork).GetDashboardAsync(parentUser.Id);
             var only = Assert.Single(dashboard.Children);
             Assert.Equal(kept.Id, only.ChildId);
+        }
+
+        [Fact]
+        public async Task ParentDashboard_EnrollmentGate_IsOpenForAParentWhoseChildWasImportedRatherThanApproved()
+        {
+            // A bulk-imported child (the wise.live migration) never passes through an approved
+            // enrollment form, so the stored flag stays false -- but the family is already
+            // onboarded and must not be sent back to fill the enrollment form again.
+            var parentUser = await _db.SeedUserAsync($"imp-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            _db.Context.Add(parentProfile);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.Children.Add(new Child { ParentProfileId = parentProfile.Id, FirstName = "Imported", LastName = "Kid", IsActive = true });
+            await _db.Context.SaveChangesAsync();
+            Assert.False((await _db.Context.ParentProfiles.FirstAsync(p => p.Id == parentProfile.Id)).EnrollmentFormCompleted);
+
+            var dashboard = await new ParentPortalService(_db.UnitOfWork).GetDashboardAsync(parentUser.Id);
+
+            Assert.True(dashboard.EnrollmentFormCompleted);
+        }
+
+        [Fact]
+        public async Task ParentDashboard_EnrollmentGate_StaysClosedWithoutAnActiveChild()
+        {
+            var noChildUser = await _db.SeedUserAsync($"nochild-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            _db.Context.Add(new ParentProfile { UserId = noChildUser.Id });
+
+            var inactiveUser = await _db.SeedUserAsync($"inactive-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var inactiveProfile = new ParentProfile { UserId = inactiveUser.Id };
+            _db.Context.Add(inactiveProfile);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.Children.Add(new Child { ParentProfileId = inactiveProfile.Id, FirstName = "Withdrawn", LastName = "Kid", IsActive = false });
+            await _db.Context.SaveChangesAsync();
+
+            var service = new ParentPortalService(_db.UnitOfWork);
+            Assert.False((await service.GetDashboardAsync(noChildUser.Id)).EnrollmentFormCompleted);
+            Assert.False((await service.GetDashboardAsync(inactiveUser.Id)).EnrollmentFormCompleted);
         }
 
         // ---- QA pass: cross-account isolation on the parent portal ----
