@@ -522,11 +522,29 @@ namespace iucs.readernest.application.Services
                     }
 
                     var nameParts = studentName.Trim().Split(' ', 2);
+                    var firstName = nameParts[0];
+                    var lastName = nameParts.Length > 1 ? nameParts[1] : string.Empty;
+
+                    // Re-running the same file (or an overlapping one) must not silently
+                    // multiply this child under the same parent — that's exactly how the
+                    // wise.live migration and later re-imports produced dozens of duplicate
+                    // profiles indistinguishable in the batch "assign student" picker.
+                    var alreadyExists = await _unitOfWork.Repository<Child>().ExistsAsync(
+                        c => c.ParentProfileId == parentProfile.Id
+                            && c.FirstName.ToLower() == firstName.ToLower()
+                            && c.LastName.ToLower() == lastName.ToLower(),
+                        cancellationToken);
+                    if (alreadyExists)
+                    {
+                        throw new ConflictException(
+                            $"'{studentName}' already exists under parent '{parentEmail}' — skipped to avoid a duplicate profile.");
+                    }
+
                     var child = new Child
                     {
                         ParentProfileId = parentProfile.Id,
-                        FirstName = nameParts[0],
-                        LastName = nameParts.Length > 1 ? nameParts[1] : string.Empty,
+                        FirstName = firstName,
+                        LastName = lastName,
                         DateOfBirth = dateOfBirth,
                         AcademicLevel = row.GetOrNull("AcademicLevel"),
                         IsActive = true,

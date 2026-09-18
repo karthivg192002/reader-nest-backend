@@ -482,9 +482,13 @@ namespace iucs.readernest.application.Services
                     Name = server.Name,
                     Hostname = server.Hostname,
                     Reachable = false,
-                    Error = up is null
-                        ? "No data — this server isn't being scraped yet (check the Prometheus target)."
-                        : "node-exporter on this server is down or unreachable.",
+                    IsOnDemand = server.IsOnDemand,
+                    ConfiguredServices = server.Services,
+                    Error = server.IsOnDemand
+                        ? "Standby — this is on-demand burst capacity, created automatically only during a scheduled peak."
+                        : up is null
+                            ? "No data — this server isn't being scraped yet (check the Prometheus target)."
+                            : "node-exporter on this server is down or unreachable.",
                 };
             }
 
@@ -626,6 +630,8 @@ namespace iucs.readernest.application.Services
                 Name = server.Name,
                 Hostname = server.Hostname,
                 Reachable = true,
+                IsOnDemand = server.IsOnDemand,
+                ConfiguredServices = server.Services,
                 UptimeSeconds = (long)(await uptimeTask ?? 0),
                 LoadAverage1m = await loadTask ?? 0,
                 CpuCores = (int)(await cpuCoresTask ?? 0),

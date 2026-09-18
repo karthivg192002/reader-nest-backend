@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using iucs.readernest.domain.Data;
@@ -11,9 +12,11 @@ using iucs.readernest.domain.Data;
 namespace iucs.readernest.domain.Migrations
 {
     [DbContext(typeof(ReaderNestDbContext))]
-    partial class ReaderNestDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260918013122_PreventDuplicateClassSessionSlots")]
+    partial class PreventDuplicateClassSessionSlots
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -70,24 +73,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasMaxLength(150)
                         .HasColumnType("character varying(150)")
                         .HasColumnName("name");
-
-                    b.Property<int?>("PaymentAfterSessionsCount")
-                        .HasColumnType("integer")
-                        .HasColumnName("payment_after_sessions_count");
-
-                    b.Property<DateOnly?>("PaymentDueDate")
-                        .HasColumnType("date")
-                        .HasColumnName("payment_due_date");
-
-                    b.Property<string>("PaymentPlanType")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("payment_plan_type");
-
-                    b.Property<DateTime?>("PaymentReminderSentAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("payment_reminder_sent_at_utc");
 
                     b.Property<DateOnly?>("StartDate")
                         .HasColumnType("date")
