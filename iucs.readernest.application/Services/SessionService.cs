@@ -564,7 +564,8 @@ namespace iucs.readernest.application.Services
             // for a teacher-schedule collision so that risk is recorded rather than silently
             // invisible, even though it doesn't block the placement.
             var duration = session.ScheduledEndAtUtc - session.ScheduledStartAtUtc;
-            var carriedForwardStart = await NextNonHolidayDateAsync(session.ScheduledStartAtUtc.AddDays(7), cancellationToken);
+            var carriedForwardStart = await NextAvailableCarryForwardSlotAsync(
+                session.ScheduledStartAtUtc.AddDays(7), session.BatchId, duration, cancellationToken);
             var carriedForwardEnd = carriedForwardStart.Add(duration);
             var carriedForwardHasConflict = await _unitOfWork.Repository<ClassSession>().ExistsAsync(
                 s => s.TeacherProfileId == session.TeacherProfileId
@@ -617,13 +618,32 @@ namespace iucs.readernest.application.Services
                 changesJson: "{\"noShow\":\"" + party + "\",\"carriedForwardTo\":\"" + carriedForward.Id + "\""
                     + (carriedForwardHasConflict ? ",\"carriedForwardScheduleConflict\":true" : "") + "}",
                 cancellationToken: cancellationToken);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            try
+            {
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains(
+                "ix_class_sessions_batch_id_scheduled_start_at_utc", StringComparison.Ordinal) == true)
+            {
+                // Must never hard-fail a no-show (see the 9-straight-weeks incident above), so
+                // even the residual race the slot search above can't fully close — two no-shows
+                // resolving to the same slot at the exact same instant — can't surface as an
+                // error. Whatever session is already sitting in that slot already covers the
+                // class; there's nothing left for this carried-forward row to do, so drop it and
+                // save the no-show status itself on its own.
+                _unitOfWork.Repository<ClassSession>().Remove(carriedForward);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                return await GetAsync(session.Id, cancellationToken);
+            }
 
             return await GetAsync(carriedForward.Id, cancellationToken);
         }
 
-        /// <summary>Walks forward a day at a time (bounded) to the next date that isn't a holiday.</summary>
-        private async Task<DateTime> NextNonHolidayDateAsync(DateTime candidateUtc, CancellationToken cancellationToken)
+        /// <summary>Walks forward a day at a time (bounded) to the next date that isn't a holiday
+        /// and doesn't collide with this batch's own already-scheduled session.</summary>
+        private async Task<DateTime> NextAvailableCarryForwardSlotAsync(
+            DateTime candidateUtc, Guid? batchId, TimeSpan duration, CancellationToken cancellationToken)
         {
             // The whole 14-day window is fetched in one query rather than probed a day at a
             // time — the walk itself is unchanged, but it no longer costs up to 14 sequential
@@ -636,16 +656,42 @@ namespace iucs.readernest.application.Services
                     .ToListAsync(cancellationToken))
                 .ToHashSet();
 
+            // A no-show's carried-forward slot lands one week later at the same time of day —
+            // which is also exactly when this batch's own regular weekly class already recurs.
+            // Without checking that, the naive "+7 days" placement collides with the batch's
+            // already-scheduled session for that day, producing two rows (one Scheduled, one
+            // CarriedForward) for what's really one class slot — confirmed live across 19
+            // batches. Fetched once for the window rather than queried per candidate day, same
+            // as the holiday lookup above.
+            var windowEndExclusive = windowEnd.ToDateTime(TimeOnly.MinValue).AddDays(1);
+            var batchSessions = batchId is null
+                ? new List<DateTime[]>()
+                : await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.BatchId == batchId
+                        && s.ScheduledStartAtUtc >= windowStart.ToDateTime(TimeOnly.MinValue)
+                        && s.ScheduledStartAtUtc < windowEndExclusive)
+                    .Select(s => new[] { s.ScheduledStartAtUtc, s.ScheduledEndAtUtc })
+                    .ToListAsync(cancellationToken);
+
             for (var i = 0; i < 14; i++)
             {
-                var candidate = candidateUtc.AddDays(i);
-                if (!holidayDates.Contains(DateOnly.FromDateTime(candidate)))
+                var candidateStart = candidateUtc.AddDays(i);
+                var candidateEnd = candidateStart.Add(duration);
+                if (holidayDates.Contains(DateOnly.FromDateTime(candidateStart)))
                 {
-                    return candidate;
+                    continue;
+                }
+
+                var collidesWithBatch = batchSessions.Any(s => s[0] < candidateEnd && s[1] > candidateStart);
+                if (!collidesWithBatch)
+                {
+                    return candidateStart;
                 }
             }
 
-            // 14 consecutive holidays isn't realistic — fall back rather than search forever.
+            // 14 consecutive holidays/batch collisions isn't realistic — fall back rather than
+            // search forever. The unique index on (batch_id, scheduled_start_at_utc) still
+            // prevents an actual duplicate row from being committed even in this fallback case.
             return candidateUtc;
         }
 
@@ -935,7 +981,23 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Create, nameof(ClassSession),
                 changesJson: $"{{\"batchId\":\"{batch.Id}\",\"generated\":{created}}}",
                 entityId: batch.Id.ToString(), cancellationToken: cancellationToken);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            try
+            {
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains(
+                "ix_class_sessions_batch_id_scheduled_start_at_utc", StringComparison.Ordinal) == true)
+            {
+                // Backstop for the hasSessions check above, which is check-then-insert with no
+                // locking: two near-simultaneous calls for the same batch can both see "no
+                // sessions yet" before either commits, so both build a full schedule. The unique
+                // index is what actually stops the second insert; this just turns that raw
+                // constraint violation into the same 409 the hasSessions check already gives a
+                // caller who retries a moment later, instead of an unhandled 500.
+                throw new DomainValidationException(
+                    "This batch already has scheduled sessions; reschedule or cancel them individually.");
+            }
 
             return await ListAsync(DateTime.MinValue, DateTime.MaxValue, null, batch.Id, cancellationToken);
         }
