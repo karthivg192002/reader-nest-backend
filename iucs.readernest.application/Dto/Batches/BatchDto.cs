@@ -35,5 +35,11 @@ namespace iucs.readernest.application.Dto.Batches
         public DateOnly? StartDate { get; set; }
 
         public DateOnly? EndDate { get; set; }
+
+        public BatchPaymentPlanType PaymentPlanType { get; set; }
+
+        public int? PaymentAfterSessionsCount { get; set; }
+
+        public DateOnly? PaymentDueDate { get; set; }
     }
 }
