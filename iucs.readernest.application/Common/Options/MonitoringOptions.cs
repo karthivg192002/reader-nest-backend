@@ -61,5 +61,29 @@ namespace iucs.readernest.application.Common.Options
 
         /// <summary>Never set this in appsettings.json — see the class-level remark. Empty means log fetching is unavailable for this server.</summary>
         public string SshPassword { get; set; } = string.Empty;
+
+        /// <summary>
+        /// True for a server that's expected to not exist most of the time (e.g. the Hetzner
+        /// burst-worker, created only for a scheduled capacity peak and deleted once idle again).
+        /// When true, "no Prometheus data" is reported as a calm standby state rather than the
+        /// alarming "server down" error used for the 3 always-on servers.
+        /// </summary>
+        public bool IsOnDemand { get; set; }
+
+        /// <summary>
+        /// When set, log fetching connects to this jump host first (using SshProxy* below) and
+        /// runs a nested `ssh ... docker logs` from there, instead of connecting to
+        /// <see cref="SshHost"/> directly. Needed for the burst-worker, whose only route is
+        /// through main's WireGuard tunnel (10.10.10.3) — main itself is never publicly
+        /// reachable from the App/API server any other way.
+        /// </summary>
+        public string SshProxyHost { get; set; } = string.Empty;
+
+        public int SshProxyPort { get; set; } = 22;
+
+        public string SshProxyUsername { get; set; } = string.Empty;
+
+        /// <summary>Never set this in appsettings.json — same rule as <see cref="SshPassword"/>.</summary>
+        public string SshProxyPassword { get; set; } = string.Empty;
     }
 }

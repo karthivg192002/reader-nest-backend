@@ -112,6 +112,21 @@ namespace iucs.readernest.application.Dto.Monitoring
         public string Hostname { get; set; } = string.Empty;
         public bool Reachable { get; set; }
         public string? Error { get; set; }
+        /// <summary>
+        /// True for a server that's expected to not exist most of the time (e.g. the Hetzner
+        /// burst-worker). The UI should render <see cref="Reachable"/> false + this true as a
+        /// calm "Standby" state, not the same alarming "unreachable" treatment as an always-on
+        /// server that's actually down.
+        /// </summary>
+        public bool IsOnDemand { get; set; }
+        /// <summary>
+        /// This server's configured container whitelist (see MonitoredServerOptions.Services),
+        /// always populated regardless of <see cref="Reachable"/> -- unlike <see cref="Services"/>
+        /// (live rn_service_active facts, empty when unreachable), log fetching only needs to
+        /// know which container NAMES are valid to ask for, which is static config, not live data.
+        /// Lets the log viewer stay usable for an on-demand server while it's in standby.
+        /// </summary>
+        public List<string> ConfiguredServices { get; set; } = new();
         public long UptimeSeconds { get; set; }
         public double LoadAverage1m { get; set; }
         public int CpuCores { get; set; }
