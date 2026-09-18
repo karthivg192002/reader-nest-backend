@@ -1,10 +1,9 @@
-using iucs.readernest.domain.Enums;
-
 namespace iucs.readernest.application.Dto.Users
 {
     public class PermissionDto
     {
-        public PermissionModule Module { get; set; }
+        /// <summary>A PermissionModuleDefinition.Key — built-in enum name or a custom module.</summary>
+        public string Module { get; set; } = null!;
 
         public bool CanView { get; set; }
 

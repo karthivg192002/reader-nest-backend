@@ -1,5 +1,4 @@
 using System.ComponentModel.DataAnnotations;
-using iucs.readernest.domain.Enums;
 
 namespace iucs.readernest.application.Dto.Navigation
 {
@@ -23,7 +22,7 @@ namespace iucs.readernest.application.Dto.Navigation
 
         public bool IsActive { get; set; }
 
-        public PermissionModule? RequiredModule { get; set; }
+        public string? RequiredModule { get; set; }
     }
 
     /// <remarks>Lengths mirror the MenuItem entity's columns — see SaveIntegrationRequest for why.</remarks>
@@ -54,6 +53,6 @@ namespace iucs.readernest.application.Dto.Navigation
 
         public bool IsActive { get; set; } = true;
 
-        public PermissionModule? RequiredModule { get; set; }
+        public string? RequiredModule { get; set; }
     }
 }

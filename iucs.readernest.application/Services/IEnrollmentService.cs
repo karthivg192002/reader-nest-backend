@@ -33,6 +33,19 @@ namespace iucs.readernest.application.Services
         Task UpdateChildNotesAsync(Guid childId, string? notes, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Soft-deletes a child (e.g. a mistaken or test enrolment). Refuses if the child has
+        /// any not-yet-settled invoice, since removing the child while one still references it
+        /// would strand real billing history rather than clean it up — cancel/settle it first.
+        /// An Active batch enrolment is refused the same way by default; pass
+        /// <paramref name="withdrawFromBatches"/> to withdraw every one of the child's Active
+        /// enrolments first (freeing each seat) and proceed with the delete in the same call —
+        /// there was previously no way to discover or clear the blocking enrolment(s) from the
+        /// student-delete flow itself, silently dead-ending an admin who'd finished a child's
+        /// course (0 classes remaining) but never separately visited that batch to withdraw them.
+        /// </summary>
+        Task RemoveChildAsync(Guid childId, bool withdrawFromBatches = false, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Row-by-row: each Child is created directly as active (an admin-operated bulk data
         /// path, so this deliberately skips the parent-submitted EnrollmentForm approval step —
         /// see UsersController.BulkImportStudents). Columns: ParentEmail (must match an existing

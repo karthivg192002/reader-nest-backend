@@ -13,6 +13,11 @@ namespace iucs.readernest.application.Dto.Users
         [MaxLength(100)]
         public string? LastName { get; set; }
 
+        /// <summary>Null/omitted means "leave unchanged". When provided, re-validated for uniqueness the same way CreateAsync does (so a mistyped email can be corrected without deleting and recreating the account).</summary>
+        [EmailAddress]
+        [MaxLength(256)]
+        public string? Email { get; set; }
+
         [MaxLength(20)]
         public string? Phone { get; set; }
 

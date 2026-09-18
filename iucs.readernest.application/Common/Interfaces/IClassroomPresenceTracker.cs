@@ -9,7 +9,7 @@ namespace iucs.readernest.application.Common.Interfaces
     /// </summary>
     public interface IClassroomPresenceTracker
     {
-        void UserJoined(string sessionId, string connectionId);
+        void UserJoined(string sessionId, string connectionId, Guid userId, string name, string role);
         void UserLeft(string sessionId, string connectionId);
 
         /// <summary>Total connections currently joined to any live class, platform-wide.</summary>
@@ -17,5 +17,11 @@ namespace iucs.readernest.application.Common.Interfaces
 
         /// <summary>Number of distinct sessions with at least one connected participant.</summary>
         int ActiveClassCount { get; }
+
+        /// <summary>Every currently-connected classroom participant, for an admin "who's live right now" view.</summary>
+        IReadOnlyList<LivePresenceEntry> GetLiveConnections();
     }
+
+    /// <summary>One connected participant. SessionId is the raw string ClassroomHub joins with (a ClassSession Guid as text).</summary>
+    public record LivePresenceEntry(string SessionId, Guid UserId, string Name, string Role, DateTime JoinedAtUtc);
 }

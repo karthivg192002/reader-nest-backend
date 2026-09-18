@@ -19,9 +19,9 @@ namespace iucs.readernest.api.Controllers
             _payoutService = payoutService;
         }
 
-        /// <summary>Visibility rule: admin (or granted sub-admin) sees all payouts.</summary>
+        /// <summary>Visibility rule: admin (or a sub-admin role granted the Payouts module) sees all payouts.</summary>
         [HttpGet]
-        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
+        [HasPermission(PermissionModule.Payouts, PermissionAction.View)]
         public async Task<ActionResult<IReadOnlyList<PayoutDto>>> List(
             [FromQuery] int? year,
             [FromQuery] int? month,
@@ -42,7 +42,7 @@ namespace iucs.readernest.api.Controllers
 
         /// <summary>Admin correction to one accrued line item -- the only way to act on a RequiresReview flag. Only while the payout is still Pending.</summary>
         [HttpPut("{id:guid}/items/{itemId:guid}")]
-        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
+        [HasPermission(PermissionModule.Payouts, PermissionAction.Edit)]
         public async Task<ActionResult<PayoutDto>> AdjustItem(
             Guid id,
             Guid itemId,
@@ -54,14 +54,14 @@ namespace iucs.readernest.api.Controllers
 
         /// <summary>Locks the month's total and emails the statement to the teacher.</summary>
         [HttpPost("{id:guid}/finalize")]
-        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
+        [HasPermission(PermissionModule.Payouts, PermissionAction.Approve)]
         public async Task<ActionResult<PayoutDto>> Finalize(Guid id, CancellationToken cancellationToken)
         {
             return Ok(await _payoutService.FinalizeAsync(id, cancellationToken));
         }
 
         [HttpPost("{id:guid}/mark-paid")]
-        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
+        [HasPermission(PermissionModule.Payouts, PermissionAction.Edit)]
         public async Task<ActionResult<PayoutDto>> MarkPaid(Guid id, CancellationToken cancellationToken)
         {
             return Ok(await _payoutService.MarkPaidAsync(id, cancellationToken));
@@ -80,7 +80,7 @@ namespace iucs.readernest.api.Controllers
         }
 
         [HttpGet]
-        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
+        [HasPermission(PermissionModule.Payouts, PermissionAction.View)]
         public async Task<ActionResult<IReadOnlyList<PayoutRateDto>>> List(
             [FromQuery] Guid? teacherProfileId,
             CancellationToken cancellationToken)
@@ -90,7 +90,7 @@ namespace iucs.readernest.api.Controllers
 
         /// <summary>Configurable per-session rate by teacher and class duration.</summary>
         [HttpPost]
-        [Authorize(Roles = nameof(UserRole.Admin))] // #6: payout/salary details are Super-Admin (Admin) only
+        [HasPermission(PermissionModule.Payouts, PermissionAction.Edit)]
         public async Task<ActionResult<PayoutRateDto>> SetRate(
             SavePayoutRateRequest request,
             CancellationToken cancellationToken)

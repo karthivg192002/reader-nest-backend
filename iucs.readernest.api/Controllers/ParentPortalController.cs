@@ -154,6 +154,16 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _parentPortal.GetRecordingsAsync(UserId(), sessionId, cancellationToken));
         }
 
+        /// <summary>Every non-expired recording across every one of the caller's children's
+        /// batches in one call — replaces having to fetch the schedule then call the
+        /// per-session endpoint above once for every completed session (the N+1 shape already
+        /// found and fixed on the admin and teacher Recordings pages).</summary>
+        [HttpGet("recordings")]
+        public async Task<ActionResult<IReadOnlyList<ParentRecordingDto>>> MyRecordings(CancellationToken cancellationToken)
+        {
+            return Ok(await _parentPortal.GetMyRecordingsAsync(UserId(), cancellationToken));
+        }
+
         /// <summary>Grant-checked worksheet download (books stay view-only).</summary>
         [HttpGet("resources/{id:guid}/download")]
         public async Task<IActionResult> DownloadResource(

@@ -14,9 +14,11 @@ namespace iucs.readernest.application
         {
             services.AddScoped<IMonitoringService, MonitoringService>();
             services.AddScoped<IServerLogService, ServerLogService>();
+            services.AddScoped<IServerControlService, ServerControlService>();
             services.AddSingleton<IClassroomPresenceTracker, ClassroomPresenceTracker>();
             services.AddSingleton<IPasswordHasher, BcryptPasswordHasher>();
             services.AddScoped<IAuditLogService, AuditLogService>();
+            services.AddScoped<IShortLinkService, ShortLinkService>();
             services.AddScoped<INotificationService, NotificationService>();
             services.AddScoped<IEmailTemplateService, EmailTemplateService>();
             services.AddScoped<IAuthService, AuthService>();
@@ -33,12 +35,16 @@ namespace iucs.readernest.application
             services.AddScoped<IProgressReportService, ProgressReportService>();
             services.AddScoped<IStoreService, StoreService>();
             services.AddScoped<IAcademicOpsService, AcademicOpsService>();
+            services.AddScoped<IClassSessionEventLogService, ClassSessionEventLogService>();
+            services.AddScoped<IClassSessionLogService, ClassSessionLogService>();
             services.AddScoped<IEnrollmentService, EnrollmentService>();
+            services.AddScoped<IUserDeletionService, UserDeletionService>();
             services.AddScoped<IParentPortalService, ParentPortalService>();
             services.AddScoped<IReportsService, ReportsService>();
             services.AddScoped<ISettingsService, SettingsService>();
             services.AddScoped<IMenuService, MenuService>();
             services.AddScoped<IRoleService, RoleService>();
+            services.AddScoped<IPermissionModuleService, PermissionModuleService>();
             services.AddScoped<IIntegrationService, IntegrationService>();
             services.AddScoped<IFloatingNoteService, FloatingNoteService>();
             services.AddScoped<IAccessRequestService, AccessRequestService>();

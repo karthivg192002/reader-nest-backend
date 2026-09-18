@@ -36,6 +36,7 @@ namespace iucs.readernest.domain.Data
         public DbSet<SubAdminPermission> SubAdminPermissions => Set<SubAdminPermission>();
         public DbSet<RoleDefinition> RoleDefinitions => Set<RoleDefinition>();
         public DbSet<RolePermission> RolePermissions => Set<RolePermission>();
+        public DbSet<PermissionModuleDefinition> PermissionModuleDefinitions => Set<PermissionModuleDefinition>();
         public DbSet<PinResetToken> PinResetTokens => Set<PinResetToken>();
         public DbSet<AccessRequest> AccessRequests => Set<AccessRequest>();
 
@@ -48,13 +49,18 @@ namespace iucs.readernest.domain.Data
         public DbSet<EnrollmentForm> EnrollmentForms => Set<EnrollmentForm>();
         public DbSet<Holiday> Holidays => Set<Holiday>();
         public DbSet<LeaveRequest> LeaveRequests => Set<LeaveRequest>();
+        public DbSet<LeaveRequestSession> LeaveRequestSessions => Set<LeaveRequestSession>();
+        public DbSet<LeaveAllowance> LeaveAllowances => Set<LeaveAllowance>();
 
         // Sessions
         public DbSet<ClassSession> ClassSessions => Set<ClassSession>();
         public DbSet<SessionAttendance> SessionAttendances => Set<SessionAttendance>();
         public DbSet<SessionRecording> SessionRecordings => Set<SessionRecording>();
+
+        public DbSet<SessionPresentation> SessionPresentations => Set<SessionPresentation>();
         public DbSet<EngagementEvent> EngagementEvents => Set<EngagementEvent>();
         public DbSet<StudentAward> StudentAwards => Set<StudentAward>();
+        public DbSet<ClassSessionEventLog> ClassSessionEventLogs => Set<ClassSessionEventLog>();
 
         // Quizzes
         public DbSet<QuizQuestion> QuizQuestions => Set<QuizQuestion>();
@@ -91,9 +97,13 @@ namespace iucs.readernest.domain.Data
 
         // Communication & auditing
         public DbSet<Notification> Notifications => Set<Notification>();
+        public DbSet<BulkEmailBlast> BulkEmailBlasts => Set<BulkEmailBlast>();
+        public DbSet<BulkEmailRecipient> BulkEmailRecipients => Set<BulkEmailRecipient>();
+        public DbSet<BulkEmailReply> BulkEmailReplies => Set<BulkEmailReply>();
         public DbSet<EmailTemplate> EmailTemplates => Set<EmailTemplate>();
         public DbSet<ProgressReport> ProgressReports => Set<ProgressReport>();
         public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
+        public DbSet<DataDeletionLog> DataDeletionLogs => Set<DataDeletionLog>();
 
         // "Ask a Doubt" chatbot
         public DbSet<ChatFaq> ChatFaqs => Set<ChatFaq>();
@@ -107,6 +117,7 @@ namespace iucs.readernest.domain.Data
         public DbSet<AppSetting> AppSettings => Set<AppSetting>();
         public DbSet<MenuItem> MenuItems => Set<MenuItem>();
         public DbSet<Integration> Integrations => Set<Integration>();
+        public DbSet<ShortLink> ShortLinks => Set<ShortLink>();
 
         protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
         {

@@ -28,22 +28,47 @@ namespace iucs.readernest.api.Hubs
         // participant from calling SendBoard directly (visible and callable from the browser's
         // own dev tools) regardless of whether they'd actually been granted access.
         private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> BoardAccessGrants = new();
+        // Every board op sent so far this session, replayed (in order) to a connection that
+        // joins after some were already drawn. SendBoard only ever relayed live to whoever was
+        // ALREADY connected — a student who joined the call after the teacher started drawing
+        // saw a blank board for the rest of the class, while a student who joined earlier kept
+        // seeing everything correctly. Confirmed live: two students in the same class, one
+        // could see the whiteboard and the other couldn't. Each list is mutated under its own
+        // lock — ConcurrentDictionary makes GetOrAdd/TryRemove on the outer map safe, but a
+        // plain List<T> itself isn't safe against two students' SendBoard calls landing at once.
+        private static readonly ConcurrentDictionary<string, List<string>> BoardHistory = new();
+        // Current 0-based page of whatever PDF deck the teacher uploaded and is presenting live
+        // (the "like Google Meet" present-a-deck flow) — not the deck file itself (that's the
+        // REST-uploaded SessionPresentation, fetched once by URL), just where the teacher's own
+        // Next/Previous clicks have gotten to, so JoinSession can land a mid-class joiner on the
+        // right slide instead of always page 0.
+        private static readonly ConcurrentDictionary<string, int> CurrentSlide = new();
+
+        // Whichever participant the teacher currently has spotlighted/pinned in their own
+        // Jitsi view (null = nobody pinned) — see SetPinned's own doc comment for why this
+        // needs to exist at all. Persisted the same way CurrentSlide is, so a student who
+        // joins mid-class (or reconnects) lands with the teacher's view already applied
+        // instead of only picking it up on the next pin change.
+        private static readonly ConcurrentDictionary<string, string?> PinnedParticipant = new();
 
         private readonly ISessionService _sessionService;
         private readonly IGamificationService _gamificationService;
         private readonly IAcademicOpsService _academicOpsService;
         private readonly IClassroomPresenceTracker _presenceTracker;
+        private readonly IClassSessionEventLogService _eventLog;
 
         public ClassroomHub(
             ISessionService sessionService,
             IGamificationService gamificationService,
             IAcademicOpsService academicOpsService,
-            IClassroomPresenceTracker presenceTracker)
+            IClassroomPresenceTracker presenceTracker,
+            IClassSessionEventLogService eventLog)
         {
             _sessionService = sessionService;
             _gamificationService = gamificationService;
             _academicOpsService = academicOpsService;
             _presenceTracker = presenceTracker;
+            _eventLog = eventLog;
         }
 
         public record ParticipantState(string Name, string Role, bool HandRaised);
@@ -94,31 +119,99 @@ namespace iucs.readernest.api.Hubs
                 throw new HubException("Invalid session id.");
             }
 
-            var userIdClaim = Context.User?.FindFirstValue(ClaimTypes.NameIdentifier);
-            if (!Guid.TryParse(userIdClaim, out var userId))
+            // Jibri's headless "recording observer" page (see docs/JITSI_ARCHITECTURE.md) has no
+            // real logged-in user, so it can't pass IsSessionParticipantAsync -- it authenticates
+            // instead with a CreateRecordingObserverHubToken carrying a "purpose" +
+            // "sessionId" claim, checked here in place of (never in addition to) the normal
+            // userId/participant check. The token's own sessionId claim, not just its mere
+            // presence, must match the room being joined -- otherwise one observer token could
+            // be replayed to silently watch a different class's whiteboard/quiz traffic.
+            var isRecordingObserver = Context.User?.FindFirstValue("purpose") == "recording-observer";
+            // A Guest Link caretaker (see CreateGuestClassroomHubToken / SessionService.
+            // GetGuestJoinAsync) is the same shape of "no real logged-in user" as the recording
+            // observer above -- same sessionId-scope check, same bypass of IsSessionParticipantAsync
+            // -- but joins as an ordinary participant (roster, whiteboard, quiz) rather than a
+            // silent one, so it needs its own name/role handling below rather than reusing
+            // isRecordingObserver's.
+            var isGuest = Context.User?.FindFirstValue("purpose") == "guest-classroom";
+            Guid userId;
+            // A Personal Meeting Room has no ClassSession row at all -- the frontend hands this
+            // hub the owner's own account id as the "sessionId" (PersonalMeetingRoom.tsx), so a
+            // real logged-in user joining a room keyed by their OWN id is, by construction,
+            // always that room's owner: there's nothing to look up in IsSessionParticipantAsync
+            // (there's no session to be "a participant of"), and no reschedule-remap concept
+            // applies to a room that's permanent by design. Set after the isRecordingObserver/
+            // isGuest branch below resolves userId, since a guest joining someone ELSE's
+            // personal room must never take this path.
+            var isPersonalRoomOwner = false;
+            if (isRecordingObserver || isGuest)
             {
-                throw new HubException("Not signed in.");
+                var tokenSessionId = Context.User?.FindFirstValue("sessionId");
+                if (tokenSessionId != sessionId)
+                {
+                    throw new HubException("Token is not scoped to this session.");
+                }
+                userId = Guid.Parse(Context.User!.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            }
+            else
+            {
+                var userIdClaim = Context.User?.FindFirstValue(ClaimTypes.NameIdentifier);
+                if (!Guid.TryParse(userIdClaim, out userId))
+                {
+                    throw new HubException("Not signed in.");
+                }
+
+                isPersonalRoomOwner = sessionGuid == userId;
+                if (!isPersonalRoomOwner)
+                {
+                    // See ISessionService.ResolveCurrentSessionIdAsync's own doc comment: a
+                    // connection arriving with a pre-edit session id (e.g. a portal tab that was
+                    // already open when an admin edited/rescheduled the class, never reloaded)
+                    // is transparently redirected to whatever the class turned into, so it lands
+                    // in the very same ClassroomHub group a fresh caller resolving the same class
+                    // right now would — rather than either getting refused outright (once a stale
+                    // id's own DemoBooking link has moved on, as RescheduleAsync now keeps it doing)
+                    // or, worse, being silently authorized and grouped apart from everyone who
+                    // already has the current id (a Regular/batch session's own BatchEnrollment
+                    // check still passes against a stale-but-same-batch id either way).
+                    sessionGuid = await _sessionService.ResolveCurrentSessionIdAsync(sessionGuid, Context.ConnectionAborted);
+                    sessionId = sessionGuid.ToString();
+
+                    if (!await _sessionService.IsSessionParticipantAsync(sessionGuid, userId, Context.ConnectionAborted))
+                    {
+                        await _eventLog.LogJoinDeniedAsync(sessionGuid, userId, "Not a participant of this session.", CancellationToken.None);
+                        throw new HubException("You do not have access to this session.");
+                    }
+                }
             }
 
-            if (!await _sessionService.IsSessionParticipantAsync(sessionGuid, userId, Context.ConnectionAborted))
-            {
-                throw new HubException("You do not have access to this session.");
-            }
-
-            var name = string.IsNullOrWhiteSpace(displayName) ? UserName : displayName.Trim();
-            var role = IsTeacher ? "teacher" : "student";
+            var name = isRecordingObserver ? "Recording" : (string.IsNullOrWhiteSpace(displayName) ? UserName : displayName.Trim());
+            // isGuest deliberately falls into the same "student" branch a real logged-in student
+            // would -- the whole point of the Guest Link's interactive join is that it behaves
+            // like an ordinary student, not a special observer-style role (IsTeacher reads
+            // Context.User's role claim, which a guest's synthetic token never carries, so this
+            // would already evaluate to "student" even without isGuest called out explicitly --
+            // spelled out anyway so this reads as an intentional choice, not a coincidence).
+            // isPersonalRoomOwner always reads as "teacher" here regardless of the account's own
+            // role (Parent/Teacher/Admin can all have a personal room) -- you're always the host
+            // of your own room, and the whiteboard-grant/quiz-launch/star-award controls below
+            // are gated on this role, not on the account's real UserRole.
+            var role = isRecordingObserver ? "observer" : (isPersonalRoomOwner || IsTeacher ? "teacher" : "student");
 
             // A room that goes fully empty (everyone disconnects, even momentarily) has its
             // in-memory Scores wiped in RemoveFromSessionAsync below — reseed from the durable
             // leaderboard on the FIRST join of a fresh room so a rejoin never shows the class's
             // already-earned stars resetting to zero (StudentAward rows are untouched either way;
-            // only this ephemeral cache was ever at risk of looking wrong).
+            // only this ephemeral cache was ever at risk of looking wrong). Skipped for a personal
+            // room -- sessionGuid there is the owner's own account id, never a real ClassSession,
+            // so GetLeaderboardAsync could only ever come back empty; skipping avoids a pointless
+            // DB round-trip on every personal-room join.
             var isNewRoom = !Rooms.ContainsKey(sessionId);
             var room = Rooms.GetOrAdd(sessionId, _ => new ConcurrentDictionary<string, ParticipantState>());
             room[Context.ConnectionId] = new ParticipantState(name, role, HandRaised: false);
             Context.Items["sessionId"] = sessionId;
 
-            if (isNewRoom)
+            if (isNewRoom && !isPersonalRoomOwner)
             {
                 var persisted = await _gamificationService.GetLeaderboardAsync(sessionGuid, top: 50, Context.ConnectionAborted);
                 if (persisted.Count > 0)
@@ -132,26 +225,80 @@ namespace iucs.readernest.api.Hubs
             }
 
             await Groups.AddToGroupAsync(Context.ConnectionId, Group(sessionId));
-            _presenceTracker.UserJoined(sessionId, Context.ConnectionId);
+            _presenceTracker.UserJoined(sessionId, Context.ConnectionId, userId, name, role);
             await BroadcastRosterAsync(sessionId);
             await SendLeaderboardAsync(sessionId);
+
+            // Catch this connection up on whatever's already been drawn — see BoardHistory's
+            // own doc comment. Sent one op at a time through the same "Board" event a live op
+            // arrives on (SignalR preserves per-connection delivery order), so the client-side
+            // handler that already knows how to apply a Board op needs no separate code path
+            // for a replayed one.
+            if (BoardHistory.TryGetValue(sessionId, out var boardHistory))
+            {
+                string[] snapshot;
+                lock (boardHistory)
+                {
+                    snapshot = boardHistory.ToArray();
+                }
+                foreach (var op in snapshot)
+                {
+                    await Clients.Caller.SendAsync("Board", op);
+                }
+            }
+
+            // Same idea as the whiteboard replay above, for whichever slide the teacher's
+            // already on — a mid-class joiner should see the current slide, not page 0.
+            if (CurrentSlide.TryGetValue(sessionId, out var pageIndex))
+            {
+                await Clients.Caller.SendAsync("Slide", pageIndex);
+            }
+
+            // Same idea again for whoever the teacher currently has pinned/spotlighted — a
+            // student who joins after the teacher already pinned themselves (or anyone else)
+            // should land on that same view, not the room's default tile layout with no pin.
+            if (PinnedParticipant.TryGetValue(sessionId, out var pinnedId))
+            {
+                await Clients.Caller.SendAsync("Pinned", pinnedId);
+            }
 
             // PDF's "System Marks Attendance" — join-based capture, fired now that the caller
             // is confirmed to genuinely belong to this session. Best-effort by design (see the
             // method's own doc comment); never allowed to affect the join that already succeeded.
-            await _academicOpsService.CaptureJoinAttendanceAsync(sessionGuid, userId, Context.ConnectionAborted);
+            // Skipped for the recording observer -- its userId is a throwaway synthetic id with
+            // no real attendance to record. Also skipped for a guest: a student-bound Guest Link
+            // already had its attendance captured once, by SessionsController.GuestJoin calling
+            // CaptureGuestJoinAttendanceAsync directly BEFORE the caretaker's browser ever opens
+            // this hub connection -- CaptureJoinAttendanceAsync here would be a no-op anyway
+            // (userId is this guest's own throwaway synthetic id, not a real Parent/Teacher
+            // account it could resolve attendance against), so skipping it outright avoids a
+            // pointless DB lookup on every guest join, not just a correctness fix. Also skipped
+            // for a personal room owner -- sessionGuid there is an account id, not a ClassSession,
+            // so there's no attendance row to capture at all.
+            if (!isRecordingObserver && !isGuest && !isPersonalRoomOwner)
+            {
+                await _academicOpsService.CaptureJoinAttendanceAsync(sessionGuid, userId, Context.ConnectionAborted);
+            }
         }
 
         public async Task LeaveSession(string sessionId)
         {
-            await RemoveFromSessionAsync(sessionId);
+            // Every deliberate exit — "End the class", "Just leave for now", or a plain
+            // Leave — invokes this before the connection actually stops (see
+            // ClassroomHubClient.disconnect() in lib/classroomHub.ts), so a call landing
+            // here reliably means the participant chose to leave. OnDisconnectedAsync
+            // firing WITHOUT this flag having been set first is what actually means an
+            // abrupt drop (network loss, browser crash/close).
+            await RemoveFromSessionAsync(sessionId, wasExplicit: true);
         }
 
         public override async Task OnDisconnectedAsync(Exception? exception)
         {
             if (Context.Items.TryGetValue("sessionId", out var value) && value is string sessionId)
             {
-                await RemoveFromSessionAsync(sessionId);
+                // Already removed (and logged) by an explicit LeaveSession moments earlier —
+                // Rooms.TryGetValue below will simply find nothing for this connection id.
+                await RemoveFromSessionAsync(sessionId, wasExplicit: false);
             }
 
             await base.OnDisconnectedAsync(exception);
@@ -176,7 +323,73 @@ namespace iucs.readernest.api.Hubs
                 return;
             }
 
+            var history = BoardHistory.GetOrAdd(sessionId, _ => new List<string>());
+            lock (history)
+            {
+                history.Add(opJson);
+            }
+
             await Clients.OthersInGroup(Group(sessionId)).SendAsync("Board", opJson);
+        }
+
+        // ---- live annotation overlay (marking on top of the screen share) ----
+
+        /// <summary>Relays one annotation stroke/clear op drawn over the video stage, live only —
+        /// teacher-only (unlike the whiteboard, no student-grant path) and deliberately not kept
+        /// in any history: it's meant for pointing things out while a child reads on a shared
+        /// screen, not a durable record, so a student joining mid-class simply sees nothing until
+        /// the teacher draws again.</summary>
+        public async Task SendAnnotation(string sessionId, string opJson)
+        {
+            if (!IsTeacherInRoom(sessionId))
+            {
+                return;
+            }
+
+            await Clients.OthersInGroup(Group(sessionId)).SendAsync("Annotation", opJson);
+        }
+
+        // ---- live presentation (present a deck, like Google Meet) ----
+
+        /// <summary>Teacher-only: broadcasts a Next/Previous slide change to the rest of the class
+        /// and remembers it so a student who joins afterward lands on the right page — see
+        /// CurrentSlide's own doc comment. The deck itself isn't sent here at all; every viewer
+        /// already fetched the same PDF by URL once and renders locally.</summary>
+        public async Task SendSlide(string sessionId, int pageIndex)
+        {
+            if (!IsTeacherInRoom(sessionId) || pageIndex < 0)
+            {
+                return;
+            }
+
+            CurrentSlide[sessionId] = pageIndex;
+            await Clients.OthersInGroup(Group(sessionId)).SendAsync("Slide", pageIndex);
+        }
+
+        // ---- pin / spotlight sync ----
+
+        /// <summary>
+        /// Teacher-only: broadcasts whichever participant the teacher just pinned in their own
+        /// Jitsi view (or null when they unpin) so every student's view follows along. Jitsi's
+        /// native pin is purely local to whichever browser clicked it — a teacher pinning
+        /// herself while screen-sharing showed "Pinned" on her own screen only, with students
+        /// still seeing her in the small tile, since nothing relayed that choice to anyone
+        /// else. `participantId` is the Jitsi endpoint id (the same id `videoConferenceJoined`
+        /// hands the pinning participant for themselves), which is the same id every other
+        /// participant in the room already knows them by, so the student side can hand it
+        /// straight to its own `pinParticipant` command with no lookup needed. A student
+        /// pinning someone locally for their own view is left alone — only the teacher's own
+        /// pin choice is ever synced, since that's the one everyone is meant to follow.
+        /// </summary>
+        public async Task SetPinned(string sessionId, string? participantId)
+        {
+            if (!IsTeacherInRoom(sessionId))
+            {
+                return;
+            }
+
+            PinnedParticipant[sessionId] = participantId;
+            await Clients.OthersInGroup(Group(sessionId)).SendAsync("Pinned", participantId);
         }
 
         // ---- chat (interactive panel) ----
@@ -343,7 +556,7 @@ namespace iucs.readernest.api.Hubs
 
         // ---- helpers ----
 
-        private async Task RemoveFromSessionAsync(string sessionId)
+        private async Task RemoveFromSessionAsync(string sessionId, bool wasExplicit)
         {
             _presenceTracker.UserLeft(sessionId, Context.ConnectionId);
 
@@ -355,19 +568,36 @@ namespace iucs.readernest.api.Hubs
                     grants.TryRemove(Context.ConnectionId, out _);
                 }
 
-                // Real departure time, for payout accuracy (see CaptureLeaveAttendanceAsync's own
-                // doc comment) — without this, nothing ever recorded when a teacher actually left
-                // a live class, so one who taught the whole thing and one who left after a few
-                // minutes were indistinguishable. Only worth the lookup for the departing
-                // participant's own role, not every student/parent leaving too.
-                if (removedState?.Role == "teacher"
+                // removedState is null on the SECOND call for the same connection (an explicit
+                // LeaveSession already removed it from Rooms moments earlier; the connection then
+                // formally closing fires OnDisconnectedAsync too) — nothing left to attribute a
+                // departure to, so both the attendance capture and the event log below are
+                // naturally skipped rather than double-logging one exit as two. Also excludes the
+                // recording observer (see JoinSession) -- its userId is a throwaway synthetic id
+                // with no real attendance or leave event to record.
+                if (removedState is not null
+                    && removedState.Role != "observer"
                     && Guid.TryParse(sessionId, out var sessionGuid)
                     && Guid.TryParse(Context.User?.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
                 {
-                    // CancellationToken.None, deliberately: this is exactly the abrupt-disconnect
-                    // (network drop) case that matters most to capture, and Context.ConnectionAborted
+                    // Real departure time, for payout accuracy (see CaptureLeaveAttendanceAsync's
+                    // own doc comment) — teacher-only, since that's the side payout accuracy
+                    // depends on. CancellationToken.None, deliberately: this covers the
+                    // abrupt-disconnect (network drop) case too, and Context.ConnectionAborted
                     // may already be signalled by the time OnDisconnectedAsync runs.
-                    await _academicOpsService.CaptureLeaveAttendanceAsync(sessionGuid, userId, CancellationToken.None);
+                    if (removedState.Role == "teacher")
+                    {
+                        await _academicOpsService.CaptureLeaveAttendanceAsync(sessionGuid, userId, CancellationToken.None);
+                    }
+
+                    // Durable event-log row for BOTH roles — see IClassSessionEventLogService.
+                    // Best-effort; never allowed to affect the leave itself.
+                    var participantType = removedState.Role == "teacher" ? ParticipantType.Teacher : ParticipantType.Student;
+                    await _eventLog.LogLeaveAsync(
+                        sessionGuid, participantType,
+                        teacherProfileId: null, childId: null, userId: userId,
+                        participantName: removedState.Name, wasExplicit: wasExplicit,
+                        cancellationToken: CancellationToken.None);
                 }
 
                 if (room.IsEmpty)
@@ -375,6 +605,9 @@ namespace iucs.readernest.api.Hubs
                     Rooms.TryRemove(sessionId, out _);
                     Scores.TryRemove(sessionId, out _); // class over — scoreboard resets
                     BoardAccessGrants.TryRemove(sessionId, out _);
+                    BoardHistory.TryRemove(sessionId, out _);
+                    CurrentSlide.TryRemove(sessionId, out _);
+                    PinnedParticipant.TryRemove(sessionId, out _);
                     foreach (var key in AnsweredQuestions.Keys.Where(k => k.StartsWith($"{sessionId}:", StringComparison.Ordinal)))
                     {
                         AnsweredQuestions.TryRemove(key, out _);
@@ -408,7 +641,11 @@ namespace iucs.readernest.api.Hubs
                 return;
             }
 
+            // Jibri's own "observer" connection (see JoinSession) never appears in the roster
+            // real participants see -- it's a robot, not a classmate, and the frontend's roster
+            // types/UI have no concept of a third role to render it correctly anyway.
             var roster = room
+                .Where(kv => kv.Value.Role != "observer")
                 .Select(kv => new { connectionId = kv.Key, name = kv.Value.Name, role = kv.Value.Role, handRaised = kv.Value.HandRaised })
                 .OrderByDescending(p => p.role == "teacher")
                 .ThenBy(p => p.name)

@@ -14,10 +14,52 @@ namespace iucs.readernest.application.Dto.Portal
 
         public int ClassesRemaining { get; set; }
 
-        public double AttendancePercent { get; set; }
+        /// <summary>Null when this child has no attendance-marked sessions yet -- distinct from
+        /// a real 0%. Render as "no data yet", not as a default percentage.</summary>
+        public double? AttendancePercent { get; set; }
 
-        /// <summary>paid | due | overdue | suspended</summary>
+        /// <summary>paid | due | overdue | suspended -- genuinely this child's own status; a
+        /// sibling's unrelated overdue invoice never marks another child suspended.</summary>
         public string FeeStatus { get; set; } = "paid";
+
+        /// <summary>True when this specific child's access is blocked (their own suspension,
+        /// or an account-wide one) -- see FeeSuspension's doc comment on the two scopes.</summary>
+        public bool IsSuspended { get; set; }
+
+        /// <summary>The invoice that must be paid to unlock this child specifically. Null when
+        /// not suspended, or when blocked only by an account-wide suspension with no single
+        /// invoice to point at (see ParentDashboardDto.SuspendedInvoiceId for that case).</summary>
+        public Guid? SuspendedInvoiceId { get; set; }
+    }
+
+    /// <summary>
+    /// One recording watchable by the signed-in parent, across every one of their children's
+    /// batches in a single call -- parent/Recordings.tsx used to fetch the parent's whole
+    /// schedule then call GET /api/parent-portal/sessions/{id}/recordings once per completed
+    /// session, the identical N+1 shape already found and fixed on the admin and teacher
+    /// Recordings pages (see RecordingListItemDto). ChildIds carries every one of this parent's
+    /// own children placed in the recording's batch, so the page can still filter to whichever
+    /// child is currently selected without a second round trip per session.
+    /// </summary>
+    public class ParentRecordingDto
+    {
+        public Guid Id { get; set; }
+
+        public Guid ClassSessionId { get; set; }
+
+        public string StorageUrl { get; set; } = null!;
+
+        public int? DurationSeconds { get; set; }
+
+        public DateTime? ExpiresAtUtc { get; set; }
+
+        public DateTime CreatedAtUtc { get; set; }
+
+        public string? BatchName { get; set; }
+
+        public DateTime ScheduledStartAtUtc { get; set; }
+
+        public IReadOnlyList<Guid> ChildIds { get; set; } = [];
     }
 
     public class ParentDashboardDto
@@ -26,9 +68,21 @@ namespace iucs.readernest.application.Dto.Portal
 
         public bool EnrollmentFormCompleted { get; set; }
 
-        /// <summary>Active fee suspension blocks session/content access and triggers the Pay Now popup.</summary>
+        /// <summary>True when at least one child is suspended -- see each child's own
+        /// IsSuspended for which. Kept for callers that only need "is anything blocked".</summary>
         public bool IsSuspended { get; set; }
 
+        /// <summary>True only when EVERY child on the account is currently suspended -- nothing
+        /// on the account is reachable, so the whole portal can be replaced with a single block
+        /// screen instead of a per-child one. False whenever at least one child still has full
+        /// access, even if others don't.</summary>
+        public bool AllChildrenSuspended { get; set; }
+
+        /// <summary>The invoice to pay to fully unblock the account when AllChildrenSuspended is
+        /// true and every affected child shares one common family-level (ChildId-null) invoice.
+        /// Null otherwise -- with multiple children, resolve each one's own
+        /// ParentChildSummaryDto.SuspendedInvoiceId instead of assuming a single invoice fixes
+        /// everything.</summary>
         public Guid? SuspendedInvoiceId { get; set; }
 
         public IReadOnlyList<ParentChildSummaryDto> Children { get; set; } = [];
@@ -152,7 +206,12 @@ namespace iucs.readernest.application.Dto.Reports
 
         public int UpcomingSessions { get; set; }
 
-        public double StudentAttendancePercent { get; set; }
+        /// <summary>Null when the teacher has no completed, attendance-marked sessions yet —
+        /// distinct from a real 0%. A vacuous "100" here used to make an idle teacher with zero
+        /// sessions delivered look fully utilized on the Management "Teacher Utilization" chart,
+        /// which reads this field as delivery-vs-capacity. Consumers should render null as
+        /// "No data" rather than defaulting it to any percentage.</summary>
+        public double? StudentAttendancePercent { get; set; }
 
         public int SummariesWritten { get; set; }
 
@@ -183,7 +242,9 @@ namespace iucs.readernest.application.Dto.Reports
 
         public string ChildName { get; set; } = null!;
 
-        public double AttendancePercent { get; set; }
+        /// <summary>Null when this child has no attendance-marked sessions yet -- distinct
+        /// from a real 0%.</summary>
+        public double? AttendancePercent { get; set; }
 
         public int SessionsAttended { get; set; }
 
@@ -224,5 +285,107 @@ namespace iucs.readernest.application.Dto.Reports
     public class BulkEmailResultDto
     {
         public int RecipientCount { get; set; }
+    }
+
+    /// <summary>One past Bulk Email send, for the admin History list.</summary>
+    public class BulkEmailHistoryItemDto
+    {
+        public Guid Id { get; set; }
+
+        public string Subject { get; set; } = null!;
+
+        public string SentByName { get; set; } = null!;
+
+        public BulkEmailScope Scope { get; set; }
+
+        public string? BatchName { get; set; }
+
+        public DateTime SentAtUtc { get; set; }
+
+        public int TotalRecipients { get; set; }
+
+        public int SuccessCount { get; set; }
+
+        public int FailureCount { get; set; }
+    }
+
+    /// <summary>
+    /// One individual email actually sent to one user -- reminders, booking confirmations,
+    /// payment notices and every other system email, but never a Bulk Email's own per-recipient
+    /// copy (that's what BulkEmailHistoryItemDto/BulkEmailBlastDetailDto already cover, grouped
+    /// by the send event rather than one row per recipient). Backs "Bulk Email History"'s
+    /// non-default filter view: "every other email sent to users," itself filterable by type.
+    /// </summary>
+    public class EmailHistoryItemDto
+    {
+        public Guid Id { get; set; }
+
+        public string RecipientName { get; set; } = null!;
+
+        public string RecipientEmail { get; set; } = null!;
+
+        public string? Subject { get; set; }
+
+        public NotificationType Type { get; set; }
+
+        /// <summary>The template this was rendered from (e.g. "session-reminder-parent"), null
+        /// for a hand-built email -- more specific than Type, which several unrelated templates
+        /// can share (see Notification's own doc comment).</summary>
+        public string? TemplateKey { get; set; }
+
+        public NotificationStatus Status { get; set; }
+
+        /// <summary>Null when delivery never completed (Failed, or still Pending) -- CreatedAtUtc
+        /// is what this list sorts and displays by in that case.</summary>
+        public DateTime? SentAtUtc { get; set; }
+
+        public DateTime CreatedAtUtc { get; set; }
+    }
+
+    /// <summary>One blast's full recipient list with delivery status and any reply, for the
+    /// admin History detail view.</summary>
+    public class BulkEmailBlastDetailDto
+    {
+        public Guid Id { get; set; }
+
+        public string Subject { get; set; } = null!;
+
+        public string Body { get; set; } = null!;
+
+        public string SentByName { get; set; } = null!;
+
+        public BulkEmailScope Scope { get; set; }
+
+        public string? BatchName { get; set; }
+
+        public DateTime SentAtUtc { get; set; }
+
+        public IReadOnlyList<BulkEmailRecipientDto> Recipients { get; set; } = [];
+    }
+
+    public class BulkEmailRecipientDto
+    {
+        public Guid Id { get; set; }
+
+        public string RecipientName { get; set; } = null!;
+
+        public string Email { get; set; } = null!;
+
+        public NotificationStatus Status { get; set; }
+
+        public string? ErrorMessage { get; set; }
+
+        public DateTime? SentAtUtc { get; set; }
+
+        public string? ReplyMessage { get; set; }
+
+        public DateTime? ReplyAtUtc { get; set; }
+    }
+
+    public class ReplyToBulkEmailRequest
+    {
+        [System.ComponentModel.DataAnnotations.Required]
+        [System.ComponentModel.DataAnnotations.MaxLength(4000)]
+        public string Message { get; set; } = null!;
     }
 }

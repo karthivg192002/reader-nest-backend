@@ -70,6 +70,17 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _academicOps.ListLeaveForTeacherUserAsync(userId, cancellationToken));
         }
 
+        /// <summary>The signed-in teacher's own remaining class-wise-cancellation quota for
+        /// the current calendar month — shown on the leave-application screen before she picks
+        /// classes to cancel.</summary>
+        [HttpGet("mine/allowance")]
+        [Authorize(Roles = nameof(UserRole.Teacher))]
+        public async Task<ActionResult<LeaveAllowanceStatusDto>> MyAllowance(CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _academicOps.GetMyLeaveAllowanceStatusAsync(userId, cancellationToken));
+        }
+
         /// <summary>Teacher withdraws their own leave request while it's still Pending.</summary>
         [HttpDelete("{id:guid}")]
         [Authorize(Roles = nameof(UserRole.Teacher))]
@@ -98,6 +109,40 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             return Ok(await _academicOps.ReviewLeaveAsync(id, request, cancellationToken));
+        }
+    }
+
+    /// <summary>
+    /// Admin-configured monthly class-wise-cancellation allowance (WBS Round 2 feedback #23:
+    /// "teachers have a certain number of session cancellations allowed based on their total
+    /// monthly sessions" — set per-teacher, or a centre-wide default, same shape as the
+    /// Payroll rate cards). Reading the list is available to anyone who can review leave
+    /// (so an RM approving a request can see the teacher's quota); setting it is Admin-only,
+    /// same policy-level restriction Payroll rate cards already have.
+    /// </summary>
+    [ApiController]
+    [Route("api/leave-allowances")]
+    public class LeaveAllowancesController : ControllerBase
+    {
+        private readonly IAcademicOpsService _academicOps;
+
+        public LeaveAllowancesController(IAcademicOpsService academicOps)
+        {
+            _academicOps = academicOps;
+        }
+
+        [HttpGet]
+        [HasPermission(PermissionModule.LeaveManagement, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<LeaveAllowanceDto>>> List(CancellationToken cancellationToken)
+        {
+            return Ok(await _academicOps.ListLeaveAllowancesAsync(cancellationToken));
+        }
+
+        [HttpPost]
+        [Authorize(Roles = nameof(UserRole.Admin))]
+        public async Task<ActionResult<LeaveAllowanceDto>> Set(SaveLeaveAllowanceRequest request, CancellationToken cancellationToken)
+        {
+            return Ok(await _academicOps.SetLeaveAllowanceAsync(request, cancellationToken));
         }
     }
 }

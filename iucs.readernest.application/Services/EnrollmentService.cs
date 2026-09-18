@@ -395,11 +395,23 @@ namespace iucs.readernest.application.Services
                 .GroupBy(e => e.ChildId)
                 .ToDictionary(g => g.Key, g => g.First().Batch.Course.Name);
 
+            // Paid total per child — surfaced so the delete/withdraw flow can warn admin/
+            // coordinator staff that money was actually collected before they remove the record.
+            // Only Paid invoices count: Pending/PartiallyPaid/Overdue already block deletion
+            // outright in RemoveChildAsync, so by the time this total is shown, only Paid (and
+            // Cancelled, which collected nothing) invoices can exist for a deletable child.
+            var paidTotalByChild = await _unitOfWork.Repository<Invoice>().Query()
+                .Where(i => i.ChildId != null && childIds.Contains(i.ChildId.Value) && i.Status == InvoiceStatus.Paid)
+                .GroupBy(i => i.ChildId!.Value)
+                .Select(g => new { ChildId = g.Key, Total = g.Sum(i => i.AmountPaid) })
+                .ToDictionaryAsync(g => g.ChildId, g => g.Total, cancellationToken);
+
             var today = DateOnly.FromDateTime(DateTime.UtcNow);
             return children.Select(c => new StudentDto
             {
                 Id = c.Id,
                 ParentProfileId = c.ParentProfileId,
+                ParentUserId = c.ParentProfile?.UserId ?? Guid.Empty,
                 FullName = $"{c.FirstName} {c.LastName}".Trim(),
                 Age = c.DateOfBirth is { } dob ? Math.Max(0, (today.DayNumber - dob.DayNumber) / 365) : null,
                 AcademicLevel = c.AcademicLevel,
@@ -407,6 +419,7 @@ namespace iucs.readernest.application.Services
                 CourseName = courseByChild.TryGetValue(c.Id, out var name) ? name : null,
                 RmNotes = c.RmNotes,
                 IsActive = c.IsActive,
+                PaidInvoiceTotal = paidTotalByChild.GetValueOrDefault(c.Id),
             }).ToList();
         }
 
@@ -419,6 +432,57 @@ namespace iucs.readernest.application.Services
             child.RmNotes = string.IsNullOrWhiteSpace(notes) ? null : notes.Trim();
             await _auditLog.StageAsync(AuditAction.Update, nameof(Child), child.Id.ToString(),
                 changesJson: "{\"rmNotes\":\"updated\"}", cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
+        public async Task RemoveChildAsync(Guid childId, bool withdrawFromBatches = false, CancellationToken cancellationToken = default)
+        {
+            var child = await _unitOfWork.Repository<Child>().FirstOrDefaultAsync(c => c.Id == childId, cancellationToken)
+                ?? throw new NotFoundException(nameof(Child), childId);
+
+            var activeEnrollmentIds = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.ChildId == childId && e.Status == EnrollmentStatus.Active)
+                .Select(e => e.Id)
+                .ToListAsync(cancellationToken);
+            if (activeEnrollmentIds.Count > 0)
+            {
+                if (!withdrawFromBatches)
+                {
+                    throw new DomainValidationException(
+                        "This child has an active batch enrolment. Withdraw them from every batch first.");
+                }
+
+                // Set-based update (no entities attached to the tracker) rather than the usual
+                // load-mutate-save pattern: a tracked BatchEnrollment still pointing (by its
+                // required FK) at a Child the same call is about to Remove() a few lines down
+                // makes EF throw ("association... has been severed") the instant Remove() runs,
+                // even though the FK is Restrict, not cascading — Child has no inverse
+                // BatchEnrollments navigation to .Include() and fix up the graph with. Same
+                // effect as BatchService.RemoveStudentAsync (withdraw one batch at a time), just
+                // done for every active enrolment here instead of requiring the admin to
+                // separately visit each batch's own roster first.
+                await _unitOfWork.Repository<BatchEnrollment>().Query()
+                    .Where(e => e.ChildId == childId && e.Status == EnrollmentStatus.Active)
+                    .ExecuteUpdateAsync(s => s.SetProperty(e => e.Status, EnrollmentStatus.Withdrawn), cancellationToken);
+                foreach (var enrollmentId in activeEnrollmentIds)
+                {
+                    await _auditLog.StageAsync(AuditAction.Update, nameof(BatchEnrollment), enrollmentId.ToString(),
+                        changesJson: "{\"status\":\"Withdrawn\"}", cancellationToken: cancellationToken);
+                }
+            }
+
+            var hasOutstandingInvoice = await _unitOfWork.Repository<Invoice>().ExistsAsync(
+                i => i.ChildId == childId
+                    && (i.Status == InvoiceStatus.Pending || i.Status == InvoiceStatus.PartiallyPaid || i.Status == InvoiceStatus.Overdue),
+                cancellationToken);
+            if (hasOutstandingInvoice)
+            {
+                throw new DomainValidationException(
+                    "This child has an unpaid or overdue invoice. Settle or cancel it first.");
+            }
+
+            _unitOfWork.Repository<Child>().Remove(child);
+            await _auditLog.StageAsync(AuditAction.Delete, nameof(Child), child.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
@@ -458,11 +522,29 @@ namespace iucs.readernest.application.Services
                     }
 
                     var nameParts = studentName.Trim().Split(' ', 2);
+                    var firstName = nameParts[0];
+                    var lastName = nameParts.Length > 1 ? nameParts[1] : string.Empty;
+
+                    // Re-running the same file (or an overlapping one) must not silently
+                    // multiply this child under the same parent — that's exactly how the
+                    // wise.live migration and later re-imports produced dozens of duplicate
+                    // profiles indistinguishable in the batch "assign student" picker.
+                    var alreadyExists = await _unitOfWork.Repository<Child>().ExistsAsync(
+                        c => c.ParentProfileId == parentProfile.Id
+                            && c.FirstName.ToLower() == firstName.ToLower()
+                            && c.LastName.ToLower() == lastName.ToLower(),
+                        cancellationToken);
+                    if (alreadyExists)
+                    {
+                        throw new ConflictException(
+                            $"'{studentName}' already exists under parent '{parentEmail}' — skipped to avoid a duplicate profile.");
+                    }
+
                     var child = new Child
                     {
                         ParentProfileId = parentProfile.Id,
-                        FirstName = nameParts[0],
-                        LastName = nameParts.Length > 1 ? nameParts[1] : string.Empty,
+                        FirstName = firstName,
+                        LastName = lastName,
                         DateOfBirth = dateOfBirth,
                         AcademicLevel = row.GetOrNull("AcademicLevel"),
                         IsActive = true,

@@ -36,5 +36,11 @@ namespace iucs.readernest.application.Services
         /// </summary>
         Task<IReadOnlyList<SessionRecordingDto>> GetRecordingsAsync(
             Guid parentUserId, Guid sessionId, CancellationToken cancellationToken = default);
+
+        /// <summary>Every non-expired recording across every one of the caller's children's
+        /// batches, in one query -- see ParentRecordingDto's own doc comment for the N+1
+        /// pattern this replaces.</summary>
+        Task<IReadOnlyList<ParentRecordingDto>> GetMyRecordingsAsync(
+            Guid parentUserId, CancellationToken cancellationToken = default);
     }
 }

@@ -1,5 +1,4 @@
 using iucs.readernest.domain.Entities.Common;
-using iucs.readernest.domain.Enums;
 using Microsoft.EntityFrameworkCore;
 
 namespace iucs.readernest.domain.Entities.Users
@@ -7,7 +6,9 @@ namespace iucs.readernest.domain.Entities.Users
     /// <summary>
     /// Module-wise, feature-level access granted by the Admin to a Sub Admin user.
     /// 'Academic Coordinator' and 'Management' personas are presets of these rows.
-    /// Sub Admins have no access by default (no row = no access).
+    /// Sub Admins have no access by default (no row = no access). Module is a
+    /// <see cref="PermissionModuleDefinition.Key"/> — either a built-in
+    /// <see cref="Enums.PermissionModule"/> enum name or an Admin-defined custom module.
     /// </summary>
     [Index(nameof(UserId), nameof(Module), IsUnique = true)]
     public class SubAdminPermission : AuditEntity
@@ -16,7 +17,7 @@ namespace iucs.readernest.domain.Entities.Users
 
         public User User { get; set; } = null!;
 
-        public PermissionModule Module { get; set; }
+        public string Module { get; set; } = null!;
 
         public bool CanView { get; set; }
 

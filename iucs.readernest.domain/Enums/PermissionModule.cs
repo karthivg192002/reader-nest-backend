@@ -16,6 +16,7 @@ namespace iucs.readernest.domain.Enums
         LeaveManagement,
         Communication,
         Settings,
-        SystemMonitoring
+        SystemMonitoring,
+        ClassSessionLogs
     }
 }

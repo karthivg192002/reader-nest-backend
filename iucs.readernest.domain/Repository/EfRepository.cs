@@ -86,5 +86,23 @@ namespace iucs.readernest.domain.Repository
             // real lock-arbitrated guard rather than an advisory in-memory check.
             return _dbSet.Where(predicate).ExecuteUpdateAsync(setters, cancellationToken);
         }
+
+        /// <inheritdoc />
+        public Task<int> ExecuteHardDeleteAsync(
+            Expression<Func<TEntity, bool>> predicate,
+            CancellationToken cancellationToken = default)
+        {
+            // .IgnoreQueryFilters() -- see the interface doc comment: a hard-delete purge must
+            // also remove a row this entity's own soft-delete filter would otherwise hide.
+            return _dbSet.IgnoreQueryFilters().Where(predicate).ExecuteDeleteAsync(cancellationToken);
+        }
+
+        /// <inheritdoc />
+        public async Task<IReadOnlyList<TEntity>> ListForHardDeleteAsync(
+            Expression<Func<TEntity, bool>> predicate,
+            CancellationToken cancellationToken = default)
+        {
+            return await _dbSet.IgnoreQueryFilters().AsNoTracking().Where(predicate).ToListAsync(cancellationToken);
+        }
     }
 }

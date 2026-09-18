@@ -95,6 +95,11 @@ builder.Services.AddHostedService<SessionReminderBackgroundService>();
 // Automatic no-show detection: flags a session once its grace period elapses with one
 // side never having joined, instead of relying solely on a human clicking "Mark No-Show"
 builder.Services.AddHostedService<NoShowDetectionBackgroundService>();
+// Batch payment plan reminders: "payment after N sessions" / "payment due on a specific date"
+builder.Services.AddHostedService<PaymentPlanReminderBackgroundService>();
+// Catches a completed class that never received a recording — auto-record can start
+// with no error yet still fail later in the pipeline, which nothing else catches
+builder.Services.AddHostedService<RecordingReconciliationBackgroundService>();
 // CRM integration: lead webhooks, no-op until Integrations:CrmWebhookUrl is set
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<ICrmNotifier, WebhookCrmNotifier>();
@@ -157,6 +162,27 @@ builder.Services
             // call — the same shape of cost this check already paid for the status-only version.
             OnTokenValidated = async context =>
             {
+                // Jibri's recording-observer token (ClassroomHub-only, see
+                // CreateRecordingObserverHubToken) carries a throwaway subject that never
+                // resolves to a real User row -- the active-account check below would always
+                // fail it. It's short-lived and scoped to one sessionId claim that
+                // ClassroomHub.JoinSession itself verifies, so there's nothing further to
+                // refresh here.
+                if (context.Principal?.FindFirstValue("purpose") == "recording-observer")
+                {
+                    return;
+                }
+
+                // Same reasoning as the recording-observer bypass just above, for a Guest Link's
+                // ClassroomHub token (see CreateGuestClassroomHubToken / SessionService.
+                // GetGuestJoinAsync): a caretaker joining via a shared link has no real User row
+                // behind them either, and ClassroomHub.JoinSession does its own sessionId-scoped
+                // check for this purpose in place of the normal participant check.
+                if (context.Principal?.FindFirstValue("purpose") == "guest-classroom")
+                {
+                    return;
+                }
+
                 var userIdClaim = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
                 if (!Guid.TryParse(userIdClaim, out var userId))
                 {
@@ -241,6 +267,20 @@ builder.Services.AddRateLimiter(options =>
             factory: _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(5),
+                QueueLimit = 0,
+            }));
+    // Public demo join redirect: legitimate traffic can legitimately retry a handful of times
+    // (a parent reloading, or clicking their own link plus each invitee's from one household/
+    // IP), but booking ids aren't secret once a link exists, so this still caps blind GUID
+    // enumeration against the endpoint -- looser than "login"/"pin-reset" since there's no
+    // credential to brute-force here, just a link to guess.
+    options.AddPolicy("demo-join", httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
                 Window = TimeSpan.FromMinutes(5),
                 QueueLimit = 0,
             }));
@@ -331,6 +371,31 @@ app.MapHub<iucs.readernest.api.Hubs.ClassroomHub>("/hubs/classroom");
 app.MapHub<iucs.readernest.api.Hubs.MonitoringHub>("/hubs/monitoring");
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok", timestampUtc = DateTime.UtcNow }));
+
+// Deliberately outside /api and unauthenticated -- the whole point of a short link is that
+// whoever receives it (a parent with no account, on any device) can just tap it. Redirects
+// straight to the real target (e.g. a personal Jitsi join URL with its own signed token)
+// rather than round-tripping through the SPA first.
+app.MapGet("/m/{slug}", async (
+    string slug,
+    iucs.readernest.application.Services.IShortLinkService shortLinks,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    // A share channel's own link-preview bot (WhatsApp/iMessage/email client fetching this URL
+    // the instant it's pasted, to build a preview card) or an intermediary proxy has no business
+    // caching this redirect -- the whole point of resolving through here on every click (rather
+    // than handing out the final target directly) is that it stays live no matter how long ago
+    // it was shared. Without an explicit no-store, a cached hop here would freeze whoever
+    // actually taps the link onto whatever was resolved at share time instead of click time.
+    context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+    context.Response.Headers.Pragma = "no-cache";
+
+    var target = await shortLinks.ResolveAsync(slug, cancellationToken);
+    return target is null
+        ? Results.NotFound("This link has expired or doesn't exist.")
+        : Results.Redirect(target, permanent: false);
+});
 
 await DatabaseInitializer.InitializeAsync(app.Services, app.Configuration);
 

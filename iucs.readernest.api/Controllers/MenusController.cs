@@ -32,22 +32,28 @@ namespace iucs.readernest.api.Controllers
             var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
             var role = Enum.TryParse<UserRole>(User.FindFirstValue(ClaimTypes.Role), out var r) ? r : UserRole.Admin;
 
-            // "perm" claims are "Module:Action"; collect the modules the role can View.
+            // "perm" claims are "Module:Action" — the module half is a PermissionModuleDefinition
+            // key (built-in enum name or a custom module), not necessarily a parseable enum value.
             var viewable = User.FindAll(JwtTokenService.PermissionClaimType)
                 .Select(c => c.Value)
                 .Where(v => v.EndsWith($":{PermissionAction.View}", StringComparison.Ordinal))
-                .Select(v => Enum.TryParse<PermissionModule>(v.Split(':')[0], out var m) ? (PermissionModule?)m : null)
-                .Where(m => m.HasValue)
-                .Select(m => m!.Value)
+                .Select(v => v.Split(':')[0])
                 .Distinct()
                 .ToList();
 
             return Ok(await _menuService.GetForUserAsync(userId, role, viewable, cancellationToken));
         }
 
-        /// <summary>Every configured item including inactive ones, for the admin menu manager.</summary>
+        /// <summary>
+        /// Every configured item including inactive ones. Used by the admin menu manager, but
+        /// also by every "My Permissions" screen (Admin's Roles &amp; Permissions, and a Sub
+        /// Admin's own read-only view) purely to caption a module with which real menus it
+        /// gates — [Authorize]-only rather than Settings-gated, since a menu item's label/path
+        /// isn't sensitive and most Sub Admins were never granted Settings themselves
+        /// (confirmed live: a Sub Admin's own "My Permissions" page 403'd loading this).
+        /// </summary>
         [HttpGet]
-        [HasPermission(PermissionModule.Settings, PermissionAction.View)]
+        [Authorize]
         public async Task<ActionResult<IReadOnlyList<MenuItemDto>>> List(
             [FromQuery] string? portal,
             CancellationToken cancellationToken)

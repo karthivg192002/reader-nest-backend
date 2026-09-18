@@ -1,6 +1,7 @@
 using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
+using iucs.readernest.application.Dto.Common;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
@@ -19,6 +20,11 @@ namespace iucs.readernest.application.Services
 {
     public class SessionService : ISessionService
     {
+        /// <summary>How many times an unresolved no-show is allowed to silently reschedule
+        /// itself one week later before the chain stops and a human gets asked to look at it
+        /// instead — see MarkNoShowCoreAsync's own comment for the incident that motivated this.</summary>
+        private const int MaxAutoCarryForwards = 3;
+
         private static readonly SessionStatus[] TerminalStatuses =
         [
             SessionStatus.Completed,
@@ -34,6 +40,8 @@ namespace iucs.readernest.application.Services
         private readonly INotificationService _notificationService;
         private readonly ICurrentUserService _currentUser;
         private readonly IJitsiTokenService _jitsiTokenService;
+        private readonly IClassSessionEventLogService _eventLog;
+        private readonly ITokenService _tokenService;
 
         public SessionService(
             IUnitOfWork unitOfWork,
@@ -41,7 +49,9 @@ namespace iucs.readernest.application.Services
             IPayoutService payoutService,
             INotificationService notificationService,
             ICurrentUserService currentUser,
-            IJitsiTokenService jitsiTokenService)
+            IJitsiTokenService jitsiTokenService,
+            IClassSessionEventLogService eventLog,
+            ITokenService tokenService)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
@@ -49,6 +59,8 @@ namespace iucs.readernest.application.Services
             _notificationService = notificationService;
             _currentUser = currentUser;
             _jitsiTokenService = jitsiTokenService;
+            _eventLog = eventLog;
+            _tokenService = tokenService;
         }
 
         public async Task<IReadOnlyList<ClassSessionDto>> ListAsync(
@@ -131,6 +143,24 @@ namespace iucs.readernest.application.Services
             await EnsureTeacherIsFreeAsync(
                 request.TeacherProfileId, request.ScheduledStartAtUtc, request.ScheduledEndAtUtc, cancellationToken);
 
+            // Confirmed live via a client screen recording: a Demo scheduled from this generic
+            // Sessions-page dialog (as opposed to Admission's dedicated Demo Booking flow, which
+            // already does this — see DemoBookingService.EnsureTeacherMeetingRoomAsync) got a
+            // brand-new random room here, unrelated to the teacher's own fixed personal meeting
+            // room. The client has since been trained to always share that one stable personal
+            // link for a demo (WBS "One teacher -> one fixed demo link"), so whenever a demo was
+            // instead scheduled from here, the teacher joined the (correct, freshly-generated)
+            // session room while the parent — handed the teacher's personal link, the only link
+            // this dialog ever gave anyone a reason to share — landed in a completely different,
+            // empty room and sat on Jitsi's own "waiting for a moderator" screen forever, with no
+            // knock/notification ever reaching the teacher (she was never in that room to see one).
+            // Routing every Demo through the same fixed personal room this teacher already shares
+            // for every other demo means whichever screen scheduled it, the link she hands out
+            // always points at wherever she's actually going to be.
+            var meetingRoomId = request.Type == SessionType.Demo
+                ? (await EnsureTeacherMeetingRoomAsync(request.TeacherProfileId, cancellationToken)).User.PersonalMeetingRoomId!
+                : $"trn-{Guid.NewGuid():N}";
+
             var session = new ClassSession
             {
                 BatchId = request.BatchId,
@@ -138,8 +168,7 @@ namespace iucs.readernest.application.Services
                 Type = request.Type,
                 ScheduledStartAtUtc = request.ScheduledStartAtUtc,
                 ScheduledEndAtUtc = request.ScheduledEndAtUtc,
-                // One-click join: the room id is generated, never a manual meeting link
-                MeetingRoomId = $"trn-{Guid.NewGuid():N}",
+                MeetingRoomId = meetingRoomId,
             };
             await _unitOfWork.Repository<ClassSession>().AddAsync(session, cancellationToken);
             await _auditLog.StageAsync(AuditAction.Create, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
@@ -168,25 +197,94 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException($"A session in status '{original.Status}' cannot be rescheduled.");
             }
 
+            // "Edit session" (WBS Round 2 feedback): a reschedule was time-only before — moving
+            // a session to a different teacher or batch meant cancelling and rebooking from
+            // scratch, losing the link to the original. Both are optional overrides on top of
+            // the same reschedule flow rather than a separate action, since this already creates
+            // a fresh linked calendar entry either way (see the comment below).
+            var newTeacherId = request.TeacherProfileId ?? original.TeacherProfileId;
+            var newBatchId = request.BatchId ?? original.BatchId;
+
+            if (original.Type == SessionType.Regular && newBatchId is null)
+            {
+                throw new DomainValidationException("A regular session must belong to a batch.");
+            }
+
+            if (newBatchId.HasValue && newBatchId != original.BatchId)
+            {
+                var batchExists = await _unitOfWork.Repository<Batch>()
+                    .ExistsAsync(b => b.Id == newBatchId.Value, cancellationToken);
+                if (!batchExists)
+                {
+                    throw new NotFoundException(nameof(Batch), newBatchId.Value);
+                }
+            }
+
+            if (newTeacherId != original.TeacherProfileId)
+            {
+                var teacherExists = await _unitOfWork.Repository<TeacherProfile>()
+                    .ExistsAsync(t => t.Id == newTeacherId, cancellationToken);
+                if (!teacherExists)
+                {
+                    throw new NotFoundException(nameof(TeacherProfile), newTeacherId);
+                }
+            }
+
+            // Checked against whichever teacher the session will actually end up with —
+            // the original teacher's own free/busy slot is irrelevant once they're being
+            // swapped out.
             await EnsureTeacherIsFreeAsync(
-                original.TeacherProfileId, request.ScheduledStartAtUtc, request.ScheduledEndAtUtc,
+                newTeacherId, request.ScheduledStartAtUtc, request.ScheduledEndAtUtc,
                 cancellationToken, excludeSessionId: original.Id);
 
             original.Status = SessionStatus.Rescheduled;
+
+            // A Demo's room is the assigned teacher's own fixed personal room (see ScheduleAsync
+            // and DemoBookingService's own reassignment path), so it has to follow a teacher swap
+            // here too — otherwise the parent's already-shared link keeps pointing at the OLD
+            // teacher's room while the new teacher joins from her own, and nobody ends up in the
+            // same place. A Regular session's room has no such meaning (just a one-off generated
+            // id), so it always just carries over unchanged.
+            var meetingRoomId = original.Type == SessionType.Demo && newTeacherId != original.TeacherProfileId
+                ? (await EnsureTeacherMeetingRoomAsync(newTeacherId, cancellationToken)).User.PersonalMeetingRoomId!
+                : original.MeetingRoomId;
 
             // A reschedule is a new calendar entry linked to the original,
             // so history and colour coding stay traceable.
             var replacement = new ClassSession
             {
-                BatchId = original.BatchId,
-                TeacherProfileId = original.TeacherProfileId,
+                BatchId = newBatchId,
+                TeacherProfileId = newTeacherId,
                 Type = original.Type,
                 ScheduledStartAtUtc = request.ScheduledStartAtUtc,
                 ScheduledEndAtUtc = request.ScheduledEndAtUtc,
-                MeetingRoomId = original.MeetingRoomId,
+                MeetingRoomId = meetingRoomId,
                 RescheduledFromSessionId = original.Id,
             };
             await _unitOfWork.Repository<ClassSession>().AddAsync(replacement, cancellationToken);
+
+            // Confirmed live: a Demo rescheduled from this generic Sessions-page dialog (as
+            // opposed to Admission's own Demo Booking reschedule, which already keeps this in
+            // sync) left the DemoBooking's ClassSessionId pointing at `original` — a row that's
+            // now terminal (Status.Rescheduled) and never shown as joinable again. The parent
+            // side of IsSessionParticipantAsync (and ParentPortalService.GetScheduleAsync's own
+            // demo-session filter) both key off THIS field, not the session's own
+            // RescheduledFromSessionId chain, so the parent could only ever see/join the stale
+            // original — while the teacher, matched directly via TeacherProfileId, correctly
+            // joined the new `replacement`. Both landed in the same Jitsi room (MeetingRoomId
+            // carries over) so the call itself looked fine, but two different session ids meant
+            // two different ClassroomHub groups: neither side's roster or whiteboard ever synced
+            // with the other. Following the booking to the new row fixes both at once.
+            if (original.Type == SessionType.Demo)
+            {
+                var demoBooking = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
+                    .FirstOrDefaultAsync(b => b.ClassSessionId == original.Id, cancellationToken);
+                if (demoBooking is not null)
+                {
+                    demoBooking.ClassSessionId = replacement.Id;
+                }
+            }
+
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), original.Id.ToString(),
                 changesJson: $"{{\"rescheduledTo\":\"{replacement.Id}\"}}", cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
@@ -263,8 +361,48 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
+            // The definitive "End Class" timestamp for the Class Session Logs screen — best
+            // effort, after the real completion has already durably saved.
+            await _eventLog.LogClassEndedAsync(session, cancellationToken);
+
             // Performance summary: the teacher's class notes go straight to the batch's parents
             if (!string.IsNullOrWhiteSpace(session.Summary) && session.BatchId.HasValue)
+            {
+                await SendSummaryToParentsAsync(session, cancellationToken);
+            }
+
+            return await GetAsync(session.Id, cancellationToken);
+        }
+
+        /// <summary>Teacher feedback: "the report-writing option is also not visible after the
+        /// session if we do not complete the report immediately at the end of the class." A
+        /// completed session's Summary could only ever be set once, at CompleteAsync time -- a
+        /// teacher who skipped it there (or only got the auto-generated engagement-stats
+        /// fallback) had no way back in. This is the way back in: same session-participant
+        /// ownership check as CompleteAsync, but only touches Summary, and re-emails it to the
+        /// batch's parents the same way a same-time summary already does -- a class's real notes
+        /// showing up a day late is still far more useful to a parent than never.</summary>
+        public async Task<ClassSessionDto> UpdateSummaryAsync(
+            Guid id,
+            string summary,
+            CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .FirstOrDefaultAsync(s => s.Id == id, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), id);
+
+            await EnsureSessionParticipantAsync(session, cancellationToken);
+
+            if (session.Status != SessionStatus.Completed)
+            {
+                throw new DomainValidationException("Only a completed session's notes can be edited this way — use Complete Class to end and record notes for an in-progress one.");
+            }
+
+            session.Summary = summary.Trim();
+            await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            if (session.BatchId.HasValue)
             {
                 await SendSummaryToParentsAsync(session, cancellationToken);
             }
@@ -338,6 +476,34 @@ namespace iucs.readernest.application.Services
             return await MarkNoShowCoreAsync(session, party, note, cancellationToken);
         }
 
+        public async Task FlagOrphanedDemoSessionAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(id, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), id);
+
+            var admins = await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.Role == UserRole.Admin && u.Status == UserStatus.Active)
+                .ToListAsync(cancellationToken);
+
+            foreach (var admin in admins)
+            {
+                await _notificationService.SendTemplatedEmailAsync(
+                    admin.Id,
+                    admin.Email,
+                    NotificationType.NoShowAlert,
+                    "demo-orphaned-noshow-alert",
+                    new Dictionary<string, string> { ["StartAtLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc, admin.TimeZoneId) },
+                    cancellationToken);
+            }
+
+            // De-duplicates like RecordingMissingAlertSentAtUtc does for the recording-gap alert:
+            // this session's status never changes (nobody was ever booked into it, so there is no
+            // no-show/carry-forward to apply), so without this it would keep matching the
+            // background service's query and re-alert admins every 10-minute cycle forever.
+            session.OrphanedDemoAlertSentAtUtc = DateTime.UtcNow;
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
         private async Task<ClassSessionDto> MarkNoShowCoreAsync(
             ClassSession session,
             NoShowParty party,
@@ -353,6 +519,43 @@ namespace iucs.readernest.application.Services
                 ? SessionStatus.TeacherNoShow
                 : SessionStatus.StudentNoShow;
 
+            // Best-effort; covers both exit paths below (capped chain vs. normal carry-forward).
+            await _eventLog.LogNoShowAsync(session, party, cancellationToken);
+
+            if (party == NoShowParty.Student)
+            {
+                // Teacher waited for the student: the waiting amount still accrues
+                await _payoutService.AccrueForSessionAsync(
+                    session, PayoutItemType.StudentNoShowWaiting,
+                    note ?? "Student no-show waiting amount", cancellationToken);
+            }
+            else
+            {
+                await _payoutService.AccrueForSessionAsync(
+                    session, PayoutItemType.TeacherNoShowDeduction,
+                    note ?? "Teacher no-show deduction", cancellationToken);
+                await NotifyAdminsOfTeacherNoShowAsync(session, cancellationToken);
+            }
+
+            // An abandoned booking (a stale/orphaned lead, a batch nobody ever pulled off the
+            // calendar) previously carried itself forward one week later, forever — confirmed
+            // live: one stale demo booking auto-rescheduled itself as a fresh no-show every
+            // single week for 9 straight weeks with nobody ever noticing, since each occurrence
+            // looked like an unremarkable, isolated miss rather than part of a chain. Past this
+            // cap, stop silently rescheduling and hand it to a human instead: the class stays
+            // in its terminal no-show status (still fully visible/actionable from Sessions) and
+            // admins get a one-time "this needs a decision" alert rather than another identical
+            // weekly email indistinguishable from the previous eight.
+            if (session.CarryForwardCount >= MaxAutoCarryForwards)
+            {
+                await NotifyAdminsOfStalledNoShowChainAsync(session, cancellationToken);
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
+                    changesJson: "{\"noShow\":\"" + party + "\",\"carryForwardCapped\":true}",
+                    cancellationToken: cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                return await GetAsync(session.Id, cancellationToken);
+            }
+
             // The missed class is never lost: a carried-forward session is placed one week
             // later at the same slot, keeping the traceability link for calendar and payouts.
             // Unlike fresh scheduling, marking a no-show must never hard-fail, so this never
@@ -361,7 +564,8 @@ namespace iucs.readernest.application.Services
             // for a teacher-schedule collision so that risk is recorded rather than silently
             // invisible, even though it doesn't block the placement.
             var duration = session.ScheduledEndAtUtc - session.ScheduledStartAtUtc;
-            var carriedForwardStart = await NextNonHolidayDateAsync(session.ScheduledStartAtUtc.AddDays(7), cancellationToken);
+            var carriedForwardStart = await NextAvailableCarryForwardSlotAsync(
+                session.ScheduledStartAtUtc.AddDays(7), session.BatchId, duration, cancellationToken);
             var carriedForwardEnd = carriedForwardStart.Add(duration);
             var carriedForwardHasConflict = await _unitOfWork.Repository<ClassSession>().ExistsAsync(
                 s => s.TeacherProfileId == session.TeacherProfileId
@@ -380,35 +584,66 @@ namespace iucs.readernest.application.Services
                 ScheduledEndAtUtc = carriedForwardEnd,
                 MeetingRoomId = session.MeetingRoomId,
                 CarriedForwardFromSessionId = session.Id,
+                CarryForwardCount = session.CarryForwardCount + 1,
             };
             await _unitOfWork.Repository<ClassSession>().AddAsync(carriedForward, cancellationToken);
 
-            if (party == NoShowParty.Student)
+            // A demo has no batch to fall back on — its only link to a student is the
+            // DemoBooking row, and that row still points at the now-terminal original session
+            // unless it's moved here. Miss this and the carried-forward slot looks exactly like
+            // the original (Teacher set, Type Demo) but with "No students assigned": nobody was
+            // ever going to join it, so NoShowDetectionBackgroundService flags it a no-show
+            // again next cycle regardless of who actually shows up, repeating weekly until
+            // MaxAutoCarryForwards silently caps it — confirmed live as the "9 straight weeks"
+            // incident referenced above. Reset the per-occurrence join flags too: they describe
+            // whether this parent/participant joined the OLD session, which says nothing about
+            // the new one.
+            if (session.Type == SessionType.Demo)
             {
-                // Teacher waited for the student: the waiting amount still accrues
-                await _payoutService.AccrueForSessionAsync(
-                    session, PayoutItemType.StudentNoShowWaiting,
-                    note ?? "Student no-show waiting amount", cancellationToken);
-            }
-            else
-            {
-                await _payoutService.AccrueForSessionAsync(
-                    session, PayoutItemType.TeacherNoShowDeduction,
-                    note ?? "Teacher no-show deduction", cancellationToken);
-                await NotifyAdminsOfTeacherNoShowAsync(session, cancellationToken);
+                var demoBooking = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
+                    .Include(b => b.Participants)
+                    .FirstOrDefaultAsync(b => b.ClassSessionId == session.Id, cancellationToken);
+                if (demoBooking is not null)
+                {
+                    demoBooking.ClassSessionId = carriedForward.Id;
+                    demoBooking.ParentJoinedAtUtc = null;
+                    foreach (var participant in demoBooking.Participants)
+                    {
+                        participant.HasJoined = false;
+                    }
+                }
             }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
                 changesJson: "{\"noShow\":\"" + party + "\",\"carriedForwardTo\":\"" + carriedForward.Id + "\""
                     + (carriedForwardHasConflict ? ",\"carriedForwardScheduleConflict\":true" : "") + "}",
                 cancellationToken: cancellationToken);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            try
+            {
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains(
+                "ix_class_sessions_batch_id_scheduled_start_at_utc", StringComparison.Ordinal) == true)
+            {
+                // Must never hard-fail a no-show (see the 9-straight-weeks incident above), so
+                // even the residual race the slot search above can't fully close — two no-shows
+                // resolving to the same slot at the exact same instant — can't surface as an
+                // error. Whatever session is already sitting in that slot already covers the
+                // class; there's nothing left for this carried-forward row to do, so drop it and
+                // save the no-show status itself on its own.
+                _unitOfWork.Repository<ClassSession>().Remove(carriedForward);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                return await GetAsync(session.Id, cancellationToken);
+            }
 
             return await GetAsync(carriedForward.Id, cancellationToken);
         }
 
-        /// <summary>Walks forward a day at a time (bounded) to the next date that isn't a holiday.</summary>
-        private async Task<DateTime> NextNonHolidayDateAsync(DateTime candidateUtc, CancellationToken cancellationToken)
+        /// <summary>Walks forward a day at a time (bounded) to the next date that isn't a holiday
+        /// and doesn't collide with this batch's own already-scheduled session.</summary>
+        private async Task<DateTime> NextAvailableCarryForwardSlotAsync(
+            DateTime candidateUtc, Guid? batchId, TimeSpan duration, CancellationToken cancellationToken)
         {
             // The whole 14-day window is fetched in one query rather than probed a day at a
             // time — the walk itself is unchanged, but it no longer costs up to 14 sequential
@@ -421,16 +656,42 @@ namespace iucs.readernest.application.Services
                     .ToListAsync(cancellationToken))
                 .ToHashSet();
 
+            // A no-show's carried-forward slot lands one week later at the same time of day —
+            // which is also exactly when this batch's own regular weekly class already recurs.
+            // Without checking that, the naive "+7 days" placement collides with the batch's
+            // already-scheduled session for that day, producing two rows (one Scheduled, one
+            // CarriedForward) for what's really one class slot — confirmed live across 19
+            // batches. Fetched once for the window rather than queried per candidate day, same
+            // as the holiday lookup above.
+            var windowEndExclusive = windowEnd.ToDateTime(TimeOnly.MinValue).AddDays(1);
+            var batchSessions = batchId is null
+                ? new List<DateTime[]>()
+                : await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.BatchId == batchId
+                        && s.ScheduledStartAtUtc >= windowStart.ToDateTime(TimeOnly.MinValue)
+                        && s.ScheduledStartAtUtc < windowEndExclusive)
+                    .Select(s => new[] { s.ScheduledStartAtUtc, s.ScheduledEndAtUtc })
+                    .ToListAsync(cancellationToken);
+
             for (var i = 0; i < 14; i++)
             {
-                var candidate = candidateUtc.AddDays(i);
-                if (!holidayDates.Contains(DateOnly.FromDateTime(candidate)))
+                var candidateStart = candidateUtc.AddDays(i);
+                var candidateEnd = candidateStart.Add(duration);
+                if (holidayDates.Contains(DateOnly.FromDateTime(candidateStart)))
                 {
-                    return candidate;
+                    continue;
+                }
+
+                var collidesWithBatch = batchSessions.Any(s => s[0] < candidateEnd && s[1] > candidateStart);
+                if (!collidesWithBatch)
+                {
+                    return candidateStart;
                 }
             }
 
-            // 14 consecutive holidays isn't realistic — fall back rather than search forever.
+            // 14 consecutive holidays/batch collisions isn't realistic — fall back rather than
+            // search forever. The unique index on (batch_id, scheduled_start_at_utc) still
+            // prevents an actual duplicate row from being committed even in this fallback case.
             return candidateUtc;
         }
 
@@ -483,11 +744,43 @@ namespace iucs.readernest.application.Services
             // attach the recording to, so this is a no-op rather than a NotFoundException: the
             // finalize script has no session id to have gotten wrong, only a room name that's
             // legitimately outside this feature's scope.
-            var session = await _unitOfWork.Repository<ClassSession>().Query()
-                .FirstOrDefaultAsync(s => s.MeetingRoomId == roomName, cancellationToken);
-            if (session is null)
+            //
+            // A personal room's MeetingRoomId is a permanent per-teacher identifier reused
+            // across every demo/1-on-1 class that teacher ever runs -- NOT unique per occurrence
+            // the way a batch's room id effectively is. Matching on MeetingRoomId alone with
+            // FirstOrDefault silently piled every one of that teacher's recordings, forever,
+            // onto whichever session row happened to sort first -- confirmed in production as
+            // multiple unrelated recordings stacked on one old session while every later class
+            // using that room showed "no recording". Disambiguate by picking the candidate whose
+            // scheduled end is closest to now: finalize always fires within minutes of the class
+            // that was actually recorded ending, so that's the one this recording belongs to.
+            var candidates = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.MeetingRoomId == roomName)
+                .ToListAsync(cancellationToken);
+            if (candidates.Count == 0)
             {
                 return null;
+            }
+
+            var now = DateTime.UtcNow;
+            var session = candidates.Count == 1
+                ? candidates[0]
+                : candidates.MinBy(s => Math.Abs(((s.ActualEndAtUtc ?? s.ScheduledEndAtUtc) - now).Ticks))!;
+
+            // The finalize-recording.sh script on the video server retries this call once on any
+            // failure, including a plain network timeout -- confirmed real in production: a slow
+            // response (e.g. the backend under load) can mean the first attempt actually
+            // succeeded here before the caller ever saw that, so the retry arrives as a genuine
+            // second call for a file already registered. Without this check each retry created
+            // another SessionRecording row for the exact same file, which is exactly what turned
+            // one real recording into 3-5 duplicate "Recording" entries on a single class in the
+            // admin/teacher UI. Same file for the same session is the identity here, not a new id
+            // each register call earns.
+            var existing = await _unitOfWork.Repository<SessionRecording>().Query()
+                .FirstOrDefaultAsync(r => r.ClassSessionId == session.Id && r.StorageUrl == storageUrl, cancellationToken);
+            if (existing is not null)
+            {
+                return ToRecordingDto(existing);
             }
 
             var recording = new SessionRecording
@@ -526,6 +819,69 @@ namespace iucs.readernest.application.Services
             return recordings.Select(ToRecordingDto).ToList();
         }
 
+        /// <summary>Admin-wide (teacherUserId null) or one teacher's own (teacherUserId set)
+        /// Recordings page: every registered recording in scope, one query instead of a
+        /// completed-session list plus one ListRecordingsAsync call per session (confirmed live
+        /// as the admin page's actual "Loading recordings..." bottleneck once there were enough
+        /// completed classes -- TeacherRecordings.tsx had the identical N+1 shape, just scoped
+        /// to "my classes", so it was only ever a matter of time before the same slowdown showed
+        /// up there too as any one teacher's own history grew). Unlike ListRecordingsAsync
+        /// (parent-facing), this deliberately does NOT filter out expired recordings -- both an
+        /// admin and a teacher managing their own past classes need to find one regardless of
+        /// whether a parent could still view it.</summary>
+        public async Task<PagedResult<RecordingListItemDto>> ListAllRecordingsAsync(
+            int page,
+            int pageSize,
+            DateOnly? date,
+            Guid? teacherUserId,
+            CancellationToken cancellationToken = default)
+        {
+            page = Math.Max(1, page);
+            pageSize = Math.Clamp(pageSize, 1, 100);
+
+            var query = _unitOfWork.Repository<SessionRecording>().Query()
+                .Include(r => r.ClassSession).ThenInclude(s => s.Batch)
+                .Include(r => r.ClassSession).ThenInclude(s => s.TeacherProfile).ThenInclude(t => t.User)
+                .AsQueryable();
+
+            if (teacherUserId is { } tuid)
+            {
+                query = query.Where(r => r.ClassSession.TeacherProfile.UserId == tuid);
+            }
+
+            if (date is { } d)
+            {
+                var startUtc = d.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+                var endUtc = startUtc.AddDays(1);
+                query = query.Where(r => r.ClassSession.ScheduledStartAtUtc >= startUtc && r.ClassSession.ScheduledStartAtUtc < endUtc);
+            }
+
+            query = query.OrderByDescending(r => r.CreatedAtUtc);
+
+            var totalCount = await query.CountAsync(cancellationToken);
+            var page_ = await query.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(cancellationToken);
+
+            return new PagedResult<RecordingListItemDto>
+            {
+                Items = page_.Select(r => new RecordingListItemDto
+                {
+                    Id = r.Id,
+                    ClassSessionId = r.ClassSessionId,
+                    StorageUrl = r.StorageUrl,
+                    DurationSeconds = r.DurationSeconds,
+                    ExpiresAtUtc = r.ExpiresAtUtc,
+                    CreatedAtUtc = r.CreatedAtUtc,
+                    BatchName = r.ClassSession.Batch?.Name,
+                    SessionType = r.ClassSession.Type,
+                    TeacherName = $"{r.ClassSession.TeacherProfile.User.FirstName} {r.ClassSession.TeacherProfile.User.LastName}".Trim(),
+                    ScheduledStartAtUtc = r.ClassSession.ScheduledStartAtUtc,
+                }).ToList(),
+                TotalCount = totalCount,
+                Page = page,
+                PageSize = pageSize,
+            };
+        }
+
         public async Task DeleteRecordingAsync(
             Guid sessionId,
             Guid recordingId,
@@ -562,7 +918,14 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("This batch already has scheduled sessions; reschedule or cancel them individually.");
             }
 
-            var weekdays = request.DaysOfWeek.Distinct().ToHashSet();
+            var slotDays = request.Slots.Select(s => s.DayOfWeek).ToList();
+            if (slotDays.Count != slotDays.Distinct().Count())
+            {
+                throw new DomainValidationException("Each weekday can only have one time — remove the duplicate before generating.");
+            }
+            // Each weekday runs at its own time — e.g. Monday/Wednesday at 5 PM but Friday at
+            // noon — rather than one time applying to every selected day.
+            var timeByDay = request.Slots.ToDictionary(s => s.DayOfWeek, s => s.StartTimeUtc);
             var holidays = (await _unitOfWork.Repository<Holiday>().Query()
                     .Select(h => h.Date)
                     .ToListAsync(cancellationToken))
@@ -572,24 +935,31 @@ namespace iucs.readernest.application.Services
             var date = request.StartDate;
             var created = 0;
             DateOnly? lastDate = null;
+            var durationMinutes = batch.DurationMinutesOverride ?? course.DurationMinutes;
 
-            // Walk the calendar until every course session is placed; hard cap
+            // Defaults to every session of the course (the only behaviour before SessionCount
+            // existed); overridable for a batch that's continuing mid-course under this portal
+            // (e.g. migrated from another system with some sessions already delivered there) —
+            // there was previously no way to generate only the sessions actually still owed.
+            var targetSessionCount = request.SessionCount ?? course.TotalSessions;
+
+            // Walk the calendar until every target session is placed; hard cap
             // of two years guards against a weekday set that never matches.
             var safetyLimit = request.StartDate.AddYears(2);
-            while (created < course.TotalSessions && date < safetyLimit)
+            while (created < targetSessionCount && date < safetyLimit)
             {
-                if (weekdays.Contains(date.DayOfWeek) && !holidays.Contains(date))
+                if (timeByDay.TryGetValue(date.DayOfWeek, out var timeForDay) && !holidays.Contains(date))
                 {
-                    var startUtc = date.ToDateTime(request.StartTimeUtc, DateTimeKind.Utc);
+                    var startUtc = date.ToDateTime(timeForDay, DateTimeKind.Utc);
                     await EnsureTeacherIsFreeAsync(
-                        batch.TeacherProfileId, startUtc, startUtc.AddMinutes(course.DurationMinutes), cancellationToken);
+                        batch.TeacherProfileId, startUtc, startUtc.AddMinutes(durationMinutes), cancellationToken);
                     await sessionRepository.AddAsync(
                         new ClassSession
                         {
                             BatchId = batch.Id,
                             TeacherProfileId = batch.TeacherProfileId,
                             ScheduledStartAtUtc = startUtc,
-                            ScheduledEndAtUtc = startUtc.AddMinutes(course.DurationMinutes),
+                            ScheduledEndAtUtc = startUtc.AddMinutes(durationMinutes),
                             MeetingRoomId = $"trn-{Guid.NewGuid():N}",
                         },
                         cancellationToken);
@@ -600,7 +970,7 @@ namespace iucs.readernest.application.Services
                 date = date.AddDays(1);
             }
 
-            if (created < course.TotalSessions)
+            if (created < targetSessionCount)
             {
                 throw new DomainValidationException("Could not place all sessions within two years; check the selected weekdays.");
             }
@@ -611,7 +981,23 @@ namespace iucs.readernest.application.Services
             await _auditLog.StageAsync(AuditAction.Create, nameof(ClassSession),
                 changesJson: $"{{\"batchId\":\"{batch.Id}\",\"generated\":{created}}}",
                 entityId: batch.Id.ToString(), cancellationToken: cancellationToken);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            try
+            {
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains(
+                "ix_class_sessions_batch_id_scheduled_start_at_utc", StringComparison.Ordinal) == true)
+            {
+                // Backstop for the hasSessions check above, which is check-then-insert with no
+                // locking: two near-simultaneous calls for the same batch can both see "no
+                // sessions yet" before either commits, so both build a full schedule. The unique
+                // index is what actually stops the second insert; this just turns that raw
+                // constraint violation into the same 409 the hasSessions check already gives a
+                // caller who retries a moment later, instead of an unhandled 500.
+                throw new DomainValidationException(
+                    "This batch already has scheduled sessions; reschedule or cancel them individually.");
+            }
 
             return await ListAsync(DateTime.MinValue, DateTime.MaxValue, null, batch.Id, cancellationToken);
         }
@@ -674,6 +1060,31 @@ namespace iucs.readernest.application.Services
                 subscription.Status = SubscriptionStatus.Expired;
                 subscription.NextBillingAtUtc = null;
             }
+        }
+
+        /// <summary>
+        /// Every teacher's fixed demo room: their permanent personal meeting room (the same one
+        /// GET /api/users/me/meeting-room mints), so a demo's join link is stable regardless of
+        /// which screen scheduled it, rather than a new random room each time. Mints the room on
+        /// first use, same convention as UsersController.MyMeetingRoom and
+        /// DemoBookingService.EnsureTeacherMeetingRoomAsync (this is that same helper,
+        /// duplicated rather than shared — the two services don't have a common base to hang a
+        /// shared helper off of). Caller is responsible for SaveChangesAsync.
+        /// </summary>
+        private async Task<TeacherProfile> EnsureTeacherMeetingRoomAsync(Guid teacherProfileId, CancellationToken cancellationToken)
+        {
+            var teacher = await _unitOfWork.Repository<TeacherProfile>().TrackedQuery()
+                .Include(t => t.User)
+                .FirstOrDefaultAsync(t => t.Id == teacherProfileId, cancellationToken)
+                ?? throw new NotFoundException(nameof(TeacherProfile), teacherProfileId);
+
+            if (string.IsNullOrEmpty(teacher.User.PersonalMeetingRoomId))
+            {
+                teacher.User.PersonalMeetingRoomId = $"trn-personal-{Guid.NewGuid():N}";
+                _unitOfWork.Repository<User>().Update(teacher.User);
+            }
+
+            return teacher;
         }
 
         /// <summary>
@@ -817,11 +1228,29 @@ namespace iucs.readernest.application.Services
                 // access — mirrors AcademicOpsService.CaptureJoinAttendanceAsync's own filter,
                 // which this check used to be looser than (attendance wasn't captured for a
                 // non-active enrollment even though the room let them in).
-                return await _unitOfWork.Repository<BatchEnrollment>().Query()
+                var enrolledChildren = await _unitOfWork.Repository<BatchEnrollment>().Query()
                     .Where(e => e.BatchId == session.BatchId.Value && e.Status == EnrollmentStatus.Active)
-                    .Join(_unitOfWork.Repository<Child>().Query(), e => e.ChildId, c => c.Id, (e, c) => c.ParentProfileId)
-                    .Join(_unitOfWork.Repository<ParentProfile>().Query(), parentProfileId => parentProfileId, p => p.Id, (parentProfileId, p) => p.UserId)
-                    .AnyAsync(u => u == userId, cancellationToken);
+                    .Join(_unitOfWork.Repository<Child>().Query(), e => e.ChildId, c => c.Id, (e, c) => new { c.Id, c.ParentProfileId, ParentUserId = c.ParentProfile.UserId })
+                    .Where(c => c.ParentUserId == userId)
+                    .ToListAsync(cancellationToken);
+                if (enrolledChildren.Count == 0)
+                {
+                    return false;
+                }
+
+                // FeeSuspension existed but nothing here ever checked it -- a suspended parent
+                // could already join their child's live class via this exact path despite the
+                // entity's own doc comment ("cannot join live sessions"). Blocked only when
+                // EVERY one of this parent's enrolled children in this specific batch is
+                // suspended -- a sibling sharing the batch with fees current still gets in.
+                foreach (var child in enrolledChildren)
+                {
+                    if (!await SuspensionCheck.IsChildBlockedAsync(_unitOfWork, child.ParentProfileId, child.Id, cancellationToken))
+                    {
+                        return true;
+                    }
+                }
+                return false;
             }
 
             // A demo session has no batch — the lead is a DemoBooking (parent may not have
@@ -846,16 +1275,64 @@ namespace iucs.readernest.application.Services
             if (user.Role == UserRole.SubAdmin)
             {
                 return await _unitOfWork.Repository<SubAdminPermission>().ExistsAsync(
-                    p => p.UserId == userId && p.Module == PermissionModule.SessionCalendarManagement && p.CanEdit,
+                    p => p.UserId == userId && p.Module == nameof(PermissionModule.SessionCalendarManagement) && p.CanEdit,
                     cancellationToken);
             }
 
             return false;
         }
 
+        public async Task<Guid> ResolveCurrentSessionIdAsync(Guid sessionId, CancellationToken cancellationToken = default)
+        {
+            var currentId = sessionId;
+            // Bounded, not a plain "follow until null": a data bug that somehow formed a cycle
+            // must not hang this request forever — no genuine reschedule chain should ever get
+            // remotely this deep.
+            for (var hop = 0; hop < 50; hop++)
+            {
+                var status = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.Id == currentId)
+                    .Select(s => (SessionStatus?)s.Status)
+                    .FirstOrDefaultAsync(cancellationToken);
+                if (status is null or not SessionStatus.Rescheduled)
+                {
+                    // Doesn't exist (let the caller's own not-found handling fire against the
+                    // ORIGINAL id) or isn't rescheduled — this is the current, live session.
+                    return currentId;
+                }
+
+                var next = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.RescheduledFromSessionId == currentId)
+                    .Select(s => (Guid?)s.Id)
+                    .FirstOrDefaultAsync(cancellationToken);
+                if (next is null)
+                {
+                    // Rescheduled but nothing claims to be its replacement — shouldn't happen
+                    // (RescheduleAsync always creates one in the same transaction) — stop on
+                    // this data inconsistency rather than loop.
+                    return currentId;
+                }
+                currentId = next.Value;
+            }
+            return currentId;
+        }
+
         public async Task<JitsiJoinDto> GetJitsiJoinAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default)
         {
-            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken)
+            // Confirmed live: a teacher and a student, each joining from their own portal after
+            // an admin edited (rescheduled) the class, ended up with two different-but-both-
+            // "valid" session ids for what they both thought was the same class — most often
+            // because one of them still had the page open from before the edit and never
+            // reloaded the now-stale list it was showing. Both landed in the same Jitsi video
+            // room regardless (MeetingRoomId carries over on a reschedule), so the call itself
+            // looked completely fine to both — but the ClassroomHub group is keyed by session
+            // id, so neither's People roster or whiteboard ever synced with the other. Resolving
+            // to the current session before doing anything else means it no longer matters which
+            // id either side started from — same fix for the exact same symptom already found
+            // and shipped for one specific cause (a stale DemoBooking link) now covers every
+            // cause of it, including a browser tab that's simply been open since before the edit.
+            var resolvedSessionId = await ResolveCurrentSessionIdAsync(sessionId, cancellationToken);
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(resolvedSessionId, cancellationToken)
                 ?? throw new NotFoundException(nameof(ClassSession), sessionId);
 
             if (string.IsNullOrWhiteSpace(session.MeetingRoomId))
@@ -875,12 +1352,28 @@ namespace iucs.readernest.application.Services
             // minutes before start until the scheduled end) — only enforced client-side before
             // this, so a real, usable room + token was one direct GET away for any session at
             // any time, past or weeks out, regardless of what the join button showed.
+            //
+            // Admin/SubAdmin-monitor is the one exception: admin/Sessions.tsx and
+            // coordinator/Calendar.tsx both deliberately show "Join" for every
+            // scheduled/demo session regardless of how far out it is — "Admin had no way at
+            // all to drop into a live class from this screen" is that feature's own comment —
+            // so this check applying to them too silently broke the button with "This class
+            // hasn't opened for joining yet." on anything more than 10 minutes away. A genuine
+            // participant (Teacher/Parent) still only gets the real join window.
+            var isMonitor = user.Role is UserRole.Admin or UserRole.SubAdmin;
             var now = DateTime.UtcNow;
-            if (now < session.ScheduledStartAtUtc.AddMinutes(-10))
+            if (!isMonitor && now < session.ScheduledStartAtUtc.AddMinutes(-10))
             {
                 throw new DomainValidationException("This class hasn't opened for joining yet.");
             }
-            if (now > session.ScheduledEndAtUtc)
+            // This deployment's Jitsi has no duration cap (see docs/LONG_DURATION_SESSIONS.md) and
+            // JitsiLive.tsx's own "Continue Class" flow exists specifically so classes can legitimately
+            // run past ScheduledEndAtUtc — but this check, enforced against the wall clock alone, still
+            // refused a rejoin for anyone (teacher or student) who disconnected after that instant, even
+            // with the class actively InProgress. Confirmed live gap, not a Jitsi limitation. InProgress
+            // sessions get no time cutoff at all now; a still-Scheduled session (never actually started)
+            // keeps the original cutoff so a stale/abandoned booking can't be joined indefinitely.
+            if (!isMonitor && session.Status != SessionStatus.InProgress && now > session.ScheduledEndAtUtc)
             {
                 throw new DomainValidationException("This class has already ended.");
             }
@@ -903,7 +1396,269 @@ namespace iucs.readernest.application.Services
                 // token that's valid indefinitely — it dies with the class, not with the link.
                 session.ScheduledEndAtUtc.AddHours(2));
 
-            return new JitsiJoinDto { Room = session.MeetingRoomId, Domain = domain, Token = token };
+            return new JitsiJoinDto
+            {
+                SessionId = session.Id,
+                Room = session.MeetingRoomId,
+                Domain = domain,
+                Token = token,
+                ScheduledEndAtUtc = session.ScheduledEndAtUtc,
+                IsDemo = session.Type == SessionType.Demo,
+            };
+        }
+
+        public async Task<IReadOnlyList<GuestLinkStudentDto>> GetGuestLinkStudentsAsync(Guid sessionId, CancellationToken cancellationToken = default)
+        {
+            var resolvedSessionId = await ResolveCurrentSessionIdAsync(sessionId, cancellationToken);
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(resolvedSessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+
+            if (session.BatchId is not Guid batchId)
+            {
+                return Array.Empty<GuestLinkStudentDto>();
+            }
+
+            return await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.BatchId == batchId && e.Status == EnrollmentStatus.Active)
+                .Join(_unitOfWork.Repository<Child>().Query(), e => e.ChildId, c => c.Id, (e, c) => c)
+                .Join(_unitOfWork.Repository<ParentProfile>().Query(), c => c.ParentProfileId, p => p.Id, (c, p) => new { Child = c, ParentUserId = p.UserId })
+                .Join(_unitOfWork.Repository<User>().Query(), cp => cp.ParentUserId, u => u.Id, (cp, u) => new GuestLinkStudentDto
+                {
+                    ChildId = cp.Child.Id,
+                    ChildName = (cp.Child.FirstName + " " + cp.Child.LastName).Trim(),
+                    ParentName = (u.FirstName + " " + u.LastName).Trim(),
+                    ParentPhone = u.Phone,
+                })
+                .OrderBy(s => s.ChildName)
+                .ToListAsync(cancellationToken);
+        }
+
+        public async Task<GuestLinkDto> CreateGuestLinkAsync(Guid sessionId, Guid? childId, CancellationToken cancellationToken = default)
+        {
+            var resolvedSessionId = await ResolveCurrentSessionIdAsync(sessionId, cancellationToken);
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(resolvedSessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+
+            if (string.IsNullOrWhiteSpace(session.MeetingRoomId))
+            {
+                throw new DomainValidationException("This session has no meeting room yet.");
+            }
+
+            if (childId is Guid cid)
+            {
+                var isActiveEnrollment = session.BatchId is Guid batchId && await _unitOfWork.Repository<BatchEnrollment>()
+                    .ExistsAsync(e => e.BatchId == batchId && e.ChildId == cid && e.Status == EnrollmentStatus.Active, cancellationToken);
+                if (!isActiveEnrollment)
+                {
+                    throw new DomainValidationException("That student isn't enrolled in this session's batch.");
+                }
+            }
+
+            // Outer safety bound only -- GetGuestJoinAsync re-checks the session's live status/
+            // time on every open, so this just stops a never-used link from staying mintable
+            // indefinitely rather than being the thing that actually governs reuse.
+            //
+            // Bug fixed 2026-09-16: for a session whose scheduled end is already more than a day
+            // in the past (nothing stops an admin/RM from opening "Copy Guest Link" on an old,
+            // completed session), ScheduledEndAtUtc.AddDays(1) lands BEFORE DateTime.UtcNow --
+            // JwtSecurityToken's constructor requires expires > notBefore (notBefore being "now"
+            // below in JwtTokenService) and throws otherwise, which surfaced as an unhandled 500
+            // ("Couldn't create the guest link — An unexpected error occurred") in production.
+            // Clamped to never be earlier than a short margin past now, same "still bounded, not
+            // a real gate" reasoning as this comment already describes -- GetGuestJoinAsync's own
+            // live-status check is what actually rejects joining a long-over class, not this.
+            var guestLinkExpiresAtUtc = session.ScheduledEndAtUtc.AddDays(1);
+            if (guestLinkExpiresAtUtc <= DateTime.UtcNow)
+            {
+                guestLinkExpiresAtUtc = DateTime.UtcNow.AddHours(1);
+            }
+            var guestToken = _tokenService.CreateGuestJoinToken(session.Id, childId, guestLinkExpiresAtUtc);
+            return new GuestLinkDto { Token = guestToken.AccessToken };
+        }
+
+        public async Task<GuestLinkDto> CreateGuestLinkForParticipantAsync(Guid sessionId, string guestName, string? guestEmail, CancellationToken cancellationToken = default)
+        {
+            var resolvedSessionId = await ResolveCurrentSessionIdAsync(sessionId, cancellationToken);
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(resolvedSessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+
+            if (string.IsNullOrWhiteSpace(session.MeetingRoomId))
+            {
+                throw new DomainValidationException("This session has no meeting room yet.");
+            }
+
+            // A long-lived outer bound, not the AddDays(1)-past-scheduled-end one
+            // CreateGuestLinkAsync above uses -- GetGuestJoinAsync deliberately skips its own
+            // live-status gate for this "named guest" token shape (see that method's own
+            // comment), so this outer expiry is the only thing bounding it at all, and it needs
+            // to outlive "revisited weeks later" the same way the DemoBookingService redirect
+            // this replaces always has (its own old JoinTokenLifetime was 5 years, for the same
+            // "still bounded, not literally forever" reasoning).
+            var guestToken = _tokenService.CreateGuestJoinToken(
+                session.Id, childId: null, DateTime.UtcNow.AddYears(5), guestName, guestEmail);
+            return new GuestLinkDto { Token = guestToken.AccessToken };
+        }
+
+        public async Task<GuestJoinDto> GetGuestJoinAsync(string token, CancellationToken cancellationToken = default)
+        {
+            var parsed = _tokenService.ValidateGuestJoinToken(token)
+                ?? throw new DomainValidationException("This link is invalid or has expired.");
+
+            var resolvedSessionId = await ResolveCurrentSessionIdAsync(parsed.SessionId, cancellationToken);
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(resolvedSessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), resolvedSessionId);
+
+            if (string.IsNullOrWhiteSpace(session.MeetingRoomId))
+            {
+                throw new DomainValidationException("This class has no meeting room yet.");
+            }
+
+            // A "named guest" link (DemoBookingService.CreateGuestLinkForParticipantAsync -- a
+            // Demo lead's own join link, no Child/BatchEnrollment row to check) deliberately
+            // skips the live status/time gate below entirely: it replaces the old raw-Jitsi demo
+            // redirect, which had no such gate either ("Deliberately no time-based cutoff: a demo
+            // that ran long, got revisited weeks later for a recap, or whose invite just sat
+            // unopened all still resolve" -- see ResolveLiveJoinUrlAsync's own doc comment). Only
+            // a childId-bound or generic RM/Admin/Coordinator Guest Link -- the client's explicit
+            // "expires at session end/Completed" requirement -- gets the strict check.
+            var isNamedGuest = !string.IsNullOrWhiteSpace(parsed.GuestName);
+            if (!isNamedGuest)
+            {
+                // Live status/time check -- deliberately NOT relying on the guest token's own
+                // (generous) expiry alone, so a link dies the instant the class is marked
+                // Completed or Cancelled even if that happens well before its outer expiry bound.
+                var now = DateTime.UtcNow;
+                if (session.Status == SessionStatus.Cancelled)
+                {
+                    throw new DomainValidationException("This class was cancelled.");
+                }
+                if (session.Status == SessionStatus.Completed)
+                {
+                    throw new DomainValidationException("This class has already ended.");
+                }
+                if (now < session.ScheduledStartAtUtc.AddMinutes(-10))
+                {
+                    throw new DomainValidationException("This class hasn't opened for joining yet.");
+                }
+                if (session.Status != SessionStatus.InProgress && now > session.ScheduledEndAtUtc)
+                {
+                    throw new DomainValidationException("This class has already ended.");
+                }
+            }
+
+            var childId = parsed.ChildId;
+            var displayName = "Guest";
+            string? participantEmail = null;
+            if (childId is Guid cid)
+            {
+                var stillEnrolled = session.BatchId is Guid batchId && await _unitOfWork.Repository<BatchEnrollment>()
+                    .ExistsAsync(e => e.BatchId == batchId && e.ChildId == cid && e.Status == EnrollmentStatus.Active, cancellationToken);
+                var child = stillEnrolled ? await _unitOfWork.Repository<Child>().GetByIdAsync(cid, cancellationToken) : null;
+                if (child is not null)
+                {
+                    displayName = $"{child.FirstName} {child.LastName}".Trim();
+                }
+                else
+                {
+                    // Defensive: the student was un-enrolled (or their record removed) after
+                    // this link was generated. Fall back to a generic guest join rather than
+                    // failing outright -- the class itself is still perfectly joinable.
+                    childId = null;
+                }
+            }
+            else if (isNamedGuest)
+            {
+                displayName = parsed.GuestName!;
+                participantEmail = parsed.GuestEmail;
+            }
+
+            var jitsiConfigJson = await _unitOfWork.Repository<Integration>().Query()
+                .Where(i => i.Key == "jitsi")
+                .Select(i => i.ConfigJson)
+                .FirstOrDefaultAsync(cancellationToken);
+            var domain = JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
+
+            // Based on "now", not session.ScheduledEndAtUtc: a named-guest (demo) join can
+            // legitimately happen weeks after that timestamp (see isNamedGuest's own comment
+            // above), and a token minted with an already-past expiry would be DOA. A couple of
+            // hours past the moment of THIS open still covers a live class running long, same
+            // intent the old ScheduledEndAtUtc-based expiry had for the still-time-gated case.
+            var perOpenExpiresAtUtc = DateTime.UtcNow.AddHours(2);
+
+            var jitsiToken = _jitsiTokenService.CreateToken(
+                domain,
+                jitsiConfigJson,
+                session.MeetingRoomId,
+                displayName,
+                participantEmail,
+                moderator: false,
+                perOpenExpiresAtUtc);
+
+            // Lets the landing page join the same interactive classroom (whiteboard, quiz,
+            // roster, gamification) an ordinary logged-in student would -- see
+            // CreateGuestClassroomHubToken's own doc comment for why this is a second, distinct
+            // token from jitsiToken above (Jitsi's own call vs. this app's ClassroomHub).
+            var hubToken = _tokenService.CreateGuestClassroomHubToken(
+                session.Id, childId, displayName, perOpenExpiresAtUtc);
+
+            return new GuestJoinDto
+            {
+                SessionId = session.Id,
+                ChildId = childId,
+                Room = session.MeetingRoomId,
+                Domain = domain,
+                Token = jitsiToken,
+                DisplayName = displayName,
+                SkipPrejoin = childId is not null || isNamedGuest,
+                HubToken = hubToken.AccessToken,
+            };
+        }
+
+        public async Task<RecordingObserverJoinDto?> GetLiveObserverJoinAsync(string roomName, CancellationToken cancellationToken = default)
+        {
+            // Disambiguation is simpler than FinalizeJibriRecordingAsync's closest-scheduled-end
+            // heuristic: "InProgress right now" is unambiguous for a room that can only be one
+            // class at a time on this deployment, whereas finalize runs after the fact against
+            // every historical session that ever used the room.
+            var candidates = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.MeetingRoomId == roomName && s.Status == SessionStatus.InProgress)
+                .ToListAsync(cancellationToken);
+
+            if (candidates.Count == 0)
+            {
+                return null;
+            }
+
+            // Shouldn't happen -- but FinalizeJibriRecordingAsync's own history shows "shouldn't
+            // happen" has happened before for this same MeetingRoomId-sharing pattern. Earliest
+            // start keeps this deterministic rather than throwing, since Jibri can't react to an
+            // error here anyway.
+            var session = candidates.Count == 1
+                ? candidates[0]
+                : candidates.MinBy(s => s.ActualStartAtUtc ?? s.ScheduledStartAtUtc)!;
+
+            var jitsiConfigJson = await _unitOfWork.Repository<Integration>().Query()
+                .Where(i => i.Key == "jitsi")
+                .Select(i => i.ConfigJson)
+                .FirstOrDefaultAsync(cancellationToken);
+            var domain = JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
+            // A generous ceiling rather than tied to ScheduledEndAtUtc like a real participant's
+            // token -- a class running long shouldn't have its own recording observer's access
+            // expire mid-capture.
+            var expiresAtUtc = DateTime.UtcNow.AddHours(4);
+
+            var token = _jitsiTokenService.CreateRecordingObserverToken(domain, jitsiConfigJson, roomName, expiresAtUtc);
+            var hubToken = _tokenService.CreateRecordingObserverHubToken(session.Id, expiresAtUtc).AccessToken;
+
+            return new RecordingObserverJoinDto
+            {
+                SessionId = session.Id,
+                Room = roomName,
+                Domain = domain,
+                Token = token,
+                HubToken = hubToken,
+                ExpiresAtUtc = expiresAtUtc,
+            };
         }
 
         public async Task<ClassroomSettingsDto> GetClassroomSettingsAsync(CancellationToken cancellationToken = default)
@@ -917,7 +1672,102 @@ namespace iucs.readernest.application.Services
             {
                 Domain = JitsiLinkBuilder.ResolveDomain(configJson),
                 AutoRecordEnabled = ReadAutoRecordEnabled(configJson),
+                DefaultLobbyEnabled = ReadDefaultLobbyEnabled(configJson),
             };
+        }
+
+        /// <summary>Admin, or specifically this session's own assigned teacher — narrower than
+        /// <see cref="IsSessionParticipantAsync"/>, which also lets an enrolled parent through.</summary>
+        private async Task EnsurePresentationModeratorAsync(ClassSession session, Guid userId, CancellationToken cancellationToken)
+        {
+            var user = await _unitOfWork.Repository<User>().GetByIdAsync(userId, cancellationToken)
+                ?? throw new UnauthorizedException("Not signed in.");
+
+            if (user.Role == UserRole.Admin)
+            {
+                return;
+            }
+
+            var isAssignedTeacher = user.Role == UserRole.Teacher
+                && await _unitOfWork.Repository<TeacherProfile>()
+                    .ExistsAsync(t => t.Id == session.TeacherProfileId && t.UserId == userId, cancellationToken);
+            if (!isAssignedTeacher)
+            {
+                throw new ForbiddenException("Only this class's own teacher can present a deck here.");
+            }
+        }
+
+        public async Task<SessionPresentationDto> UploadPresentationAsync(
+            Guid sessionId,
+            Guid userId,
+            string storageUrl,
+            string originalFileName,
+            CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+            await EnsurePresentationModeratorAsync(session, userId, cancellationToken);
+
+            var repository = _unitOfWork.Repository<SessionPresentation>();
+            // Replaces any prior deck for this session rather than accumulating one row per
+            // upload — a teacher swapping decks mid-prep shouldn't leave orphaned old ones
+            // behind, and there's only ever one "current" deck to present.
+            var existing = await repository.TrackedQuery().FirstOrDefaultAsync(p => p.ClassSessionId == sessionId, cancellationToken);
+            if (existing is not null)
+            {
+                existing.StorageUrl = storageUrl;
+                existing.OriginalFileName = originalFileName;
+            }
+            else
+            {
+                existing = new SessionPresentation
+                {
+                    ClassSessionId = sessionId,
+                    StorageUrl = storageUrl,
+                    OriginalFileName = originalFileName,
+                };
+                await repository.AddAsync(existing, cancellationToken);
+            }
+
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            return ToPresentationDto(existing);
+        }
+
+        public async Task<SessionPresentationDto?> GetPresentationAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+            if (!await IsSessionParticipantAsync(session, userId, cancellationToken))
+            {
+                throw new ForbiddenException("You do not have access to this session.");
+            }
+
+            var presentation = await _unitOfWork.Repository<SessionPresentation>().Query()
+                .FirstOrDefaultAsync(p => p.ClassSessionId == sessionId, cancellationToken);
+            return presentation is null ? null : ToPresentationDto(presentation);
+        }
+
+        private static SessionPresentationDto ToPresentationDto(SessionPresentation presentation) => new()
+        {
+            Id = presentation.Id,
+            ClassSessionId = presentation.ClassSessionId,
+            OriginalFileName = presentation.OriginalFileName,
+            CreatedAtUtc = presentation.CreatedAtUtc,
+        };
+
+        public async Task<SessionPresentationDownloadDto> GetPresentationForDownloadAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+            if (!await IsSessionParticipantAsync(session, userId, cancellationToken))
+            {
+                throw new ForbiddenException("You do not have access to this session.");
+            }
+
+            var presentation = await _unitOfWork.Repository<SessionPresentation>().Query()
+                .FirstOrDefaultAsync(p => p.ClassSessionId == sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(SessionPresentation), sessionId);
+            return new SessionPresentationDownloadDto { StorageUrl = presentation.StorageUrl, OriginalFileName = presentation.OriginalFileName };
         }
 
         /// <summary>Defaults to on (today's unconditional behaviour) until an admin explicitly turns it off.</summary>
@@ -932,6 +1782,32 @@ namespace iucs.readernest.application.Services
             {
                 var config = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(configJson);
                 if (config is not null && config.TryGetValue("autoRecord", out var value) && bool.TryParse(value, out var parsed))
+                {
+                    return parsed;
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Malformed config — keep the safe default.
+            }
+
+            return true;
+        }
+
+        /// <summary>Defaults to on: a student joining before the teacher shouldn't land straight in an
+        /// empty, unattended room by default — an admin can turn this off if a centre prefers the old
+        /// always-open behaviour. See DefaultLobbyEnabled's own doc comment.</summary>
+        private static bool ReadDefaultLobbyEnabled(string? configJson)
+        {
+            if (string.IsNullOrWhiteSpace(configJson))
+            {
+                return true;
+            }
+
+            try
+            {
+                var config = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(configJson);
+                if (config is not null && config.TryGetValue("defaultLobby", out var value) && bool.TryParse(value, out var parsed))
                 {
                     return parsed;
                 }
@@ -968,6 +1844,7 @@ namespace iucs.readernest.application.Services
                     var activity = group.Where(e => e.Type is EngagementEventType.ActivityClick or EngagementEventType.ActivityCompleted).Sum(e => e.Value);
                     var whiteboard = group.Where(e => e.Type == EngagementEventType.WhiteboardInteraction).Sum(e => e.Value);
                     var attention = group.Where(e => e.Type == EngagementEventType.AttentionPing).Sum(e => e.Value);
+                    var screenShare = group.Where(e => e.Type == EngagementEventType.ScreenShareSeconds).Sum(e => e.Value);
 
                     var score = EngagementScoring.Score(quizCorrect, quizAttempts, activity, whiteboard, attention);
 
@@ -980,6 +1857,7 @@ namespace iucs.readernest.application.Services
                         ActivityInteractions = activity,
                         WhiteboardInteractions = whiteboard,
                         AttentionPings = attention,
+                        ScreenShareSeconds = screenShare,
                         EngagementScore = score,
                         LearningOutcome = score >= 60 ? "on-track" : score >= 30 ? "needs-encouragement" : "needs-attention",
                     };
@@ -1015,6 +1893,17 @@ namespace iucs.readernest.application.Services
                 summary += $" {engagement.Sum(e => e.QuizCorrect)}/{quizAttempts} quiz answers correct.";
             }
 
+            // Durable "was the whiteboard actually captured" signal (see
+            // EngagementEventType.ScreenShareSeconds) -- silent when zero rather than warning,
+            // since most sessions predate this feature and haven't adopted it yet; a warning
+            // on every one of those would be noise, not signal.
+            var screenShareSeconds = engagement.Sum(e => e.ScreenShareSeconds);
+            if (screenShareSeconds > 0)
+            {
+                var screenShareMinutes = Math.Max(1, screenShareSeconds / 60);
+                summary += $" Screen-shared for ~{screenShareMinutes} min — the recording should include the whiteboard.";
+            }
+
             return summary;
         }
 
@@ -1032,6 +1921,33 @@ namespace iucs.readernest.application.Services
                     NotificationType.NoShowAlert,
                     "teacher-noshow-alert",
                     new Dictionary<string, string> { ["StartAtLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc, admin.TimeZoneId) },
+                    cancellationToken);
+            }
+        }
+
+        /// <summary>One-time alert once a no-show chain hits MaxAutoCarryForwards and stops
+        /// auto-rescheduling itself — sent for either party, unlike the teacher-only alert
+        /// above, since a chain this long is itself the problem worth a human's attention
+        /// (an abandoned lead, a batch that should have been archived) regardless of which
+        /// side each individual week's no-show was attributed to.</summary>
+        private async Task NotifyAdminsOfStalledNoShowChainAsync(ClassSession session, CancellationToken cancellationToken)
+        {
+            var admins = await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.Role == UserRole.Admin && u.Status == UserStatus.Active)
+                .ToListAsync(cancellationToken);
+
+            foreach (var admin in admins)
+            {
+                await _notificationService.SendTemplatedEmailAsync(
+                    admin.Id,
+                    admin.Email,
+                    NotificationType.NoShowAlert,
+                    "noshow-chain-stalled-alert",
+                    new Dictionary<string, string>
+                    {
+                        ["StartAtLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc, admin.TimeZoneId),
+                        ["CarryForwardCount"] = (session.CarryForwardCount + 1).ToString(),
+                    },
                     cancellationToken);
             }
         }

@@ -27,14 +27,14 @@ namespace iucs.readernest.application.Common
             {
                 AcademicCoordinator =>
                 [
-                    new PermissionDto { Module = PermissionModule.SessionCalendarManagement, CanView = true, CanCreate = true, CanEdit = true },
-                    new PermissionDto { Module = PermissionModule.LeaveManagement, CanView = true, CanApprove = true },
-                    new PermissionDto { Module = PermissionModule.UserManagement, CanView = true },
-                    new PermissionDto { Module = PermissionModule.CourseBatchManagement, CanView = true },
+                    new PermissionDto { Module = PermissionModule.SessionCalendarManagement.ToString(), CanView = true, CanCreate = true, CanEdit = true },
+                    new PermissionDto { Module = PermissionModule.LeaveManagement.ToString(), CanView = true, CanApprove = true },
+                    new PermissionDto { Module = PermissionModule.UserManagement.ToString(), CanView = true },
+                    new PermissionDto { Module = PermissionModule.CourseBatchManagement.ToString(), CanView = true },
                 ],
                 Management =>
                 [
-                    new PermissionDto { Module = PermissionModule.ReportsAnalytics, CanView = true },
+                    new PermissionDto { Module = PermissionModule.ReportsAnalytics.ToString(), CanView = true },
                 ],
                 _ => null,
             };

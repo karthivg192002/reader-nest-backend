@@ -17,6 +17,19 @@ namespace iucs.readernest.application.Common
         public static readonly IReadOnlyList<RequiredGrant> All =
         [
             new("teacher", PermissionModule.Payouts, View: true),
+            // The Relationship Manager Dashboard's KPI tiles read GET /api/reports/dashboard-summary,
+            // gated on this module — the "sub-admin" preset shipped with an empty grant set ("grant
+            // modules as needed"), so every Relationship Manager who never had this hand-granted saw
+            // every KPI tile fail with "Couldn't load" from the moment they first logged in.
+            new("sub-admin", PermissionModule.ReportsAnalytics, View: true),
+            // Batches, Users (view) and Audit Log are baseline Relationship Manager access —
+            // granted the moment the role is assigned, never gated behind the Admin's
+            // Access-Requests approval popup. No Delete flag: BatchesController has no delete
+            // endpoint at all (a batch only moves Active/Dormant/Archived via SetStatus, which
+            // is PermissionAction.Edit), so "Create/Edit/View/Delete" for batches means
+            // Create + Edit + View here, with Edit covering the archive-as-delete action.
+            new("sub-admin", PermissionModule.CourseBatchManagement, View: true, Create: true, Edit: true),
+            new("sub-admin", PermissionModule.UserManagement, View: true),
             // Lets a teacher see and resolve doubts the "Ask a Doubt" chatbot escalated —
             // Communication already gates Progress Reports/Email Templates for the same module.
             new("teacher", PermissionModule.Communication, View: true, Edit: true),
@@ -42,11 +55,32 @@ namespace iucs.readernest.application.Common
             // even on a real account with real demos. Confirmed live via network trace:
             // GET /api/sessions?fromUtc=...&toUtc=... → 403 for the admission role.
             new("admission", PermissionModule.SessionCalendarManagement, View: true),
+            // The Admission Dashboard's KPI tiles (Demos This Week, Demo->Enrollment Conversion,
+            // Pending Follow-ups, Revenue From Conversions) and Conversion Funnel chart all read
+            // GET /api/reports/dashboard-summary, gated on this module -- same root cause as the
+            // "sub-admin" grant above, just never applied to the AdmissionTeam system role itself.
+            // Confirmed live: a real AdmissionTeam account 403'd on this endpoint, showing
+            // "Couldn't load" on every KPI tile despite having real demos/leads to show.
+            new("admission", PermissionModule.ReportsAnalytics, View: true),
             // /management/revenue's course-wise breakdown reads GET /api/courses, which is
             // gated on this module, not ReportsAnalytics — without it the page's own API call
             // 403's and silently renders "No records found, ₹0 total" instead of the real
             // figures shown by the chart above it.
             new("management", PermissionModule.CourseBatchManagement, View: true),
+            // ClassSessionLogs is a net-new module (added alongside the Class Session Logs
+            // screen) — SeedRolesAsync's existing-role branch never re-derives a role's
+            // Permissions from AllModulesFull() once the row already exists, so an already-
+            // seeded "admin" RoleDefinition (every real install) never picked up this module
+            // the way a brand-new database's admin role automatically would. Functionally a
+            // real Admin *account* was never blocked by this — HasPermissionAttribute passes
+            // Admin implicitly, independent of any RolePermission row — but the Roles &
+            // Permissions screen's own matrix showed "Class Session Logs" unchecked for the
+            // Admin system role while every other module showed fully checked, which read as
+            // a real inconsistency/bug. Admin-only; no other system role gets this module by
+            // default (Class Session Logs is an IT/ops-monitoring capability, granted per-role
+            // like any other custom module — e.g. to a custom "IT Admin" preset — not baseline
+            // access for Coordinator/Management/etc.).
+            new("admin", PermissionModule.ClassSessionLogs, View: true, Create: true, Edit: true, Delete: true, Approve: true),
         ];
 
         public sealed record RequiredGrant(

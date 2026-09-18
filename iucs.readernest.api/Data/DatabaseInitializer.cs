@@ -37,16 +37,22 @@ namespace iucs.readernest.api.Data
             await SeedDepartmentsAsync(context);
             await SeedPaymentAccountsAsync(context);
             await SeedSettingsAsync(context);
+            await SeedPermissionModulesAsync(context);
             await SeedRolesAsync(context);
             await BackfillSystemRolePermissionsAsync(context);
             await SeedMenusAsync(context);
             await RemoveRetiredMenusAsync(context);
             await EnsureSubAdminIntegrationsMenuAsync(context);
+            await EnsureSubAdminBatchesAndUsersMenusAsync(context);
+            await EnsureDelegatedPortalSessionsMenuAsync(context);
             await EnsurePackagesAndStudentViewMenusAsync(context);
             await EnsureAdminDepartmentsMenuAsync(context);
             await EnsureAdminQuizBankMenuAsync(context);
             await EnsureAdminActivityBankMenuAsync(context);
             await EnsureAdminServerMonitoringMenuAsync(context);
+            await EnsureClassSessionLogsMenuAsync(context);
+            await EnsureItAdminMenuAsync(context);
+            await EnsureBulkEmailHistoryMenuAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
             await EnsureCashPaymentMethodAsync(context);
@@ -57,11 +63,18 @@ namespace iucs.readernest.api.Data
             await ReconcileWelcomeCredentialsPinTemplateAsync(context);
             await EnsureEmailTemplatesMenuAsync(context);
             await EnsureProgressReportEmailTemplateAsync(context);
+            await EnsureDemoScheduledTeacherEmailTemplateAsync(context);
             await EnsurePinResetEmailTemplateAsync(context);
             await EnsureAccessRequestEmailTemplatesAsync(context);
+            await EnsurePaymentPlanReminderEmailTemplatesAsync(context);
             await ReconcileOrgNameEmailTemplatesAsync(context);
             await EnsureProgressReportsMenuAsync(context);
             await EnsureStoreInquiriesMenuAsync(context);
+            await EnsureAdminLeaveAndAvailabilityMenuAsync(context);
+            await EnsureTeacherRecordingsMenuAsync(context);
+            await EnsureAdminRecordingsMenuAsync(context);
+            await EnsureAdmissionPaymentTrackingMenuAsync(context);
+            await EnsureTeacherAssignmentMenuAsync(context);
             await EnsureParentRecordingsMenuAsync(context);
             await EnsureChatbotMenusAsync(context);
             await SeedChatFaqsAsync(context);
@@ -208,6 +221,57 @@ namespace iucs.readernest.api.Data
                 Setting(SettingCategory.Notifications, "notify.weeklyDigest", "true"));
         }
 
+        /// <summary>
+        /// The 12 built-in permission modules as real PermissionModuleDefinition rows (IsSystem
+        /// = true, Key matching the PermissionModule enum's own name), so the Roles &amp;
+        /// Permissions screen's module list is entirely DB-driven — an Admin-defined custom
+        /// module sits in the same table alongside these, not a separate hardcoded list.
+        /// Insert-if-absent only: never touches a row an Admin might have (in principle)
+        /// already renamed, and never touches custom modules.
+        /// </summary>
+        private static async Task SeedPermissionModulesAsync(ReaderNestDbContext context)
+        {
+            (PermissionModule Module, string Label)[] builtIns =
+            [
+                (PermissionModule.UserManagement, "User Management"),
+                (PermissionModule.CourseBatchManagement, "Courses & Batches"),
+                (PermissionModule.SessionCalendarManagement, "Sessions & Calendar"),
+                (PermissionModule.ContentAccessManagement, "Content & Resources"),
+                (PermissionModule.BillingFinance, "Billing & Finance"),
+                (PermissionModule.Payouts, "Payouts"),
+                (PermissionModule.ReportsAnalytics, "Reports & Analytics"),
+                (PermissionModule.Admission, "Admission"),
+                (PermissionModule.LeaveManagement, "Leave Management"),
+                (PermissionModule.Communication, "Communication"),
+                (PermissionModule.Settings, "Settings"),
+                (PermissionModule.SystemMonitoring, "Server Monitoring"),
+                (PermissionModule.ClassSessionLogs, "Class Session Logs"),
+            ];
+
+            var existingKeys = await context.PermissionModuleDefinitions
+                .Select(m => m.Key)
+                .ToListAsync();
+            var existingKeySet = existingKeys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            for (var i = 0; i < builtIns.Length; i++)
+            {
+                var (module, label) = builtIns[i];
+                var key = module.ToString();
+                if (existingKeySet.Contains(key))
+                {
+                    continue;
+                }
+
+                context.PermissionModuleDefinitions.Add(new PermissionModuleDefinition
+                {
+                    Key = key,
+                    Label = label,
+                    IsSystem = true,
+                    SortOrder = i,
+                });
+            }
+        }
+
         private static async Task SeedRolesAsync(ReaderNestDbContext context)
         {
             // System roles mirror the platform's portals so the Roles & Permissions
@@ -327,13 +391,13 @@ namespace iucs.readernest.api.Data
                     continue;
                 }
 
-                var existing = role.Permissions.FirstOrDefault(p => p.Module == module);
+                var existing = role.Permissions.FirstOrDefault(p => p.Module == module.ToString());
                 if (existing is null)
                 {
                     context.RolePermissions.Add(new RolePermission
                     {
                         RoleDefinitionId = role.Id,
-                        Module = module,
+                        Module = module.ToString(),
                         CanView = view,
                         CanCreate = create,
                         CanEdit = edit,
@@ -361,13 +425,13 @@ namespace iucs.readernest.api.Data
 
                 foreach (var userId in subAdminUserIds.Where(u => u.RoleDefinitionId == role.Id).Select(u => u.Id))
                 {
-                    var grant = existingSubAdminGrants.FirstOrDefault(p => p.UserId == userId && p.Module == module);
+                    var grant = existingSubAdminGrants.FirstOrDefault(p => p.UserId == userId && p.Module == module.ToString());
                     if (grant is null)
                     {
                         context.SubAdminPermissions.Add(new SubAdminPermission
                         {
                             UserId = userId,
-                            Module = module,
+                            Module = module.ToString(),
                             CanView = view,
                             CanCreate = create,
                             CanEdit = edit,
@@ -390,7 +454,7 @@ namespace iucs.readernest.api.Data
         private static IReadOnlyList<(string Name, string DisplayName, string Description, string DefaultRoute, PermissionDto[] Permissions)> SystemRoleSeeds()
         {
             PermissionDto Grant(PermissionModule module, bool view = false, bool create = false, bool edit = false, bool delete = false, bool approve = false) =>
-                new() { Module = module, CanView = view, CanCreate = create, CanEdit = edit, CanDelete = delete, CanApprove = approve };
+                new() { Module = module.ToString(), CanView = view, CanCreate = create, CanEdit = edit, CanDelete = delete, CanApprove = approve };
 
             PermissionDto[] AllModulesFull() =>
                 Enum.GetValues<PermissionModule>()
@@ -445,12 +509,15 @@ namespace iucs.readernest.api.Data
 
         /// <summary>
         /// Removes menu items retired after the initial seed (the seed early-returns once
-        /// any menu exists, so removals need their own idempotent pass). Currently drops the
-        /// Coordinator "Scheduling" screen — the coordinator role is monitor-only.
+        /// any menu exists, so removals need their own idempotent pass). Drops the
+        /// Coordinator "Scheduling" screen — the coordinator role is monitor-only — and the
+        /// Teacher "Live Classroom" item, which hardcoded a demo-only mock session id
+        /// ("/teacher/live/s-1") that always 404s in real API mode; "Start Class" on My
+        /// Classes is the one entry point that actually knows which session/room to join.
         /// </summary>
         private static async Task RemoveRetiredMenusAsync(ReaderNestDbContext context)
         {
-            var retiredPaths = new[] { "/coordinator/scheduling" };
+            var retiredPaths = new[] { "/coordinator/scheduling", "/teacher/live/s-1" };
             var stale = await context.MenuItems.Where(m => retiredPaths.Contains(m.Path)).ToListAsync();
             if (stale.Count > 0)
             {
@@ -465,67 +532,78 @@ namespace iucs.readernest.api.Data
         /// always visible (dashboards and other mandatory, non-delegable actions); Admin
         /// bypasses gating entirely regardless of what's set here.
         /// </summary>
-        private static (string Portal, string? Section, string Label, string Path, string Icon, PermissionModule? RequiredModule)[] MenuSeedItems() =>
+        private static (string Portal, string? Section, string Label, string Path, string Icon, string? RequiredModule)[] MenuSeedItems() =>
         [
             ("admin", null, "Dashboard", "/admin", "LayoutDashboard", null),
-            ("admin", "Academics", "Courses", "/admin/courses", "BookOpen", PermissionModule.CourseBatchManagement),
-            ("admin", "Academics", "Departments", "/admin/departments", "Building2", PermissionModule.CourseBatchManagement),
-            ("admin", "Academics", "Batches", "/admin/batches", "Layers", PermissionModule.CourseBatchManagement),
-            ("admin", "Academics", "Academic Calendar", "/admin/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement),
-            ("admin", "Academics", "Sessions", "/admin/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement),
-            ("admin", "Academics", "Quiz Bank", "/admin/quiz-bank", "Sparkles", PermissionModule.CourseBatchManagement),
-            ("admin", "People", "Users", "/admin/users", "Users", PermissionModule.UserManagement),
-            ("admin", "People", "Roles & Permissions", "/admin/permissions", "ShieldCheck", PermissionModule.UserManagement),
-            ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck", PermissionModule.Admission),
-            ("admin", "People", "Store Inquiries", "/admin/store-inquiries", "ShoppingBag", PermissionModule.Admission),
-            ("admin", "Content", "Content & Resources", "/admin/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
-            ("admin", "Finance", "Billing & Finance", "/admin/billing", "Receipt", PermissionModule.BillingFinance),
-            ("admin", "Finance", "Packages & Subscriptions", "/admin/packages", "CreditCard", PermissionModule.BillingFinance),
-            ("admin", "Finance", "Payment Gateway Mapping", "/admin/payment-mapping", "Landmark", PermissionModule.BillingFinance),
-            ("admin", "Finance", "Teacher Payouts", "/admin/payouts", "Wallet", PermissionModule.Payouts),
-            ("admin", "Finance", "Fee Suspension", "/admin/fee-suspension", "Ban", PermissionModule.BillingFinance),
-            ("admin", "Insights", "Reports & Analytics", "/admin/reports", "BarChart3", PermissionModule.ReportsAnalytics),
-            ("admin", "Insights", "Bulk Email", "/admin/bulk-email", "Mail", PermissionModule.Communication),
-            ("admin", "Insights", "Email Templates", "/admin/email-templates", "FileText", PermissionModule.Communication),
-            ("admin", "Insights", "Progress Reports", "/admin/progress-reports", "ScrollText", PermissionModule.Communication),
-            ("admin", "Insights", "Doubt Chatbot", "/admin/chatbot", "MessageCircleQuestion", PermissionModule.Communication),
-            ("admin", "System", "Settings & Branding", "/admin/settings", "Settings", PermissionModule.Settings),
+            ("admin", "Academics", "Courses", "/admin/courses", "BookOpen", PermissionModule.CourseBatchManagement.ToString()),
+            ("admin", "Academics", "Departments", "/admin/departments", "Building2", PermissionModule.CourseBatchManagement.ToString()),
+            ("admin", "Academics", "Batches", "/admin/batches", "Layers", PermissionModule.CourseBatchManagement.ToString()),
+            ("admin", "Academics", "Academic Calendar", "/admin/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement.ToString()),
+            ("admin", "Academics", "Sessions", "/admin/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+            ("admin", "Academics", "Recordings", "/admin/recordings", "Video", PermissionModule.SessionCalendarManagement.ToString()),
+            ("admin", "Academics", "Quiz Bank", "/admin/quiz-bank", "Sparkles", PermissionModule.CourseBatchManagement.ToString()),
+            ("admin", "People", "Users", "/admin/users", "Users", PermissionModule.UserManagement.ToString()),
+            ("admin", "People", "Roles & Permissions", "/admin/permissions", "ShieldCheck", PermissionModule.UserManagement.ToString()),
+            ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck", PermissionModule.Admission.ToString()),
+            ("admin", "People", "Store Inquiries", "/admin/store-inquiries", "ShoppingBag", PermissionModule.Admission.ToString()),
+            ("admin", "People", "Leave Management", "/admin/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
+            ("admin", "People", "Teacher Availability", "/admin/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
+            ("admin", "Content", "Content & Resources", "/admin/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
+            ("admin", "Finance", "Billing & Finance", "/admin/billing", "Receipt", PermissionModule.BillingFinance.ToString()),
+            ("admin", "Finance", "Packages & Subscriptions", "/admin/packages", "CreditCard", PermissionModule.BillingFinance.ToString()),
+            ("admin", "Finance", "Payment Gateway Mapping", "/admin/payment-mapping", "Landmark", PermissionModule.BillingFinance.ToString()),
+            ("admin", "Finance", "Teacher Payouts", "/admin/payouts", "Wallet", PermissionModule.Payouts.ToString()),
+            ("admin", "Finance", "Fee Suspension", "/admin/fee-suspension", "Ban", PermissionModule.BillingFinance.ToString()),
+            ("admin", "Insights", "Reports & Analytics", "/admin/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
+            ("admin", "Insights", "Bulk Email", "/admin/bulk-email", "Mail", PermissionModule.Communication.ToString()),
+            ("admin", "Insights", "Bulk Email History", "/admin/bulk-email/history", "History", PermissionModule.Communication.ToString()),
+            ("admin", "Insights", "Email Templates", "/admin/email-templates", "FileText", PermissionModule.Communication.ToString()),
+            ("admin", "Insights", "Progress Reports", "/admin/progress-reports", "ScrollText", PermissionModule.Communication.ToString()),
+            ("admin", "Insights", "Doubt Chatbot", "/admin/chatbot", "MessageCircleQuestion", PermissionModule.Communication.ToString()),
+            ("admin", "System", "Settings & Branding", "/admin/settings", "Settings", PermissionModule.Settings.ToString()),
             ("teacher", null, "Dashboard", "/teacher", "LayoutDashboard", null),
-            ("teacher", "Teaching", "My Classes", "/teacher/classes", "CalendarClock", PermissionModule.SessionCalendarManagement),
-            ("teacher", "Teaching", "Live Classroom", "/teacher/live/s-1", "Video", PermissionModule.SessionCalendarManagement),
-            ("teacher", "Teaching", "Attendance & Records", "/teacher/attendance", "ClipboardList", PermissionModule.SessionCalendarManagement),
-            ("teacher", "Teaching", "Demo Feedback", "/teacher/demo-feedback", "ClipboardCheck", PermissionModule.SessionCalendarManagement),
-            ("teacher", "Teaching", "Student Doubts", "/teacher/doubts", "MessageCircleQuestion", PermissionModule.Communication),
-            ("teacher", "My Account", "Leave Management", "/teacher/leave", "CalendarOff", PermissionModule.LeaveManagement),
-            ("teacher", "My Account", "My Payout", "/teacher/payout", "Banknote", PermissionModule.Payouts),
-            ("teacher", "My Account", "Resources", "/teacher/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
+            ("teacher", "Teaching", "My Classes", "/teacher/classes", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+            ("teacher", "Teaching", "Attendance & Records", "/teacher/attendance", "ClipboardList", PermissionModule.SessionCalendarManagement.ToString()),
+            ("teacher", "Teaching", "Recordings", "/teacher/recordings", "Video", PermissionModule.SessionCalendarManagement.ToString()),
+            ("teacher", "Teaching", "Demo Feedback", "/teacher/demo-feedback", "ClipboardCheck", PermissionModule.SessionCalendarManagement.ToString()),
+            ("teacher", "Teaching", "Student Doubts", "/teacher/doubts", "MessageCircleQuestion", PermissionModule.Communication.ToString()),
+            ("teacher", "My Account", "Leave Management", "/teacher/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
+            ("teacher", "My Account", "My Payout", "/teacher/payout", "Banknote", PermissionModule.Payouts.ToString()),
+            ("teacher", "My Account", "Resources", "/teacher/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
             ("parent", null, "Dashboard", "/parent", "LayoutDashboard", null),
-            ("parent", "Learning", "Schedule & Live Class", "/parent/schedule", "CalendarClock", PermissionModule.SessionCalendarManagement),
-            ("parent", "Learning", "Resources", "/parent/resources", "FolderOpen", PermissionModule.ContentAccessManagement),
-            ("parent", "Learning", "Recordings", "/parent/recordings", "Video", PermissionModule.ContentAccessManagement),
+            ("parent", "Learning", "Schedule & Live Class", "/parent/schedule", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+            ("parent", "Learning", "Resources", "/parent/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
+            ("parent", "Learning", "Recordings", "/parent/recordings", "Video", PermissionModule.ContentAccessManagement.ToString()),
             ("parent", "Learning", "Student View", "/student", "Sparkles", null),
-            ("parent", "Account", "Payments & Billing", "/parent/billing", "CreditCard", PermissionModule.BillingFinance),
-            ("parent", "Account", "Notifications & Reports", "/parent/notifications", "Bell", PermissionModule.Communication),
+            ("parent", "Account", "Payments & Billing", "/parent/billing", "CreditCard", PermissionModule.BillingFinance.ToString()),
+            ("parent", "Account", "Notifications & Reports", "/parent/notifications", "Bell", PermissionModule.Communication.ToString()),
             ("parent", "Account", "Add Child", "/parent/add-child", "UserPlus", null),
             ("subadmin", null, "Dashboard", "/subadmin", "LayoutDashboard", null),
             ("subadmin", "Access", "My Permissions", "/subadmin/permissions", "ShieldCheck", null),
-            ("subadmin", "Access", "Integrations", "/subadmin/integrations", "Plug", PermissionModule.Settings),
-            ("subadmin", "Delegated Work", "Assigned Reports", "/subadmin/reports", "BarChart3", PermissionModule.ReportsAnalytics),
+            ("subadmin", "Access", "Integrations", "/subadmin/integrations", "Plug", PermissionModule.Settings.ToString()),
+            ("subadmin", "Delegated Work", "Batches", "/subadmin/batches", "Layers", PermissionModule.CourseBatchManagement.ToString()),
+            ("subadmin", "Delegated Work", "Sessions", "/subadmin/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+            ("subadmin", "Delegated Work", "Users", "/subadmin/users", "Users", PermissionModule.UserManagement.ToString()),
+            ("subadmin", "Delegated Work", "Assigned Reports", "/subadmin/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
             ("subadmin", "Delegated Work", "Audit Log", "/subadmin/audit-log", "History", null),
             ("admission", null, "Dashboard", "/admission", "LayoutDashboard", null),
-            ("admission", "Pipeline", "Demo Scheduling", "/admission/demo-scheduling", "CalendarClock", PermissionModule.Admission),
-            ("admission", "Pipeline", "Demo Feedback", "/admission/demo-feedback", "ClipboardCheck", PermissionModule.Admission),
-            ("admission", "Pipeline", "Conversion Board", "/admission/conversion", "KanbanSquare", PermissionModule.Admission),
-            ("admission", "CRM", "Leads & Parents", "/admission/leads", "UserSearch", PermissionModule.Admission),
-            ("admission", "CRM", "Payment Tracking", "/admission/payments", "Link2", PermissionModule.BillingFinance),
-            ("admission", "Insights", "Reports", "/admission/reports", "BarChart3", PermissionModule.ReportsAnalytics),
+            ("admission", "Pipeline", "Demo Scheduling", "/admission/demo-scheduling", "CalendarClock", PermissionModule.Admission.ToString()),
+            ("admission", "Pipeline", "Teacher Assignment", "/admission/demo-teacher-assignment", "UserCog", PermissionModule.Admission.ToString()),
+            ("admission", "Pipeline", "Demo Feedback", "/admission/demo-feedback", "ClipboardCheck", PermissionModule.Admission.ToString()),
+            ("admission", "Pipeline", "Conversion Board", "/admission/conversion", "KanbanSquare", PermissionModule.Admission.ToString()),
+            ("admission", "Pipeline", "Sessions", "/admission/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+            ("admission", "CRM", "Leads & Parents", "/admission/leads", "UserSearch", PermissionModule.Admission.ToString()),
+            ("admission", "CRM", "Payment Tracking", "/admission/payments", "Link2", PermissionModule.BillingFinance.ToString()),
+            ("admission", "Insights", "Reports", "/admission/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
             ("coordinator", null, "Dashboard", "/coordinator", "LayoutDashboard", null),
-            ("coordinator", "Monitoring", "Academic Calendar", "/coordinator/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement),
-            ("coordinator", "Monitoring", "Teacher Availability", "/coordinator/availability", "CalendarRange", PermissionModule.SessionCalendarManagement),
+            ("coordinator", "Monitoring", "Academic Calendar", "/coordinator/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement.ToString()),
+            ("coordinator", "Monitoring", "Teacher Availability", "/coordinator/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
+            ("coordinator", "Monitoring", "Sessions", "/coordinator/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
             ("management", null, "Executive Overview", "/management", "LayoutDashboard", null),
-            ("management", "Performance", "Revenue & Courses", "/management/revenue", "TrendingUp", PermissionModule.ReportsAnalytics),
-            ("management", "Performance", "Teacher & Batch Performance", "/management/performance", "Gauge", PermissionModule.ReportsAnalytics),
-            ("management", "Insights", "Reports", "/management/reports", "FileBarChart", PermissionModule.ReportsAnalytics),
+            ("management", "Performance", "Revenue & Courses", "/management/revenue", "TrendingUp", PermissionModule.ReportsAnalytics.ToString()),
+            ("management", "Performance", "Teacher & Batch Performance", "/management/performance", "Gauge", PermissionModule.ReportsAnalytics.ToString()),
+            ("management", "Performance", "Sessions", "/management/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+            ("management", "Insights", "Reports", "/management/reports", "FileBarChart", PermissionModule.ReportsAnalytics.ToString()),
             ("student", null, "My Learning", "/student", "Sparkles", null),
         ];
 
@@ -590,8 +668,121 @@ namespace iucs.readernest.api.Data
                 Icon = "Plug",
                 SortOrder = 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.Settings,
+                RequiredModule = PermissionModule.Settings.ToString(),
             });
+        }
+
+        /// <summary>
+        /// Inserts the Sub Admin "Batches" and "Users" menu items into a database that was
+        /// seeded before this baseline Relationship Manager access existed (SeedMenusAsync
+        /// only ever creates rows once). Placed ahead of "Assigned Reports" in "Delegated
+        /// Work", nudging Reports/Audit Log down two slots.
+        /// </summary>
+        private static async Task EnsureSubAdminBatchesAndUsersMenusAsync(ReaderNestDbContext context)
+        {
+            const string batchesPath = "/subadmin/batches";
+            const string usersPath = "/subadmin/users";
+            var alreadyHasBatches = context.MenuItems.Local.Any(m => m.Portal == "subadmin" && m.Path == batchesPath) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "subadmin" && m.Path == batchesPath);
+            var alreadyHasUsers = context.MenuItems.Local.Any(m => m.Portal == "subadmin" && m.Path == usersPath) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "subadmin" && m.Path == usersPath);
+            if (alreadyHasBatches && alreadyHasUsers)
+            {
+                return;
+            }
+
+            var delegatedWork = await context.MenuItems
+                .Where(m => m.Portal == "subadmin" && m.Section == "Delegated Work")
+                .ToListAsync();
+            foreach (var item in delegatedWork)
+            {
+                item.SortOrder += 2;
+            }
+
+            if (!alreadyHasBatches)
+            {
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "subadmin",
+                    Section = "Delegated Work",
+                    SectionOrder = delegatedWork.FirstOrDefault()?.SectionOrder ?? 0,
+                    Label = "Batches",
+                    Path = batchesPath,
+                    Icon = "Layers",
+                    SortOrder = 0,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.CourseBatchManagement.ToString(),
+                });
+            }
+
+            if (!alreadyHasUsers)
+            {
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "subadmin",
+                    Section = "Delegated Work",
+                    SectionOrder = delegatedWork.FirstOrDefault()?.SectionOrder ?? 0,
+                    Label = "Users",
+                    Path = usersPath,
+                    Icon = "Users",
+                    SortOrder = 1,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.UserManagement.ToString(),
+                });
+            }
+        }
+
+        /// <summary>
+        /// Inserts a "Sessions" menu item (gated on SessionCalendarManagement, same module the
+        /// backend's SessionsController already authorizes SubAdmin against) into each of the
+        /// delegated portals a Sub Admin's preset can route to — subadmin itself, plus the
+        /// Admission/Coordinator/Management display portals (see AppShell.tsx's
+        /// SUBADMIN_PRESET_PORTALS comment: these aren't separate backend roles, just different
+        /// presets of the same account). Appends after the last item in each portal's most
+        /// scheduling-relevant existing section, same idiom as EnsureAdminQuizBankMenuAsync —
+        /// nothing else in that section needs to shift. Idempotent per portal.
+        /// </summary>
+        private static async Task EnsureDelegatedPortalSessionsMenuAsync(ReaderNestDbContext context)
+        {
+            var targets = new[]
+            {
+                (Portal: "subadmin", Section: "Delegated Work", Path: "/subadmin/sessions"),
+                (Portal: "admission", Section: "Pipeline", Path: "/admission/sessions"),
+                (Portal: "coordinator", Section: "Monitoring", Path: "/coordinator/sessions"),
+                (Portal: "management", Section: "Performance", Path: "/management/sessions"),
+            };
+
+            foreach (var (portal, section, path) in targets)
+            {
+                if (context.MenuItems.Local.Any(m => m.Portal == portal && m.Path == path) ||
+                    await context.MenuItems.AnyAsync(m => m.Portal == portal && m.Path == path))
+                {
+                    continue;
+                }
+
+                var sectionItems = await context.MenuItems
+                    .Where(m => m.Portal == portal && m.Section == section)
+                    .ToListAsync();
+                if (sectionItems.Count == 0)
+                {
+                    continue; // that section doesn't exist on this database yet — nothing sensible to append after
+                }
+
+                var last = sectionItems.OrderByDescending(m => m.SortOrder).First();
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = portal,
+                    Section = section,
+                    SectionOrder = last.SectionOrder,
+                    Label = "Sessions",
+                    Path = path,
+                    Icon = "CalendarClock",
+                    SortOrder = last.SortOrder + 1,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.SessionCalendarManagement.ToString(),
+                });
+            }
         }
 
         /// <summary>
@@ -628,7 +819,7 @@ namespace iucs.readernest.api.Data
                     Icon = "CreditCard",
                     SortOrder = insertAt,
                     IsActive = true,
-                    RequiredModule = PermissionModule.BillingFinance,
+                    RequiredModule = PermissionModule.BillingFinance.ToString(),
                 });
             }
 
@@ -690,7 +881,7 @@ namespace iucs.readernest.api.Data
                 Icon = "Building2",
                 SortOrder = insertAt,
                 IsActive = true,
-                RequiredModule = PermissionModule.CourseBatchManagement,
+                RequiredModule = PermissionModule.CourseBatchManagement.ToString(),
             });
         }
 
@@ -730,7 +921,7 @@ namespace iucs.readernest.api.Data
                 Icon = "Sparkles",
                 SortOrder = last.SortOrder + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.CourseBatchManagement,
+                RequiredModule = PermissionModule.CourseBatchManagement.ToString(),
             });
         }
 
@@ -769,7 +960,7 @@ namespace iucs.readernest.api.Data
                 Icon = "PencilRuler",
                 SortOrder = last.SortOrder + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.CourseBatchManagement,
+                RequiredModule = PermissionModule.CourseBatchManagement.ToString(),
             });
         }
 
@@ -808,8 +999,151 @@ namespace iucs.readernest.api.Data
                 Icon = "Activity",
                 SortOrder = last.SortOrder + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.SystemMonitoring,
+                RequiredModule = PermissionModule.SystemMonitoring.ToString(),
             });
+        }
+
+        /// <summary>
+        /// Inserts the "Class Session Logs" menu item — live/next class status plus the
+        /// durable teacher/student join-leave-end activity trail — into both the Admin
+        /// portal (System section, visible immediately since Admin bypasses module gating)
+        /// and the Sub Admin portal (Access section, gated on the new ClassSessionLogs
+        /// module — deliberately not auto-granted to any role here; an Admin grants it to
+        /// whichever persona, e.g. an "IT Admin" preset, needs it via Roles &amp; Permissions).
+        /// Same idiom as EnsureAdminServerMonitoringMenuAsync right above.
+        /// </summary>
+        private static async Task EnsureClassSessionLogsMenuAsync(ReaderNestDbContext context)
+        {
+            const string adminPath = "/admin/class-logs";
+            if (!context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == adminPath) &&
+                !await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == adminPath))
+            {
+                var systemItems = await context.MenuItems
+                    .Where(m => m.Portal == "admin" && m.Section == "System")
+                    .ToListAsync();
+                if (systemItems.Count > 0)
+                {
+                    var last = systemItems.OrderByDescending(m => m.SortOrder).First();
+                    context.MenuItems.Add(new MenuItem
+                    {
+                        Portal = "admin",
+                        Section = "System",
+                        SectionOrder = last.SectionOrder,
+                        Label = "Class Session Logs",
+                        Path = adminPath,
+                        Icon = "Radar",
+                        SortOrder = last.SortOrder + 1,
+                        IsActive = true,
+                        RequiredModule = PermissionModule.ClassSessionLogs.ToString(),
+                    });
+                }
+            }
+
+            const string subAdminPath = "/subadmin/class-logs";
+            if (!context.MenuItems.Local.Any(m => m.Portal == "subadmin" && m.Path == subAdminPath) &&
+                !await context.MenuItems.AnyAsync(m => m.Portal == "subadmin" && m.Path == subAdminPath))
+            {
+                var accessItems = await context.MenuItems
+                    .Where(m => m.Portal == "subadmin" && m.Section == "Access")
+                    .ToListAsync();
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "subadmin",
+                    Section = "Access",
+                    SectionOrder = accessItems.FirstOrDefault()?.SectionOrder ?? 0,
+                    Label = "Class Session Logs",
+                    Path = subAdminPath,
+                    Icon = "Radar",
+                    SortOrder = accessItems.Count == 0 ? 0 : accessItems.Max(m => m.SortOrder) + 1,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.ClassSessionLogs.ToString(),
+                });
+            }
+        }
+
+        /// <summary>
+        /// Seeds the full "itadmin" portal menu — a dedicated console for a Sub Admin
+        /// persona (e.g. an "IT Admin" custom RoleDefinition) that needs Admin-portal-grade
+        /// breadth, distinctly branded, rather than the generic "/subadmin" Relationship
+        /// Manager console. Same idiom as MenuService.ResolvePortalAsync/AppShell's
+        /// SUBADMIN_PRESET_PORTALS: it is not a separate backend role — the account is still
+        /// UserRole.SubAdmin, routed here purely by RoleDefinition.DefaultRoute's first path
+        /// segment (see MenuService.Portals, which must list "itadmin" for that to work).
+        /// Mirrors the *current* full Admin menu (including items originally added via later
+        /// Ensure* backfills — Activity Bank, Server Monitoring, Class Session Logs — not just
+        /// MenuSeedItems()'s original set), gated by the exact same RequiredModule per item,
+        /// so visibility is entirely a function of whatever modules the role has been granted
+        /// (today, all 12). Runs once — if the portal already has any rows, this is a no-op;
+        /// an Admin who has since edited/removed an item here is never overwritten.
+        /// </summary>
+        private static async Task EnsureItAdminMenuAsync(ReaderNestDbContext context)
+        {
+            if (context.MenuItems.Local.Any(m => m.Portal == "itadmin") ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "itadmin"))
+            {
+                return;
+            }
+
+            (string? Section, string Label, string Path, string Icon, string? RequiredModule)[] items =
+            [
+                (null, "Overall Dashboard", "/itadmin", "LayoutDashboard", null),
+                ("Academics", "Courses", "/itadmin/courses", "BookOpen", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Departments", "/itadmin/departments", "Building2", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Batches", "/itadmin/batches", "Layers", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Academic Calendar", "/itadmin/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement.ToString()),
+                ("Academics", "Sessions", "/itadmin/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+                ("Academics", "Quiz Bank", "/itadmin/quiz-bank", "Sparkles", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Activity Bank", "/itadmin/activity-bank", "PencilRuler", PermissionModule.CourseBatchManagement.ToString()),
+                ("People", "Users", "/itadmin/users", "Users", PermissionModule.UserManagement.ToString()),
+                ("People", "Roles & Permissions", "/itadmin/permissions", "ShieldCheck", PermissionModule.UserManagement.ToString()),
+                ("People", "Enrollment Review", "/itadmin/enrollments", "ClipboardCheck", PermissionModule.Admission.ToString()),
+                ("People", "Store Inquiries", "/itadmin/store-inquiries", "ShoppingBag", PermissionModule.Admission.ToString()),
+                ("People", "Leave Management", "/itadmin/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
+                ("People", "Teacher Availability", "/itadmin/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
+                ("Content", "Content & Resources", "/itadmin/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
+                ("Finance", "Billing & Finance", "/itadmin/billing", "Receipt", PermissionModule.BillingFinance.ToString()),
+                ("Finance", "Packages & Subscriptions", "/itadmin/packages", "CreditCard", PermissionModule.BillingFinance.ToString()),
+                ("Finance", "Payment Gateway Mapping", "/itadmin/payment-mapping", "Landmark", PermissionModule.BillingFinance.ToString()),
+                ("Finance", "Teacher Payouts", "/itadmin/payouts", "Wallet", PermissionModule.Payouts.ToString()),
+                ("Finance", "Fee Suspension", "/itadmin/fee-suspension", "Ban", PermissionModule.BillingFinance.ToString()),
+                ("Insights", "Reports & Analytics", "/itadmin/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
+                ("Insights", "Bulk Email", "/itadmin/bulk-email", "Mail", PermissionModule.Communication.ToString()),
+                ("Insights", "Bulk Email History", "/itadmin/bulk-email/history", "History", PermissionModule.Communication.ToString()),
+                ("Insights", "Email Templates", "/itadmin/email-templates", "FileText", PermissionModule.Communication.ToString()),
+                ("Insights", "Progress Reports", "/itadmin/progress-reports", "ScrollText", PermissionModule.Communication.ToString()),
+                ("Insights", "Doubt Chatbot", "/itadmin/chatbot", "MessageCircleQuestion", PermissionModule.Communication.ToString()),
+                ("System", "Settings & Branding", "/itadmin/settings", "Settings", PermissionModule.Settings.ToString()),
+                ("System", "Server Monitoring", "/itadmin/monitoring", "Activity", PermissionModule.SystemMonitoring.ToString()),
+                ("System", "Class Session Logs", "/itadmin/class-logs", "Radar", PermissionModule.ClassSessionLogs.ToString()),
+            ];
+
+            var sectionOrders = new Dictionary<string, int>();
+            var sortOrders = new Dictionary<string, int>();
+            foreach (var (section, label, path, icon, requiredModule) in items)
+            {
+                var sectionKey = section ?? "";
+                if (!sectionOrders.TryGetValue(sectionKey, out var sectionOrder))
+                {
+                    sectionOrder = sectionOrders.Count;
+                    sectionOrders[sectionKey] = sectionOrder;
+                }
+
+                var sortOrder = sortOrders.TryGetValue(sectionKey, out var current) ? current : 0;
+                sortOrders[sectionKey] = sortOrder + 1;
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "itadmin",
+                    Section = section,
+                    SectionOrder = sectionOrder,
+                    Label = label,
+                    Path = path,
+                    Icon = icon,
+                    SortOrder = sortOrder,
+                    RequiredModule = requiredModule,
+                    IsActive = true,
+                });
+            }
         }
 
         private static async Task SeedMenusAsync(ReaderNestDbContext context)
@@ -921,7 +1255,7 @@ namespace iucs.readernest.api.Data
                     // today's behaviour. Set both (and turn on prosody token_verification on the
                     // Jitsi deployment — see docs/JITSI_ARCHITECTURE.md) to require a valid,
                     // room-scoped token to join. autoRecord defaults on to match current behaviour.
-                    ConfigJson = Json(new() { ["domain"] = "meet.techmisai.com", ["appId"] = "", ["appSecret"] = "", ["autoRecord"] = "true" }),
+                    ConfigJson = Json(new() { ["domain"] = "meet.techmisai.com", ["appId"] = "", ["appSecret"] = "", ["autoRecord"] = "true", ["defaultLobby"] = "true" }),
                 },
                 CashPaymentMethod());
         }
@@ -1044,7 +1378,37 @@ namespace iucs.readernest.api.Data
                 Icon = "FileText",
                 SortOrder = (bulkEmail?.SortOrder ?? 0) + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.Communication,
+                RequiredModule = PermissionModule.Communication.ToString(),
+            });
+        }
+
+        /// <summary>
+        /// Retrofits the "Bulk Email History" admin menu item into a database that was seeded
+        /// before it existed (mirrors EnsureEmailTemplatesMenuAsync). Fresh databases already
+        /// get it from MenuSeedItems(); this only fires for pre-existing ones.
+        /// </summary>
+        private static async Task EnsureBulkEmailHistoryMenuAsync(ReaderNestDbContext context)
+        {
+            if (context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == "/admin/bulk-email/history") ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == "/admin/bulk-email/history"))
+            {
+                return;
+            }
+
+            var bulkEmail = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "admin" && m.Path == "/admin/bulk-email");
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "admin",
+                Section = "Insights",
+                SectionOrder = bulkEmail?.SectionOrder ?? 4,
+                Label = "Bulk Email History",
+                Path = "/admin/bulk-email/history",
+                Icon = "History",
+                SortOrder = (bulkEmail?.SortOrder ?? 0) + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.Communication.ToString(),
             });
         }
 
@@ -1074,7 +1438,7 @@ namespace iucs.readernest.api.Data
                 Icon = "ScrollText",
                 SortOrder = (emailTemplates?.SortOrder ?? 0) + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.Communication,
+                RequiredModule = PermissionModule.Communication.ToString(),
             });
         }
 
@@ -1101,7 +1465,7 @@ namespace iucs.readernest.api.Data
                     Icon = "MessageCircleQuestion",
                     SortOrder = (progressReports?.SortOrder ?? 0) + 1,
                     IsActive = true,
-                    RequiredModule = PermissionModule.Communication,
+                    RequiredModule = PermissionModule.Communication.ToString(),
                 });
             }
 
@@ -1121,7 +1485,7 @@ namespace iucs.readernest.api.Data
                     Icon = "MessageCircleQuestion",
                     SortOrder = (demoFeedback?.SortOrder ?? 0) + 1,
                     IsActive = true,
-                    RequiredModule = PermissionModule.Communication,
+                    RequiredModule = PermissionModule.Communication.ToString(),
                 });
             }
         }
@@ -1274,8 +1638,251 @@ namespace iucs.readernest.api.Data
                 Icon = "ShoppingBag",
                 SortOrder = (enrollmentReview?.SortOrder ?? 0) + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.Admission,
+                RequiredModule = PermissionModule.Admission.ToString(),
             });
+        }
+
+        /// <summary>
+        /// Retrofits the Admin "Leave Management" and "Teacher Availability" menu items into a
+        /// database that was seeded before this method existed. These two screens
+        /// (/admin/leave, /admin/availability) have been live routes in the frontend all
+        /// along, but were never part of the Admin portal's own menu seed — only the
+        /// teacher's own Leave Management and the coordinator's own Teacher Availability
+        /// were — so an Admin account could reach both pages directly by URL but never saw a
+        /// sidebar link to either of them. Fresh databases already get both from
+        /// MenuSeedItems(); this only fires for pre-existing ones.
+        /// </summary>
+        private static async Task EnsureAdminLeaveAndAvailabilityMenuAsync(ReaderNestDbContext context)
+        {
+            var storeInquiries = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "admin" && m.Path == "/admin/store-inquiries");
+            var sectionOrder = storeInquiries?.SectionOrder ?? 2;
+            var nextSortOrder = (storeInquiries?.SortOrder ?? 0) + 1;
+
+            if (!context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == "/admin/leave") &&
+                !await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == "/admin/leave"))
+            {
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "admin",
+                    Section = "People",
+                    SectionOrder = sectionOrder,
+                    Label = "Leave Management",
+                    Path = "/admin/leave",
+                    Icon = "CalendarOff",
+                    SortOrder = nextSortOrder++,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.LeaveManagement.ToString(),
+                });
+            }
+
+            if (!context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == "/admin/availability") &&
+                !await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == "/admin/availability"))
+            {
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "admin",
+                    Section = "People",
+                    SectionOrder = sectionOrder,
+                    Label = "Teacher Availability",
+                    Path = "/admin/availability",
+                    Icon = "CalendarRange",
+                    SortOrder = nextSortOrder,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.SessionCalendarManagement.ToString(),
+                });
+            }
+        }
+
+        /// <summary>
+        /// Retrofits the Teacher's own "Recordings" menu item into a database that was seeded
+        /// before this method existed. /teacher/recordings has been a real, working route
+        /// (TeacherRecordings.tsx) all along, but the Teaching section's own seed never
+        /// included it -- only the Parent portal's Recordings item did -- so a teacher account
+        /// could reach the page directly by URL but had no sidebar link to it. Fresh databases
+        /// already get it from MenuSeedItems(); this only fires for pre-existing ones.
+        /// </summary>
+        private static async Task EnsureTeacherRecordingsMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/teacher/recordings";
+            if (context.MenuItems.Local.Any(m => m.Portal == "teacher" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "teacher" && m.Path == path))
+            {
+                return;
+            }
+
+            var attendance = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "teacher" && m.Path == "/teacher/attendance");
+            if (attendance is null)
+            {
+                return; // no Teaching section item to anchor after (unexpected) — nothing sensible to append after
+            }
+
+            // Insert right after Attendance & Records, shifting Demo Feedback/Student Doubts
+            // (and anything else in the section after them) up by one — matches TEACHER_NAV's
+            // own ordering (My Classes, Attendance & Records, Recordings, Demo Feedback, ...)
+            // rather than just tacking it onto the end of the section.
+            var toShift = await context.MenuItems
+                .Where(m => m.Portal == "teacher" && m.Section == "Teaching" && m.SortOrder > attendance.SortOrder)
+                .ToListAsync();
+            foreach (var item in toShift)
+            {
+                item.SortOrder += 1;
+            }
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "teacher",
+                Section = "Teaching",
+                SectionOrder = attendance.SectionOrder,
+                Label = "Recordings",
+                Path = path,
+                Icon = "Video",
+                SortOrder = attendance.SortOrder + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.SessionCalendarManagement.ToString(),
+            });
+        }
+
+        /// <summary>
+        /// Retrofits the Admin "Recordings" menu item (AdminRecordings.tsx, /admin/recordings)
+        /// into a database that was seeded before this item existed. Mirrors
+        /// EnsureTeacherRecordingsMenuAsync -- this only fires for pre-existing databases;
+        /// fresh ones already get it from MenuSeedItems(). Admin previously had no
+        /// institution-wide view of registered recordings -- deleting a stray/wrong one
+        /// meant opening the right class's own row in Sessions first, one at a time.
+        /// </summary>
+        private static async Task EnsureAdminRecordingsMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/admin/recordings";
+            if (context.MenuItems.Local.Any(m => m.Portal == "admin" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "admin" && m.Path == path))
+            {
+                return;
+            }
+
+            var sessions = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "admin" && m.Path == "/admin/sessions");
+            if (sessions is null)
+            {
+                return; // no Academics section item to anchor after (unexpected) — nothing sensible to append after
+            }
+
+            // Insert right after Sessions, shifting Quiz Bank (and anything else in the
+            // section after it) up by one — matches the fresh-seed ordering in MenuSeedItems().
+            var toShift = await context.MenuItems
+                .Where(m => m.Portal == "admin" && m.Section == "Academics" && m.SortOrder > sessions.SortOrder)
+                .ToListAsync();
+            foreach (var item in toShift)
+            {
+                item.SortOrder += 1;
+            }
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "admin",
+                Section = "Academics",
+                SectionOrder = sessions.SectionOrder,
+                Label = "Recordings",
+                Path = path,
+                Icon = "Video",
+                SortOrder = sessions.SortOrder + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.SessionCalendarManagement.ToString(),
+            });
+        }
+
+        /// <summary>
+        /// Retrofits the Admission "Payment Tracking" menu item into a database that was
+        /// seeded before it existed. It's been in MenuSeedItems() (fresh-database seed) all
+        /// along, and /admission/payments (AdmissionPayments.tsx) has been a real, working
+        /// route the whole time -- but a database seeded before this row was added to
+        /// MenuSeedItems() never got it backfilled, leaving an Admission account with no
+        /// sidebar link to it despite the page working fine if reached directly by URL.
+        /// </summary>
+        private static async Task EnsureAdmissionPaymentTrackingMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/admission/payments";
+            if (context.MenuItems.Local.Any(m => m.Portal == "admission" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "admission" && m.Path == path))
+            {
+                return;
+            }
+
+            var leads = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "admission" && m.Path == "/admission/leads");
+            if (leads is null)
+            {
+                return; // no CRM section item to anchor after (unexpected) — nothing sensible to append after
+            }
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "admission",
+                Section = "CRM",
+                SectionOrder = leads.SectionOrder,
+                Label = "Payment Tracking",
+                Path = path,
+                Icon = "Link2",
+                SortOrder = leads.SortOrder + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.BillingFinance.ToString(),
+            });
+        }
+
+        /// <summary>
+        /// Retrofits the "Teacher Assignment" menu item (/…/demo-teacher-assignment,
+        /// DemoTeacherAssignment.tsx) across every portal that routes to it -- Admission,
+        /// Coordinator, Management and Sub Admin all register the same route in App.tsx, but
+        /// none of their menu seeds ever included a link to it (unlike Demo Scheduling,
+        /// Payment Tracking, etc., which sit right next to it in each portal's own Pipeline /
+        /// Delegated Work section). Anchored right after each portal's own "Demo Scheduling"
+        /// item, wherever that happens to already be, rather than a hardcoded position --
+        /// these 4 portals' menu rows are largely backfilled by other ad-hoc patch methods
+        /// over time, so their exact section/sort layout isn't something to assume here.
+        /// </summary>
+        private static async Task EnsureTeacherAssignmentMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "demo-teacher-assignment";
+            var label = "Teacher Assignment";
+
+            foreach (var portal in new[] { "admission", "coordinator", "management", "subadmin" })
+            {
+                var fullPath = $"/{portal}/{path}";
+                if (context.MenuItems.Local.Any(m => m.Portal == portal && m.Path == fullPath) ||
+                    await context.MenuItems.AnyAsync(m => m.Portal == portal && m.Path == fullPath))
+                {
+                    continue;
+                }
+
+                var demoScheduling = await context.MenuItems
+                    .FirstOrDefaultAsync(m => m.Portal == portal && m.Path == $"/{portal}/demo-scheduling");
+                if (demoScheduling is null)
+                {
+                    continue; // this portal doesn't have Demo Scheduling seeded yet either — nothing sensible to anchor after
+                }
+
+                var siblings = await context.MenuItems
+                    .Where(m => m.Portal == portal && m.Section == demoScheduling.Section && m.SortOrder > demoScheduling.SortOrder)
+                    .ToListAsync();
+                foreach (var sibling in siblings)
+                {
+                    sibling.SortOrder += 1;
+                }
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = portal,
+                    Section = demoScheduling.Section,
+                    SectionOrder = demoScheduling.SectionOrder,
+                    Label = label,
+                    Path = fullPath,
+                    Icon = "UserCog",
+                    SortOrder = demoScheduling.SortOrder + 1,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.Admission.ToString(),
+                });
+            }
         }
 
         /// <summary>
@@ -1312,7 +1919,7 @@ namespace iucs.readernest.api.Data
                 Icon = "Video",
                 SortOrder = (resources?.SortOrder ?? 0) + 1,
                 IsActive = true,
-                RequiredModule = PermissionModule.ContentAccessManagement,
+                RequiredModule = PermissionModule.ContentAccessManagement.ToString(),
             });
         }
 
@@ -1329,6 +1936,66 @@ namespace iucs.readernest.api.Data
             }
 
             var seed = EmailTemplateSeedData.All.First(s => s.Key == "progress-report");
+            context.EmailTemplates.Add(new EmailTemplate
+            {
+                Key = seed.Key,
+                Name = seed.Name,
+                Description = seed.Description,
+                Category = seed.Category,
+                Subject = seed.Subject,
+                HtmlBody = seed.HtmlBody,
+                PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders),
+                IsActive = true,
+                IsSystem = true,
+            });
+        }
+
+        /// <summary>
+        /// SeedEmailTemplatesAsync is insert-only, so a live DB that predates the batch payment
+        /// plan feature never picks these up on its own — inserts the
+        /// "payment-plan-reminder-sessions" / "payment-plan-reminder-date" rows if missing,
+        /// mirroring EnsureProgressReportEmailTemplateAsync.
+        /// </summary>
+        private static async Task EnsurePaymentPlanReminderEmailTemplatesAsync(ReaderNestDbContext context)
+        {
+            foreach (var key in new[] { "payment-plan-reminder-sessions", "payment-plan-reminder-date" })
+            {
+                if (context.EmailTemplates.Local.Any(t => t.Key == key) ||
+                    await context.EmailTemplates.AnyAsync(t => t.Key == key))
+                {
+                    continue;
+                }
+
+                var seed = EmailTemplateSeedData.All.First(s => s.Key == key);
+                context.EmailTemplates.Add(new EmailTemplate
+                {
+                    Key = seed.Key,
+                    Name = seed.Name,
+                    Description = seed.Description,
+                    Category = seed.Category,
+                    Subject = seed.Subject,
+                    HtmlBody = seed.HtmlBody,
+                    PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders),
+                    IsActive = true,
+                    IsSystem = true,
+                });
+            }
+        }
+
+        /// <summary>
+        /// SeedEmailTemplatesAsync is insert-only, so a live DB that predates the fixed
+        /// per-teacher demo meeting link feature never picks this up on its own — inserts just
+        /// the "demo-scheduled-teacher" row if missing, mirroring EnsureProgressReportEmailTemplateAsync.
+        /// </summary>
+        private static async Task EnsureDemoScheduledTeacherEmailTemplateAsync(ReaderNestDbContext context)
+        {
+            if (context.EmailTemplates.Local.Any(t => t.Key == "demo-scheduled-teacher") ||
+                await context.EmailTemplates.AnyAsync(t => t.Key == "demo-scheduled-teacher"))
+            {
+                return;
+            }
+
+            var seed = EmailTemplateSeedData.All.First(s => s.Key == "demo-scheduled-teacher");
             context.EmailTemplates.Add(new EmailTemplate
             {
                 Key = seed.Key,
@@ -1437,7 +2104,7 @@ namespace iucs.readernest.api.Data
         /// </summary>
         private static async Task ReconcileJoinLinkEmailTemplatesAsync(ReaderNestDbContext context)
         {
-            foreach (var seed in EmailTemplateSeedData.All.Where(s => s.Key is "demo-confirmed" or "session-reminder-parent"))
+            foreach (var seed in EmailTemplateSeedData.All.Where(s => s.Key is "demo-confirmed" or "session-reminder-parent" or "demo-teacher-assigned"))
             {
                 var existing = await context.EmailTemplates.FirstOrDefaultAsync(t => t.Key == seed.Key);
                 if (existing is null || existing.HtmlBody.Contains("{{JoinUrl}}"))

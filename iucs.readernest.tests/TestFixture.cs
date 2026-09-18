@@ -211,6 +211,60 @@ namespace iucs.readernest.tests
         {
             return new TokenResult { AccessToken = "test-token", ExpiresAtUtc = DateTime.UtcNow.AddHours(1) };
         }
+
+        public TokenResult CreateRecordingObserverHubToken(Guid sessionId, DateTime expiresAtUtc)
+        {
+            return new TokenResult { AccessToken = "test-observer-hub-token", ExpiresAtUtc = expiresAtUtc };
+        }
+
+        public TokenResult CreateGuestClassroomHubToken(Guid sessionId, Guid? childId, string participantName, DateTime expiresAtUtc)
+        {
+            return new TokenResult { AccessToken = "test-guest-hub-token", ExpiresAtUtc = expiresAtUtc };
+        }
+
+        // Not a real JWT -- just enough of a round-trip (encode on create, decode+expiry-check
+        // on validate) for guest-link tests to exercise SessionService's actual branching
+        // (invalid/expired token, bound/generic/named-guest link) without a signing key in play.
+        // '|' as a field separator is fine here (never appears in test data); a real name/email
+        // containing it would need proper encoding, which is exactly why JwtTokenService uses
+        // real JWT claims instead of this test-only shortcut.
+        public TokenResult CreateGuestJoinToken(Guid sessionId, Guid? childId, DateTime expiresAtUtc, string? guestName = null, string? guestEmail = null)
+        {
+            var payload = $"{sessionId}|{childId}|{expiresAtUtc:O}|{guestName}|{guestEmail}";
+            return new TokenResult
+            {
+                AccessToken = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(payload)),
+                ExpiresAtUtc = expiresAtUtc,
+            };
+        }
+
+        public (Guid SessionId, Guid? ChildId, string? GuestName, string? GuestEmail)? ValidateGuestJoinToken(string token)
+        {
+            try
+            {
+                var parts = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(token)).Split('|');
+                if (parts.Length != 5)
+                {
+                    return null;
+                }
+
+                var expiresAtUtc = DateTime.Parse(parts[2], null, System.Globalization.DateTimeStyles.RoundtripKind);
+                if (DateTime.UtcNow > expiresAtUtc)
+                {
+                    return null;
+                }
+
+                return (
+                    Guid.Parse(parts[0]),
+                    string.IsNullOrEmpty(parts[1]) ? null : Guid.Parse(parts[1]),
+                    string.IsNullOrEmpty(parts[3]) ? null : parts[3],
+                    string.IsNullOrEmpty(parts[4]) ? null : parts[4]);
+            }
+            catch
+            {
+                return null;
+            }
+        }
     }
 
     /// <summary>Mirrors production's "unconfigured" state (no appId/appSecret) — always returns no token.</summary>
@@ -231,6 +285,12 @@ namespace iucs.readernest.tests
 
         public bool ValidateFinalizeToken(string? bearerToken, string? jitsiConfigJson, string expectedRoom)
             => ValidateFinalizeTokenResult;
+
+        public string? CreateRecordingObserverToken(
+            string domain,
+            string? jitsiConfigJson,
+            string room,
+            DateTime expiresAtUtc) => null;
     }
 
     /// <summary>
@@ -262,6 +322,19 @@ namespace iucs.readernest.tests
             Context.Departments.AddRange(
                 new Department { Id = WellKnownDepartments.Phonics, Name = "Phonics", IsActive = true },
                 new Department { Id = WellKnownDepartments.Maths, Name = "Maths", IsActive = true });
+
+            // Mirrors DatabaseInitializer.SeedPermissionModulesAsync — RoleService/UserService/
+            // AccessRequestService/MenuService all now validate an incoming module key against
+            // this table (it stopped being a compile-time-checked enum on the wire once custom
+            // modules became possible), so every smoke test using a built-in module needs it seeded.
+            Context.PermissionModuleDefinitions.AddRange(
+                Enum.GetValues<PermissionModule>().Select((m, i) => new PermissionModuleDefinition
+                {
+                    Key = m.ToString(),
+                    Label = m.ToString(),
+                    IsSystem = true,
+                    SortOrder = i,
+                }));
 
             // Same catalog production seeds, so smoke tests exercise real templated
             // content (Subject/HtmlBody) instead of EmailTemplateService's fallback text.

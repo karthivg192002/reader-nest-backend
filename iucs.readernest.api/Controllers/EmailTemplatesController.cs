@@ -12,10 +12,15 @@ namespace iucs.readernest.api.Controllers
     /// system email renders from. Shown on the admin Settings → Email Templates screen.
     /// Parent also carries Communication:View for their own /parent/notifications screen —
     /// without a role restriction that same claim would reach this system-template config too.
+    /// AdmissionTeam is included deliberately (not just SubAdmin): it's a distinct backend role
+    /// from SubAdmin for real delegated-portal accounts, and /admission/email-templates already
+    /// exists in the menu system for any admin who grants Communication to an admission account
+    /// — see the same fix already applied to PackagePlansController/PaymentAccountsController/
+    /// SubscriptionsController/ResourcesController for the identical gap.
     /// </summary>
     [ApiController]
     [Route("api/email-templates")]
-    [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)}")]
+    [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
     public class EmailTemplatesController : ControllerBase
     {
         private readonly IEmailTemplateService _emailTemplateService;

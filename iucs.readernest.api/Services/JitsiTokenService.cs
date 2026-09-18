@@ -25,6 +25,31 @@ namespace iucs.readernest.api.Services
             bool moderator,
             DateTime expiresAtUtc)
         {
+            return BuildToken(domain, jitsiConfigJson, room, participantName, participantEmail, moderator, expiresAtUtc, purpose: null);
+        }
+
+        public string? CreateRecordingObserverToken(
+            string domain,
+            string? jitsiConfigJson,
+            string room,
+            DateTime expiresAtUtc)
+        {
+            return BuildToken(
+                domain, jitsiConfigJson, room,
+                participantName: "Recording", participantEmail: null, moderator: false,
+                expiresAtUtc, purpose: "recording-observer");
+        }
+
+        private static string? BuildToken(
+            string domain,
+            string? jitsiConfigJson,
+            string room,
+            string participantName,
+            string? participantEmail,
+            bool moderator,
+            DateTime expiresAtUtc,
+            string? purpose)
+        {
             var (appId, appSecret) = ReadCredentials(jitsiConfigJson);
             if (string.IsNullOrWhiteSpace(appId) || string.IsNullOrWhiteSpace(appSecret))
             {
@@ -50,6 +75,10 @@ namespace iucs.readernest.api.Services
                     ["moderator"] = moderator,
                 },
             };
+            if (purpose is not null)
+            {
+                payload["purpose"] = purpose;
+            }
 
             var credentials = new SigningCredentials(
                 new SymmetricSecurityKey(Encoding.UTF8.GetBytes(appSecret)),

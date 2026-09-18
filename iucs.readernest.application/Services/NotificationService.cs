@@ -28,15 +28,17 @@ namespace iucs.readernest.application.Services
             _logger = logger;
         }
 
-        public async Task SendEmailAsync(
+        public async Task<NotificationStatus> SendEmailAsync(
             Guid recipientUserId,
             string recipientEmail,
             NotificationType type,
             string subject,
             string body,
+            Guid? bulkEmailRecipientId = null,
             CancellationToken cancellationToken = default)
         {
-            await SendRenderedEmailAsync(recipientUserId, recipientEmail, type, subject, body, null, cancellationToken);
+            return await SendRenderedEmailAsync(
+                recipientUserId, recipientEmail, type, subject, body, null, bulkEmailRecipientId, cancellationToken);
         }
 
         public async Task SendTemplatedEmailAsync(
@@ -48,16 +50,17 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default)
         {
             var (subject, body) = await _emailTemplateService.RenderAsync(templateKey, tokens, cancellationToken);
-            await SendRenderedEmailAsync(recipientUserId, recipientEmail, type, subject, body, templateKey, cancellationToken);
+            await SendRenderedEmailAsync(recipientUserId, recipientEmail, type, subject, body, templateKey, null, cancellationToken);
         }
 
-        private async Task SendRenderedEmailAsync(
+        private async Task<NotificationStatus> SendRenderedEmailAsync(
             Guid recipientUserId,
             string recipientEmail,
             NotificationType type,
             string subject,
             string body,
             string? templateKey,
+            Guid? bulkEmailRecipientId,
             CancellationToken cancellationToken)
         {
             var notification = new Notification
@@ -74,6 +77,7 @@ namespace iucs.readernest.application.Services
                 // the feed reads as a message instead of raw markup; the real HTML still goes
                 // out over email via _emailSender.SendAsync(body) below, unchanged.
                 Body = HtmlText.PlainTextFromHtml(body),
+                BulkEmailRecipientId = bulkEmailRecipientId,
             };
 
             try
@@ -96,6 +100,8 @@ namespace iucs.readernest.application.Services
             // already run (e.g. as a side effect once the business entity is committed), so
             // this row must persist itself rather than rely on a save that may never come.
             await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return notification.Status;
         }
 
         public async Task<NotificationFeedDto> GetFeedForUserAsync(
@@ -121,6 +127,8 @@ namespace iucs.readernest.application.Services
                     IsRead = n.ReadAtUtc != null,
                     CreatedAtUtc = n.CreatedAtUtc,
                     ReadAtUtc = n.ReadAtUtc,
+                    BulkEmailRecipientId = n.BulkEmailRecipientId,
+                    HasReplied = n.BulkEmailRecipientId != null && n.BulkEmailRecipient!.Reply != null,
                 })
                 .ToListAsync(cancellationToken);
 

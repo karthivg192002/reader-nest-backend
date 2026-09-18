@@ -18,6 +18,34 @@ namespace iucs.readernest.application.Dto.Sessions
         public DateTime CreatedAtUtc { get; set; }
     }
 
+    /// <summary>One row of the admin-wide Recordings list (ListAllRecordingsAsync) -- the
+    /// per-session recording plus just enough of its class's own detail (title, teacher, when)
+    /// for that page to render a card without a second round-trip per row.</summary>
+    public class RecordingListItemDto
+    {
+        public Guid Id { get; set; }
+
+        public Guid ClassSessionId { get; set; }
+
+        public string StorageUrl { get; set; } = null!;
+
+        public int? DurationSeconds { get; set; }
+
+        public DateTime? ExpiresAtUtc { get; set; }
+
+        public DateTime CreatedAtUtc { get; set; }
+
+        /// <summary>Batch name for a Regular class, null for a Demo -- same fallback the
+        /// frontend's toFrontendSession already applies ("Demo — {child}" / "Class session").</summary>
+        public string? BatchName { get; set; }
+
+        public SessionType SessionType { get; set; }
+
+        public string TeacherName { get; set; } = null!;
+
+        public DateTime ScheduledStartAtUtc { get; set; }
+    }
+
     /// <summary>Registers a finished Jitsi/Jibri recording that landed in cloud storage.</summary>
     public class RegisterRecordingRequest
     {
@@ -85,6 +113,9 @@ namespace iucs.readernest.application.Dto.Sessions
 
         public int AttentionPings { get; set; }
 
+        /// <summary>Seconds this participant's screen was shared -- see EngagementEventType.ScreenShareSeconds. Not a factor in EngagementScore.</summary>
+        public int ScreenShareSeconds { get; set; }
+
         /// <summary>Weighted 0-100 score across participation, accuracy and attention.</summary>
         public int EngagementScore { get; set; }
 
@@ -97,6 +128,17 @@ namespace iucs.readernest.application.Dto.Sessions
         /// <summary>Optional class summary shown in session history.</summary>
         [MaxLength(2000)]
         public string? Summary { get; set; }
+    }
+
+    /// <summary>Editing a completed session's notes after the fact -- see
+    /// ISessionService.UpdateSummaryAsync's own doc comment for why this exists separately
+    /// from CompleteSessionRequest. Required (unlike Summary above) -- there's no reason to
+    /// call this endpoint at all except to set real notes.</summary>
+    public class UpdateSessionSummaryRequest
+    {
+        [Required]
+        [MaxLength(2000)]
+        public string Summary { get; set; } = null!;
     }
 
     public enum NoShowParty

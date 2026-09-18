@@ -34,5 +34,20 @@ namespace iucs.readernest.application.Common.Interfaces
         /// Integration configured at all (there's nothing to verify a signature against).
         /// </summary>
         bool ValidateFinalizeToken(string? bearerToken, string? jitsiConfigJson, string expectedRoom);
+
+        /// <summary>
+        /// Mints a join token for Jibri's own headless-Chrome "recording observer" page (see
+        /// docs/JITSI_ARCHITECTURE.md's recording-observer section) — same signature/appId/
+        /// appSecret as a normal room-join token, always <c>moderator: false</c>, and stamped
+        /// with a <c>purpose: "recording-observer"</c> claim (parallel to
+        /// <see cref="ValidateFinalizeToken"/>'s "recording-finalize") so it can never be reused
+        /// as a real participant/moderator token elsewhere. Returns null under the same
+        /// "no jitsi Integration configured yet" condition as <see cref="CreateToken"/>.
+        /// </summary>
+        string? CreateRecordingObserverToken(
+            string domain,
+            string? jitsiConfigJson,
+            string room,
+            DateTime expiresAtUtc);
     }
 }

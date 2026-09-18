@@ -7,11 +7,48 @@ namespace iucs.readernest.application.Dto.Monitoring
         public bool Active { get; set; }
     }
 
+    /// <summary>
+    /// A point-in-time `docker stats` sample for one container, published by the
+    /// rn-container-stats.sh textfile-collector script (chosen over cAdvisor, which hit an
+    /// unresolved Docker overlay2 layer-ID lookup bug in this environment). Not a Prometheus
+    /// counter, so it can't be rate()'d over time -- it's "what is this container using right
+    /// now," refreshed every minute.
+    /// </summary>
+    public class ContainerMetricDto
+    {
+        public string Name { get; set; } = string.Empty;
+        public double CpuPercent { get; set; }
+        public double MemoryMb { get; set; }
+    }
+
     /// <summary>Live conference/participant counts, populated only for the Jitsi server.</summary>
     public class LiveCallSummaryDto
     {
         public int ActiveConferences { get; set; }
         public int TotalParticipants { get; set; }
+    }
+
+    /// <summary>
+    /// Jibri (recording) fleet status, populated only for the Jitsi server. Jibri handles one
+    /// recording per instance, so <see cref="BusyInstances"/> == <see cref="TotalInstances"/>
+    /// means the next concurrent recording request will fail with "all Jibris were busy" until
+    /// the autoscaler (see /opt/rn-monitoring/jibri-autoscale.sh on the Jitsi box) adds capacity.
+    /// </summary>
+    public class RecorderStatusDto
+    {
+        public int TotalInstances { get; set; }
+        public int BusyInstances { get; set; }
+        public int IdleInstances => Math.Max(0, TotalInstances - BusyInstances);
+        /// <summary>Configured floor of always-warm instances -- the one admin-adjustable knob (see IServerControlService).</summary>
+        public int MinInstances { get; set; }
+        /// <summary>Ceiling derived from the Jitsi box's actual CPU/RAM, not a fixed number -- grows on its own if the box is resized.</summary>
+        public int MaxInstances { get; set; }
+        /// <summary>Last ~1h, ~2-minute steps -- the same window as CpuHistory/MemoryHistory.
+        /// Empty when this server has no Jibri fleet. Pair with TotalHistory (rather than the
+        /// single current TotalInstances) since the fleet autoscales -- "3 busy" only reads as
+        /// "at capacity" against however many were actually online at that same moment.</summary>
+        public IReadOnlyList<TimeSeriesPointDto> BusyHistory { get; set; } = [];
+        public IReadOnlyList<TimeSeriesPointDto> TotalHistory { get; set; } = [];
     }
 
     /// <summary>One sample of a Prometheus range query (a trend chart data point).</summary>
@@ -41,6 +78,30 @@ namespace iucs.readernest.application.Dto.Monitoring
     }
 
     /// <summary>
+    /// Health of the Cloudflare Calls TURN fallback (see docs/JITSI_ARCHITECTURE.md) that lets
+    /// clients on UDP-blocking networks still reach the JVB. Populated only for the Jitsi server,
+    /// and only once /opt/rn-monitoring/turn-credentials-refresh.sh has published its textfile
+    /// metric at least once.
+    /// </summary>
+    public class TurnStatusDto
+    {
+        /// <summary>False means the last refresh is older than its own requested TTL — the credentials Prosody is
+        /// currently advertising may have expired, most likely because the refresh cron job stopped running.</summary>
+        public bool CredentialsHealthy { get; set; }
+        public DateTime? LastRefreshedAtUtc { get; set; }
+        public double SecondsSinceRefresh { get; set; }
+        /// <summary>TTL the refresh script requested from Cloudflare for the current credentials (seconds).</summary>
+        public double CredentialsTtlSeconds { get; set; }
+        /// <summary>Total ICE negotiations JVB has completed successfully since it last started.</summary>
+        public long IceSucceededTotal { get; set; }
+        /// <summary>Of those, how many selected a relayed (TURN) candidate pair -- i.e. actually needed the
+        /// fallback because a direct UDP path to the JVB wasn't available for that participant.</summary>
+        public long IceSucceededRelayedTotal { get; set; }
+        /// <summary>0 when IceSucceededTotal is 0 (no data yet), not a divide-by-zero NaN.</summary>
+        public double RelayedUsagePercent { get; set; }
+    }
+
+    /// <summary>
     /// One server's point-in-time health, as reported by its own rn-status agent. <see cref="Reachable"/>
     /// false means the agent couldn't be reached at all (server down, network issue, wrong token) —
     /// every other field is then meaningless/default and the UI should show it as unknown, not "0%".
@@ -51,12 +112,30 @@ namespace iucs.readernest.application.Dto.Monitoring
         public string Hostname { get; set; } = string.Empty;
         public bool Reachable { get; set; }
         public string? Error { get; set; }
+        /// <summary>
+        /// True for a server that's expected to not exist most of the time (e.g. the Hetzner
+        /// burst-worker). The UI should render <see cref="Reachable"/> false + this true as a
+        /// calm "Standby" state, not the same alarming "unreachable" treatment as an always-on
+        /// server that's actually down.
+        /// </summary>
+        public bool IsOnDemand { get; set; }
+        /// <summary>
+        /// This server's configured container whitelist (see MonitoredServerOptions.Services),
+        /// always populated regardless of <see cref="Reachable"/> -- unlike <see cref="Services"/>
+        /// (live rn_service_active facts, empty when unreachable), log fetching only needs to
+        /// know which container NAMES are valid to ask for, which is static config, not live data.
+        /// Lets the log viewer stay usable for an on-demand server while it's in standby.
+        /// </summary>
+        public List<string> ConfiguredServices { get; set; } = new();
         public long UptimeSeconds { get; set; }
         public double LoadAverage1m { get; set; }
         public int CpuCores { get; set; }
         public double CpuUsagePercent { get; set; }
         public double MemoryUsedPercent { get; set; }
         public double MemoryTotalMb { get; set; }
+        /// <summary>0 when the server has no swap configured -- the UI should hide the gauge rather than show a meaningless 0%.</summary>
+        public double SwapUsedPercent { get; set; }
+        public double SwapTotalMb { get; set; }
         public double DiskUsedPercent { get; set; }
         public double DiskTotalGb { get; set; }
         public double NetworkRxMbps { get; set; }
@@ -67,11 +146,97 @@ namespace iucs.readernest.application.Dto.Monitoring
         /// <summary>How long ago the agent itself last wrote its status file — a stale reading (agent stuck/cron dead) still reports <see cref="Reachable"/> true, so the UI needs this to flag it separately.</summary>
         public double AgentDataAgeSeconds { get; set; }
         public LiveCallSummaryDto? LiveCalls { get; set; }
+        public RecorderStatusDto? RecorderStatus { get; set; }
         /// <summary>Last hour of CPU/memory usage, ~2-minute steps — populated only when Reachable.</summary>
         public List<TimeSeriesPointDto> CpuHistory { get; set; } = new();
         public List<TimeSeriesPointDto> MemoryHistory { get; set; } = new();
         public CallQualityDto? CallQuality { get; set; }
+        public TurnStatusDto? TurnStatus { get; set; }
         public CapacityForecastDto? DiskForecast { get; set; }
+        /// <summary>Per-container CPU/memory snapshot, sorted by CPU descending — empty if the rn-container-stats.sh script hasn't published on this box yet.</summary>
+        public List<ContainerMetricDto> ContainerMetrics { get; set; } = new();
+        /// <summary>Week-over-week load trend — null while there isn't yet 14 days of Prometheus history to compare against.</summary>
+        public CapacityTrendDto? CapacityTrend { get; set; }
+    }
+
+    /// <summary>
+    /// Honest load-trend reporting instead of a fake day-countdown: CPU and (for the Jitsi
+    /// server) recording load are bursty, real-time signals, not the smoothly-accumulating
+    /// kind deriv() forecasts well (unlike disk fill -- see CapacityForecastDto). This reports
+    /// direction and how close to the ceiling things got, not a projected "days until full."
+    /// </summary>
+    public class CapacityTrendDto
+    {
+        public double CpuAvg7dPercent { get; set; }
+        public double CpuPeak7dPercent { get; set; }
+        /// <summary>Positive = busier than the prior 7 days, negative = quieter.</summary>
+        public double CpuWeekOverWeekChangePercent { get; set; }
+        /// <summary>Percent of the last 7 days spent with every Jibri instance busy (i.e. the next recording would have failed) -- null for a server with no Jibri fleet.</summary>
+        public double? RecordingAtCapacityPercent7d { get; set; }
+    }
+
+    /// <summary>One connected user in a live class, for the admin "who's live right now" view.</summary>
+    public class LiveParticipantDto
+    {
+        public Guid UserId { get; set; } = Guid.Empty;
+        public string Name { get; set; } = string.Empty;
+        public string Role { get; set; } = string.Empty;
+        public DateTime JoinedAtUtc { get; set; }
+        /// <summary>How many simultaneous connections this person currently holds (2+ tabs/devices) -- surfaced explicitly rather than silently collapsed, since it can also indicate a connection struggling to stay up.</summary>
+        public int ConnectionCount { get; set; } = 1;
+        /// <summary>
+        /// Whether a SessionAttendance row already reflects this person's presence (Present/Late,
+        /// not Absent). False can mean attendance capture is still catching up (it fires
+        /// asynchronously on join) or that it genuinely failed -- either way, a live participant
+        /// with no attendance record after they've clearly been in a while is worth an admin's
+        /// attention. For a parent/student connection this checks whether ANY of that parent's
+        /// actively-enrolled children in this batch has a recorded row, mirroring
+        /// AcademicOpsService's own "mark every enrolled child present" resolution -- the system
+        /// has no record of which specific child is physically on the call, only that the parent
+        /// joined on their behalf.
+        /// </summary>
+        public bool AttendanceRecorded { get; set; }
+    }
+
+    /// <summary>One live class session with everyone currently connected to it, enriched with the human-readable context a raw session Guid doesn't carry on its own.</summary>
+    public class LiveClassSessionDto
+    {
+        public string SessionId { get; set; } = string.Empty;
+        public string CourseName { get; set; } = string.Empty;
+        /// <summary>Null for a demo session, which has no Batch.</summary>
+        public string? BatchName { get; set; }
+        public string TeacherName { get; set; } = string.Empty;
+        public DateTime? StartedAtUtc { get; set; }
+        /// <summary>Null for a demo session (no fixed schedule). Running past this is worth flagging, not just informational.</summary>
+        public DateTime? ScheduledEndAtUtc { get; set; }
+        public List<LiveParticipantDto> Participants { get; set; } = new();
+    }
+
+    /// <summary>One of today's class sessions, live or not -- for the admin "today's sessions" timeline. Deliberately NOT limited to currently-live ones, unlike LiveClassSessionDto.</summary>
+    public class SessionHistoryEntryDto
+    {
+        public Guid SessionId { get; set; }
+        public string CourseName { get; set; } = string.Empty;
+        public string? BatchName { get; set; }
+        public string TeacherName { get; set; } = string.Empty;
+        public DateTime ScheduledStartAtUtc { get; set; }
+        public DateTime ScheduledEndAtUtc { get; set; }
+        public DateTime? ActualStartAtUtc { get; set; }
+        public DateTime? ActualEndAtUtc { get; set; }
+        public string Status { get; set; } = string.Empty;
+        /// <summary>Distinct people (teacher + students) with a Present/Late SessionAttendance row -- not a live headcount, a durable record.</summary>
+        public int AttendedCount { get; set; }
+        /// <summary>Teacher (1) + actively-enrolled batch students at the time of this query -- the roster this session was expected to draw from.</summary>
+        public int ExpectedCount { get; set; }
+        /// <summary>True once a session_recordings row exists for this session. Only meaningful for a real batch class that has actually started -- always false for demo/personal-link sessions, which are never recorded by design.</summary>
+        public bool HasRecording { get; set; }
+    }
+
+    /// <summary>Historical CPU/memory usage for one server over an admin-selected window (see GetHistoryAsync).</summary>
+    public class HistoryRangeDto
+    {
+        public List<TimeSeriesPointDto> CpuHistory { get; set; } = new();
+        public List<TimeSeriesPointDto> MemoryHistory { get; set; } = new();
     }
 
     /// <summary>
@@ -118,6 +283,30 @@ namespace iucs.readernest.application.Dto.Monitoring
         public string? Instance { get; set; }
     }
 
+    /// <summary>Request body for POST .../jibri/min-replicas.</summary>
+    public class SetJibriMinReplicasRequest
+    {
+        public int MinReplicas { get; set; }
+    }
+
+    /// <summary>Result of an on-demand Jibri fleet action (rescale-now, or a min-replicas change) -- see IServerControlService.</summary>
+    public class JibriControlResultDto
+    {
+        public string Server { get; set; } = string.Empty;
+        public string Action { get; set; } = string.Empty;
+        /// <summary>Tail of the autoscaler's own log right after the action ran, so the admin sees what it actually did.</summary>
+        public List<string> LogTail { get; set; } = new();
+        public DateTime PerformedAtUtc { get; set; }
+    }
+
+    /// <summary>Result of restarting one container on one monitored server (see IServerControlService).</summary>
+    public class ServiceRestartResultDto
+    {
+        public string Server { get; set; } = string.Empty;
+        public string Container { get; set; } = string.Empty;
+        public DateTime PerformedAtUtc { get; set; }
+    }
+
     /// <summary>Error-filtered `docker logs` tail for one container on one monitored server (see IServerLogService).</summary>
     public class ServerLogsDto
     {
@@ -125,6 +314,20 @@ namespace iucs.readernest.application.Dto.Monitoring
         public string Container { get; set; } = string.Empty;
         public List<string> Lines { get; set; } = new();
         public DateTime FetchedAtUtc { get; set; }
+    }
+
+    /// <summary>
+    /// Today's (IST) real batch classes vs. how many actually have a registered recording --
+    /// same "started, not still live, no session_recordings row" definition used to trace
+    /// individual sync failures by hand. StillProcessing is deliberately not counted as a
+    /// failure: a class that ended a minute ago hasn't failed, it just hasn't synced yet.
+    /// </summary>
+    public class RecordingSummaryDto
+    {
+        public int Started { get; set; }
+        public int Succeeded { get; set; }
+        public int Failed { get; set; }
+        public int StillProcessing { get; set; }
     }
 
     /// <summary>Everything the Server Monitoring dashboard needs in one call.</summary>
@@ -139,6 +342,7 @@ namespace iucs.readernest.application.Dto.Monitoring
         public int ConcurrentClassroomUsers { get; set; }
         public int ActiveClassCount { get; set; }
         public List<AlertDto> ActiveAlerts { get; set; } = new();
+        public RecordingSummaryDto TodayRecordings { get; set; } = new();
         public DateTime GeneratedAtUtc { get; set; }
     }
 }

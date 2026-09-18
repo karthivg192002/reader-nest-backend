@@ -1,6 +1,5 @@
 using System.ComponentModel.DataAnnotations;
 using iucs.readernest.domain.Entities.Common;
-using iucs.readernest.domain.Enums;
 using Microsoft.EntityFrameworkCore;
 
 namespace iucs.readernest.domain.Entities.Navigation
@@ -40,7 +39,9 @@ namespace iucs.readernest.domain.Entities.Navigation
         /// <summary>Inactive items stay configured but disappear from the sidebar.</summary>
         public bool IsActive { get; set; } = true;
 
-        /// <summary>Optional module gate: Sub Admins only see the item when granted View on this module.</summary>
-        public PermissionModule? RequiredModule { get; set; }
+        /// <summary>Optional module gate: Sub Admins only see the item when granted View on this
+        /// module. A PermissionModuleDefinition.Key — built-in enum name or a custom module.</summary>
+        [MaxLength(64)]
+        public string? RequiredModule { get; set; }
     }
 }

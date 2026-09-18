@@ -88,6 +88,12 @@ namespace iucs.readernest.application.Dto.Enrollment
         /// <summary>The owning parent profile — needed to start a subscription for this child.</summary>
         public Guid ParentProfileId { get; set; }
 
+        /// <summary>The parent's own account id (User.Id) — distinct from ParentProfileId above.
+        /// The admin Users screen's parents list is keyed by this (it comes from the Users API,
+        /// not ParentProfile), so matching a child to its parent row there needs this, not
+        /// ParentProfileId.</summary>
+        public Guid ParentUserId { get; set; }
+
         public string FullName { get; set; } = null!;
 
         public int? Age { get; set; }
@@ -102,6 +108,12 @@ namespace iucs.readernest.application.Dto.Enrollment
         public string? RmNotes { get; set; }
 
         public bool IsActive { get; set; }
+
+        /// <summary>Sum of AmountPaid across this child's Paid invoices. Zero means nothing was
+        /// ever collected for them — deleting them needs no refund conversation. A positive
+        /// value is surfaced as a warning before delete/withdraw, since removing the record
+        /// does not itself refund anything; that stays a manual step in Billing &amp; Finance.</summary>
+        public decimal PaidInvoiceTotal { get; set; }
     }
 
     public class UpdateChildNotesRequest

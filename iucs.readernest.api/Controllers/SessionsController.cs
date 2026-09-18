@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using iucs.readernest.api.Auth;
+using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Academics;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Services;
@@ -13,11 +14,17 @@ namespace iucs.readernest.api.Controllers
     [Route("api/sessions")]
     public class SessionsController : ControllerBase
     {
-        private readonly ISessionService _sessionService;
+        private const long MaxPresentationUploadBytes = 100 * 1024 * 1024;
 
-        public SessionsController(ISessionService sessionService)
+        private readonly ISessionService _sessionService;
+        private readonly IFileStorage _fileStorage;
+        private readonly IAcademicOpsService _academicOpsService;
+
+        public SessionsController(ISessionService sessionService, IFileStorage fileStorage, IAcademicOpsService academicOpsService)
         {
             _sessionService = sessionService;
+            _fileStorage = fileStorage;
+            _academicOpsService = academicOpsService;
         }
 
         // Staff console only: Teacher and Parent also carry SessionCalendarManagement:View
@@ -34,7 +41,8 @@ namespace iucs.readernest.api.Controllers
             [FromQuery] Guid? batchId,
             CancellationToken cancellationToken)
         {
-            return Ok(await _sessionService.ListAsync(fromUtc, toUtc, teacherProfileId, batchId, cancellationToken));
+            return Ok(await _sessionService.ListAsync(
+                AsUtc(fromUtc), AsUtc(toUtc), teacherProfileId, batchId, cancellationToken));
         }
 
         /// <summary>Teacher dashboard agenda: the caller's own sessions.</summary>
@@ -46,8 +54,16 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-            return Ok(await _sessionService.ListForTeacherUserAsync(userId, fromUtc, toUtc, cancellationToken));
+            return Ok(await _sessionService.ListForTeacherUserAsync(userId, AsUtc(fromUtc), AsUtc(toUtc), cancellationToken));
         }
+
+        // Model binding parses a bare date/no-offset query value (e.g. "2026-01-01") as
+        // Kind=Unspecified, which Npgsql then refuses to compare against a timestamptz
+        // column (a 500, not a friendly 400). The frontend always sends a full ISO instant
+        // via toISOString(), which binds as Kind=Utc already, so this is a no-op for real
+        // traffic and only hardens the endpoint against a malformed/hand-built query string.
+        private static DateTime AsUtc(DateTime value) =>
+            value.Kind == DateTimeKind.Utc ? value : DateTime.SpecifyKind(value, DateTimeKind.Utc);
 
         /// <summary>Any session by id — staff-scoped for the same reason as the list above.</summary>
         [HttpGet("{id:guid}")]
@@ -71,6 +87,129 @@ namespace iucs.readernest.api.Controllers
         {
             var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
             return Ok(await _sessionService.GetJitsiJoinAsync(id, userId, cancellationToken));
+        }
+
+        /// <summary>
+        /// The session's batch roster for the "Copy Guest Link" student picker (RM/Admin/
+        /// Coordinator Sessions and Calendar screens). Same permission as viewing the session
+        /// itself — deliberately not CourseBatchManagement:View, so an account with only session
+        /// access isn't 403'd just for this popup. Also role-restricted same as List/Get above:
+        /// Teacher and Parent carry SessionCalendarManagement:View too (for their own scoped
+        /// /mine and parent-schedule routes), and HasPermission alone doesn't scope by session
+        /// ownership — without the role check, a teacher or parent could pull the guest-link
+        /// student picker (and mint a link) for a class that isn't theirs.
+        /// </summary>
+        [HttpGet("{id:guid}/guest-link/students")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
+        [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<GuestLinkStudentDto>>> ListGuestLinkStudents(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.GetGuestLinkStudentsAsync(id, cancellationToken));
+        }
+
+        /// <summary>
+        /// Mints a shareable Guest Link token for this session — pass ChildId to bind it to one
+        /// specific enrolled student (auto attendance, skips prejoin), or omit it for a generic
+        /// guest link. Same permission and role restriction as
+        /// <see cref="ListGuestLinkStudents"/> above (see its own doc comment for why the role
+        /// check matters here too, not just HasPermission).
+        /// </summary>
+        [HttpPost("{id:guid}/guest-link")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
+        [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.View)]
+        public async Task<ActionResult<GuestLinkDto>> CreateGuestLink(Guid id, CreateGuestLinkRequest request, CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.CreateGuestLinkAsync(id, request.ChildId, cancellationToken));
+        }
+
+        /// <summary>
+        /// Anonymous landing call the frontend's own "/guest-join" bridge page makes to resolve
+        /// a Guest Link token into a live Jitsi join. Deliberately unauthenticated — the
+        /// caretaker opening the link never logs in — the opaque, signed token itself (see
+        /// JwtTokenService.CreateGuestJoinToken) is the only credential. Marks attendance for the
+        /// bound student, when there is one, same split responsibility ClassroomHub.JoinSession
+        /// already uses between ISessionService (resolve/join) and IAcademicOpsService
+        /// (attendance) — SessionService can't depend on IAcademicOpsService directly, which
+        /// already depends back on ISessionService.
+        /// </summary>
+        [HttpPost("guest-join")]
+        [AllowAnonymous]
+        public async Task<ActionResult<GuestJoinDto>> GuestJoin(GuestJoinRequest request, CancellationToken cancellationToken)
+        {
+            var join = await _sessionService.GetGuestJoinAsync(request.Token, cancellationToken);
+            if (join.ChildId is Guid childId)
+            {
+                await _academicOpsService.CaptureGuestJoinAttendanceAsync(join.SessionId, childId, cancellationToken);
+            }
+            return Ok(join);
+        }
+
+        /// <summary>
+        /// Machine-to-machine: nginx on the Jitsi server proxies Jibri's own top-level
+        /// navigation to /&lt;room&gt; here (see docs/JITSI_ARCHITECTURE.md's recording-observer
+        /// section) instead of the bare Jitsi Meet SPA, so the recording captures our whiteboard/
+        /// quiz overlay, not just raw video tiles. Deliberately anonymous — Jibri's headless
+        /// Chrome has no logged-in user — but the token it hands back only ever admits a
+        /// moderator-less participant into one specific, currently-InProgress room, same bounded
+        /// trust model as recordings/finalize. Returns 204 when the room has no InProgress
+        /// session right now (e.g. a personal room, or a startup race).
+        /// </summary>
+        /// <summary>
+        /// Anonymous by necessity (Jibri's headless Chrome has no logged-in user), which
+        /// otherwise means anyone on the internet who learns a personal room id -- it isn't
+        /// secret, it appears in copy-link URLs and confirmation emails -- could pull a live
+        /// join token for whatever class happens to be running in that room. Actually restricted
+        /// via <see cref="IsFromTrustedJibriHost"/>: only requests whose remote IP matches
+        /// Jibri:AllowedIps get a token; everyone else gets 403 regardless of the room being
+        /// live. Confirmed live-exploitable before this check existed -- a plain unauthenticated
+        /// request against an in-progress room returned a real 4-hour Jitsi + hub token.
+        /// </summary>
+        [HttpGet("recordings/observer-join")]
+        [AllowAnonymous]
+        public async Task<ActionResult<RecordingObserverJoinDto>> GetRecordingObserverJoin(
+            [FromQuery] string room,
+            [FromServices] IConfiguration configuration,
+            CancellationToken cancellationToken)
+        {
+            if (!IsFromTrustedJibriHost(configuration))
+            {
+                return Forbid();
+            }
+
+            var join = await _sessionService.GetLiveObserverJoinAsync(room, cancellationToken);
+            return join is null ? NoContent() : Ok(join);
+        }
+
+        /// <summary>
+        /// Jibri:AllowedIps is a CSV of IPs/CIDRs in configuration (the Jitsi server's own
+        /// outbound address by default) -- this call's own remote IP, resolved through
+        /// UseForwardedHeaders in Program.cs so it reflects the real client rather than an
+        /// intermediate reverse proxy, must match one of them. An empty/missing setting fails
+        /// closed (denies everyone) rather than open, so a blank config can't silently reopen
+        /// this to the whole internet the way [AllowAnonymous] alone did.
+        /// </summary>
+        private bool IsFromTrustedJibriHost(IConfiguration configuration)
+        {
+            var remoteIp = HttpContext.Connection.RemoteIpAddress;
+            if (remoteIp is null)
+            {
+                return false;
+            }
+
+            var normalizedRemoteIp = remoteIp.IsIPv4MappedToIPv6 ? remoteIp.MapToIPv4() : remoteIp;
+            var allowedEntries = (configuration["Jibri:AllowedIps"] ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            foreach (var entry in allowedEntries)
+            {
+                if (System.Net.IPAddress.TryParse(entry, out var allowedIp)
+                    && (allowedIp.IsIPv4MappedToIPv6 ? allowedIp.MapToIPv4() : allowedIp).Equals(normalizedRemoteIp))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>Non-secret Jitsi settings (domain, auto-record) for whoever is about to join a live class.</summary>
@@ -121,6 +260,20 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             return Ok(await _sessionService.CompleteAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>Edits a completed session's notes after the fact -- teacher feedback: "the
+        /// report-writing option is also not visible after the session if we do not complete
+        /// the report immediately." Re-emails the updated notes to the batch's parents the same
+        /// way completing the class with notes already does.</summary>
+        [HttpPut("{id:guid}/summary")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<ActionResult<ClassSessionDto>> UpdateSummary(
+            Guid id,
+            UpdateSessionSummaryRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.UpdateSummaryAsync(id, request.Summary, cancellationToken));
         }
 
         /// <summary>
@@ -176,14 +329,58 @@ namespace iucs.readernest.api.Controllers
             return recording is null ? NoContent() : Ok(recording);
         }
 
-        /// <summary>Parents see their own child's recordings only via the scoped parent-portal resources endpoint.</summary>
+        /// <summary>
+        /// Parents see their own child's recordings only via the scoped parent-portal resources
+        /// endpoint. Admin/Teacher pass unconditionally; a Sub Admin (e.g. Coordinator) additionally
+        /// needs SessionCalendarManagement:View — the same grant their preset already carries for
+        /// calendar work — checked manually here rather than via [HasPermission], which would deny
+        /// Teacher (Teacher has no permission claims at all; see AuthService.LoadPermissionClaimsAsync).
+        /// </summary>
         [HttpGet("{id:guid}/recordings")]
-        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)},{nameof(UserRole.SubAdmin)}")]
         public async Task<ActionResult<IReadOnlyList<SessionRecordingDto>>> ListRecordings(
             Guid id,
             CancellationToken cancellationToken)
         {
+            if (User.IsInRole(nameof(UserRole.SubAdmin)) &&
+                !User.HasClaim(JwtTokenService.PermissionClaimType, $"{PermissionModule.SessionCalendarManagement}:{PermissionAction.View}"))
+            {
+                return Forbid();
+            }
+
             return Ok(await _sessionService.ListRecordingsAsync(id, cancellationToken));
+        }
+
+        /// <summary>Admin-wide Recordings page: every registered recording across every class, one
+        /// paged query instead of a completed-session list plus a per-session lookup for each one
+        /// (confirmed live as that page's actual "Loading recordings..." bottleneck). Admin-only,
+        /// same as delete -- this is the institution-wide management view, not the scoped
+        /// per-session list above.</summary>
+        [HttpGet("recordings")]
+        [Authorize(Roles = nameof(UserRole.Admin))]
+        public async Task<ActionResult<iucs.readernest.application.Dto.Common.PagedResult<RecordingListItemDto>>> ListAllRecordings(
+            [FromQuery] int page,
+            [FromQuery] int pageSize,
+            [FromQuery] DateOnly? date,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.ListAllRecordingsAsync(page <= 0 ? 1 : page, pageSize <= 0 ? 20 : pageSize, date, null, cancellationToken));
+        }
+
+        /// <summary>A teacher's own Recordings page — same paged query as the admin-wide one
+        /// above, scoped to this caller's own classes. TeacherRecordings.tsx had the identical
+        /// completed-session-list-plus-per-session-lookup N+1 shape the admin page did; fixed the
+        /// same way, just filtered rather than institution-wide.</summary>
+        [HttpGet("mine/recordings")]
+        [Authorize(Roles = nameof(UserRole.Teacher))]
+        public async Task<ActionResult<iucs.readernest.application.Dto.Common.PagedResult<RecordingListItemDto>>> ListMyRecordings(
+            [FromQuery] int page,
+            [FromQuery] int pageSize,
+            [FromQuery] DateOnly? date,
+            CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _sessionService.ListAllRecordingsAsync(page <= 0 ? 1 : page, pageSize <= 0 ? 20 : pageSize, date, userId, cancellationToken));
         }
 
         /// <summary>Deletes a registered recording. Admin only — unregisters the row; the underlying file in storage is left untouched.</summary>
@@ -196,6 +393,65 @@ namespace iucs.readernest.api.Controllers
         {
             await _sessionService.DeleteRecordingAsync(id, recordingId, cancellationToken);
             return NoContent();
+        }
+
+        /// <summary>Uploads (replacing any prior deck) the PDF the teacher wants to present live in
+        /// this class — the "present a deck like Google Meet" flow. Only the session's own
+        /// assigned teacher or an Admin may do this; enforced in the service, not by role alone,
+        /// since a Teacher role check here wouldn't stop one teacher uploading into another's class.</summary>
+        [HttpPost("{id:guid}/presentation")]
+        [Authorize]
+        [RequestSizeLimit(MaxPresentationUploadBytes)]
+        public async Task<ActionResult<SessionPresentationDto>> UploadPresentation(
+            Guid id,
+            IFormFile file,
+            CancellationToken cancellationToken)
+        {
+            if (file.Length == 0)
+            {
+                return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "The uploaded file is empty." });
+            }
+            var isPdf = string.Equals(Path.GetExtension(file.FileName), ".pdf", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(file.ContentType, "application/pdf", StringComparison.OrdinalIgnoreCase);
+            if (!isPdf)
+            {
+                return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "Only PDF decks are supported — export your slides to PDF first." });
+            }
+
+            await using var stream = file.OpenReadStream();
+            var stored = await _fileStorage.StoreAsync(stream, file.FileName, cancellationToken);
+
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var presentation = await _sessionService.UploadPresentationAsync(id, userId, stored.RelativePath, file.FileName, cancellationToken);
+            return Ok(presentation);
+        }
+
+        /// <summary>Whether a deck has been uploaded for this session yet, and its file name — same
+        /// participant access as joining the class itself.</summary>
+        [HttpGet("{id:guid}/presentation")]
+        [Authorize]
+        public async Task<ActionResult<SessionPresentationDto?>> GetPresentation(Guid id, CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _sessionService.GetPresentationAsync(id, userId, cancellationToken));
+        }
+
+        /// <summary>Streams the uploaded PDF itself — what the live classroom's viewer actually
+        /// points pdf.js at. Same participant access as joining the class.</summary>
+        [HttpGet("{id:guid}/presentation/file")]
+        [Authorize]
+        public async Task<IActionResult> DownloadPresentation(Guid id, CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var presentation = await _sessionService.GetPresentationForDownloadAsync(id, userId, cancellationToken);
+            var stream = await _fileStorage.OpenReadAsync(presentation.StorageUrl, cancellationToken);
+
+            if (stream is null)
+            {
+                return NotFound(new ProblemDetails { Status = 404, Title = "Not Found", Detail = "The stored file is missing." });
+            }
+
+            return File(stream, "application/pdf", presentation.OriginalFileName);
         }
 
         /// <summary>Engagement signals from the live classroom (quiz, activity, whiteboard, attention).</summary>
