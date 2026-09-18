@@ -22,6 +22,12 @@ namespace iucs.readernest.application.Common.Options
         public string DatabaseName { get; set; } = string.Empty;
 
         public List<MonitoredServerOptions> Servers { get; set; } = new();
+
+        /// <summary>Path to the burst-worker create/delete event log (JSON lines) on the Jitsi/Video server -- see burst-scale-up.sh/burst-scale-down.sh.</summary>
+        public string BurstWorkerUsageLogPath { get; set; } = string.Empty;
+
+        /// <summary>Real Hetzner hourly rate (USD) for the burst worker's server type/region (cpx42, Singapore) -- used only to estimate cost from our own tracked timestamps, not billed here.</summary>
+        public double BurstWorkerHourlyRateUsd { get; set; }
     }
 
     public class MonitoredServerOptions

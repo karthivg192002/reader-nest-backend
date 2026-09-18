@@ -25,17 +25,20 @@ namespace iucs.readernest.application.Services
         private readonly IPrometheusClient _prometheus;
         private readonly IUnitOfWork _unitOfWork;
         private readonly IClassroomPresenceTracker _presenceTracker;
+        private readonly IBurstWorkerUsageService _burstWorkerUsage;
         private readonly MonitoringOptions _options;
 
         public MonitoringService(
             IPrometheusClient prometheus,
             IUnitOfWork unitOfWork,
             IClassroomPresenceTracker presenceTracker,
+            IBurstWorkerUsageService burstWorkerUsage,
             IOptions<MonitoringOptions> options)
         {
             _prometheus = prometheus;
             _unitOfWork = unitOfWork;
             _presenceTracker = presenceTracker;
+            _burstWorkerUsage = burstWorkerUsage;
             _options = options.Value;
         }
 
@@ -47,8 +50,9 @@ namespace iucs.readernest.application.Services
             var databaseTask = CheckDatabaseAsync(cancellationToken);
             var insightsTask = GetDatabaseInsightsAsync(cancellationToken);
             var alertsTask = _prometheus.GetActiveAlertsAsync(_options.PrometheusBaseUrl, cancellationToken);
+            var burstUsageTask = _burstWorkerUsage.GetUsageSummaryAsync(cancellationToken);
 
-            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask));
+            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask).Append(burstUsageTask));
             var (dbHealthy, dbLatencyMs) = await databaseTask;
             // Sequential, not joined into the WhenAll above: this also queries via _unitOfWork,
             // and CheckDatabaseAsync already does too -- both use the same scoped DbContext,
@@ -66,6 +70,7 @@ namespace iucs.readernest.application.Services
                 DatabaseHealthy = dbHealthy,
                 DatabaseLatencyMs = dbLatencyMs,
                 DatabaseInsights = await insightsTask,
+                BurstWorkerUsage = await burstUsageTask,
                 ConcurrentClassroomUsers = _presenceTracker.TotalConnectedUsers,
                 ActiveClassCount = _presenceTracker.ActiveClassCount,
                 ActiveAlerts = (await alertsTask)

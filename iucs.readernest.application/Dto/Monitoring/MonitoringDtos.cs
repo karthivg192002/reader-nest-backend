@@ -330,6 +330,37 @@ namespace iucs.readernest.application.Dto.Monitoring
         public int StillProcessing { get; set; }
     }
 
+    /// <summary>One create-to-delete (or still-running) lifecycle of the Hetzner burst worker.</summary>
+    public class BurstWorkerEpisodeDto
+    {
+        public long ServerId { get; set; }
+        public DateTime CreatedAtUtc { get; set; }
+        /// <summary>Null means still running right now.</summary>
+        public DateTime? DeletedAtUtc { get; set; }
+        public double DurationHours { get; set; }
+        /// <summary>At the configured Hetzner hourly rate -- an estimate from our own tracked timestamps, not a real Hetzner invoice line.</summary>
+        public double EstimatedCostUsd { get; set; }
+    }
+
+    /// <summary>
+    /// How often and for how long the on-demand Hetzner burst worker has actually been used,
+    /// derived from burst-scale-up.sh/burst-scale-down.sh's own create/delete event log --
+    /// there's no billing API call involved, just our own tracked timestamps at a known
+    /// hourly rate, so treat the cost figures as an estimate, not an invoice.
+    /// </summary>
+    public class BurstWorkerUsageDto
+    {
+        public int EpisodesToday { get; set; }
+        public double HoursToday { get; set; }
+        public double EstimatedCostTodayUsd { get; set; }
+        public int EpisodesAllTime { get; set; }
+        public double HoursAllTime { get; set; }
+        public double EstimatedCostAllTimeUsd { get; set; }
+        public bool CurrentlyActive { get; set; }
+        /// <summary>Most recent first, capped to a reasonable number for the dashboard -- not the full history.</summary>
+        public List<BurstWorkerEpisodeDto> RecentEpisodes { get; set; } = new();
+    }
+
     /// <summary>Everything the Server Monitoring dashboard needs in one call.</summary>
     public class MonitoringSummaryDto
     {
@@ -343,6 +374,8 @@ namespace iucs.readernest.application.Dto.Monitoring
         public int ActiveClassCount { get; set; }
         public List<AlertDto> ActiveAlerts { get; set; } = new();
         public RecordingSummaryDto TodayRecordings { get; set; } = new();
+        /// <summary>Null if the usage log couldn't be fetched (e.g. main unreachable) -- absent, not zeroed out, so the UI doesn't show a false "never used."</summary>
+        public BurstWorkerUsageDto? BurstWorkerUsage { get; set; }
         public DateTime GeneratedAtUtc { get; set; }
     }
 }
