@@ -580,7 +580,11 @@ namespace iucs.readernest.application.Services
             var diskAvailBytesTask = _prometheus.QueryScalarAsync(
                 baseUrl, $"node_filesystem_avail_bytes{{instance=\"{instanceLabel}\",mountpoint=\"/\",fstype!=\"tmpfs\"}}", cancellationToken);
             var diskTrendTask = _prometheus.QueryScalarAsync(
-                baseUrl, $"deriv(node_filesystem_avail_bytes{{instance=\"{instanceLabel}\",mountpoint=\"/\",fstype!=\"tmpfs\"}}[6h])", cancellationToken);
+                // 24h, not 6h: recordings land in the evening class peak, so a 6h window taken then
+                // extrapolates the busiest stretch of the day as if it were constant (showed "disk
+                // full in ~5 days" on the Recording Worker while its real average growth was ~9GB/day,
+                // i.e. ~25 days). A full day averages the peak and the quiet hours.
+                baseUrl, $"deriv(node_filesystem_avail_bytes{{instance=\"{instanceLabel}\",mountpoint=\"/\",fstype!=\"tmpfs\"}}[24h])", cancellationToken);
             await Task.WhenAll(cpuHistoryTask, memHistoryTask, diskAvailBytesTask, diskTrendTask, recorderBusyHistoryTask, recorderTotalHistoryTask);
 
             // Week-over-week trend, not a fake day-countdown -- CPU and recording load are
