@@ -257,7 +257,7 @@ namespace iucs.readernest.application.Dto.Monitoring
     }
 
     /// <summary>
-    /// Disk-fill projection from the last 6 hours' trend (Prometheus's own deriv() function —
+    /// Disk-fill projection from the last 24 hours' trend (Prometheus's own deriv() function —
     /// a real linear-regression rate, not a guess). Only meaningful for genuinely accumulating
     /// usage (logs, recordings, DB growth); a healthy server usually reports IsFilling=false.
     /// </summary>
