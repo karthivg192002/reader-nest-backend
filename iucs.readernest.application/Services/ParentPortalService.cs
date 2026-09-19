@@ -168,7 +168,14 @@ namespace iucs.readernest.application.Services
             return new ParentDashboardDto
             {
                 ParentProfileId = parent.Id,
-                EnrollmentFormCompleted = parent.EnrollmentFormCompleted,
+                // The stored flag is only ever set by an approved enrollment form. A family whose
+                // child was bulk-imported (the wise.live migration) or otherwise added by staff
+                // has an active child but never went through that form, so the flag alone sent
+                // an already-onboarded parent back to the enrollment gate (fill the form, wait
+                // for RM review) on their first dashboard visit -- while every per-child page
+                // (Schedule/Recordings/Resources) already treated that same child as enrolled.
+                // An active child IS the evidence the parent was onboarded.
+                EnrollmentFormCompleted = parent.EnrollmentFormCompleted || children.Any(c => c.IsActive),
                 IsSuspended = summaries.Any(c => c.IsSuspended),
                 AllChildrenSuspended = allSuspended,
                 SuspendedInvoiceId = allSuspended ? accountWideSuspension?.InvoiceId : null,

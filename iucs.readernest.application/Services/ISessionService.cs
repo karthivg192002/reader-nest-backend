@@ -47,6 +47,17 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Edits a batch's schedule from now on (new weekday/time pattern and/or remaining
+        /// session count) without re-entering the whole plan or touching sessions already
+        /// completed/in progress — see the implementation's own doc comment for the "Manage"
+        /// dialog gap this replaces.
+        /// </summary>
+        Task<IReadOnlyList<ClassSessionDto>> UpdateFutureScheduleAsync(
+            Guid batchId,
+            UpdateFutureScheduleRequest request,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Marks a no-show: the session is flagged, a carried-forward replacement is
         /// scheduled, and the payout impact accrues (waiting amount for a student
         /// no-show, deduction plus admin alert for a teacher no-show).

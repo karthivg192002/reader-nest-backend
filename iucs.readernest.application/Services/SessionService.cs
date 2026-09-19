@@ -932,9 +932,6 @@ namespace iucs.readernest.application.Services
                 .ToHashSet();
 
             var sessionRepository = _unitOfWork.Repository<ClassSession>();
-            var date = request.StartDate;
-            var created = 0;
-            DateOnly? lastDate = null;
             var durationMinutes = batch.DurationMinutesOverride ?? course.DurationMinutes;
 
             // Defaults to every session of the course (the only behaviour before SessionCount
@@ -943,38 +940,31 @@ namespace iucs.readernest.application.Services
             // there was previously no way to generate only the sessions actually still owed.
             var targetSessionCount = request.SessionCount ?? course.TotalSessions;
 
-            // Walk the calendar until every target session is placed; hard cap
-            // of two years guards against a weekday set that never matches.
-            var safetyLimit = request.StartDate.AddYears(2);
-            while (created < targetSessionCount && date < safetyLimit)
-            {
-                if (timeByDay.TryGetValue(date.DayOfWeek, out var timeForDay) && !holidays.Contains(date))
-                {
-                    var startUtc = date.ToDateTime(timeForDay, DateTimeKind.Utc);
-                    await EnsureTeacherIsFreeAsync(
-                        batch.TeacherProfileId, startUtc, startUtc.AddMinutes(durationMinutes), cancellationToken);
-                    await sessionRepository.AddAsync(
-                        new ClassSession
-                        {
-                            BatchId = batch.Id,
-                            TeacherProfileId = batch.TeacherProfileId,
-                            ScheduledStartAtUtc = startUtc,
-                            ScheduledEndAtUtc = startUtc.AddMinutes(durationMinutes),
-                            MeetingRoomId = $"trn-{Guid.NewGuid():N}",
-                        },
-                        cancellationToken);
-                    created++;
-                    lastDate = date;
-                }
-
-                date = date.AddDays(1);
-            }
-
-            if (created < targetSessionCount)
+            var starts = PlaceSessionStartTimes(request.StartDate, timeByDay, targetSessionCount, holidays);
+            if (starts.Count < targetSessionCount)
             {
                 throw new DomainValidationException("Could not place all sessions within two years; check the selected weekdays.");
             }
 
+            DateOnly? lastDate = null;
+            foreach (var startUtc in starts)
+            {
+                await EnsureTeacherIsFreeAsync(
+                    batch.TeacherProfileId, startUtc, startUtc.AddMinutes(durationMinutes), cancellationToken);
+                await sessionRepository.AddAsync(
+                    new ClassSession
+                    {
+                        BatchId = batch.Id,
+                        TeacherProfileId = batch.TeacherProfileId,
+                        ScheduledStartAtUtc = startUtc,
+                        ScheduledEndAtUtc = startUtc.AddMinutes(durationMinutes),
+                        MeetingRoomId = $"trn-{Guid.NewGuid():N}",
+                    },
+                    cancellationToken);
+                lastDate = DateOnly.FromDateTime(startUtc);
+            }
+
+            var created = starts.Count;
             batch.StartDate ??= request.StartDate;
             batch.EndDate = lastDate;
 
@@ -998,6 +988,197 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException(
                     "This batch already has scheduled sessions; reschedule or cancel them individually.");
             }
+
+            return await ListAsync(DateTime.MinValue, DateTime.MaxValue, null, batch.Id, cancellationToken);
+        }
+
+        /// <summary>Pure calendar walk shared by GenerateScheduleAsync and
+        /// UpdateFutureScheduleAsync: the UTC start times of <paramref name="targetCount"/>
+        /// sessions on the given weekday/time pattern, walking forward from
+        /// <paramref name="startDate"/> and skipping holidays. Stops early (returning fewer than
+        /// requested) if a two-year walk never places them all — callers decide what that means.</summary>
+        private static List<DateTime> PlaceSessionStartTimes(
+            DateOnly startDate,
+            IReadOnlyDictionary<DayOfWeek, TimeOnly> timeByDay,
+            int targetCount,
+            IReadOnlySet<DateOnly> holidays)
+        {
+            var result = new List<DateTime>();
+            var date = startDate;
+            var safetyLimit = startDate.AddYears(2);
+            while (result.Count < targetCount && date < safetyLimit)
+            {
+                if (timeByDay.TryGetValue(date.DayOfWeek, out var timeForDay) && !holidays.Contains(date))
+                {
+                    result.Add(date.ToDateTime(timeForDay, DateTimeKind.Utc));
+                }
+
+                date = date.AddDays(1);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Edits a batch's schedule from now on — the "Manage" dialog's only prior option once
+        /// any session existed was GenerateScheduleAsync, which refuses to run at all in that
+        /// case, forcing staff to cancel and manually re-book every remaining session one at a
+        /// time to change even just the class time (impractical at hundreds of children). Never
+        /// touches a session that's already Completed/InProgress/terminal — only ones still
+        /// Scheduled/CarriedForward and in the future move.
+        /// </summary>
+        public async Task<IReadOnlyList<ClassSessionDto>> UpdateFutureScheduleAsync(
+            Guid batchId,
+            UpdateFutureScheduleRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var batch = await _unitOfWork.Repository<Batch>().GetByIdAsync(batchId, cancellationToken)
+                ?? throw new NotFoundException(nameof(Batch), batchId);
+            var course = await _unitOfWork.Repository<Course>().GetByIdAsync(batch.CourseId, cancellationToken)
+                ?? throw new NotFoundException(nameof(Course), batch.CourseId);
+
+            var slotDays = request.Slots.Select(s => s.DayOfWeek).ToList();
+            if (slotDays.Count != slotDays.Distinct().Count())
+            {
+                throw new DomainValidationException("Each weekday can only have one time — remove the duplicate before saving.");
+            }
+            var timeByDay = request.Slots.ToDictionary(s => s.DayOfWeek, s => s.StartTimeUtc);
+            var durationMinutes = batch.DurationMinutesOverride ?? course.DurationMinutes;
+
+            var now = DateTime.UtcNow;
+            var remainingSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .Where(s => s.BatchId == batchId
+                    && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                    && s.ScheduledStartAtUtc > now)
+                .OrderBy(s => s.ScheduledStartAtUtc)
+                .ToListAsync(cancellationToken);
+            if (remainingSessions.Count == 0)
+            {
+                throw new DomainValidationException("This batch has no upcoming sessions to adjust — use Generate class schedule instead.");
+            }
+
+            var currentDays = remainingSessions.Select(s => s.ScheduledStartAtUtc.DayOfWeek).ToHashSet();
+            var targetCount = request.RemainingSessionCount ?? remainingSessions.Count;
+
+            if (timeByDay.Keys.ToHashSet().SetEquals(currentDays) && targetCount == remainingSessions.Count)
+            {
+                // Fast path — same weekdays, same count: only the time-of-day changed (or
+                // nothing did). Every remaining session keeps its own calendar date; only its
+                // start/end time move, exactly like the reported "12 PM -> 2 PM" request.
+                var newStartBySessionId = remainingSessions.ToDictionary(
+                    s => s.Id,
+                    s => DateOnly.FromDateTime(s.ScheduledStartAtUtc)
+                        .ToDateTime(timeByDay[s.ScheduledStartAtUtc.DayOfWeek], DateTimeKind.Utc));
+
+                var windowStart = newStartBySessionId.Values.Min();
+                var windowEnd = newStartBySessionId.Values.Max().AddMinutes(durationMinutes);
+                var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.TeacherProfileId == batch.TeacherProfileId
+                        && s.BatchId != batchId
+                        && (s.Status == SessionStatus.Scheduled
+                            || s.Status == SessionStatus.InProgress
+                            || s.Status == SessionStatus.CarriedForward)
+                        && s.ScheduledStartAtUtc < windowEnd
+                        && s.ScheduledEndAtUtc > windowStart)
+                    .ToListAsync(cancellationToken);
+
+                foreach (var session in remainingSessions)
+                {
+                    var newStart = newStartBySessionId[session.Id];
+                    var newEnd = newStart.AddMinutes(durationMinutes);
+                    var conflict = otherTeacherSessions.FirstOrDefault(
+                        o => o.ScheduledStartAtUtc < newEnd && o.ScheduledEndAtUtc > newStart);
+                    if (conflict is not null)
+                    {
+                        throw new DomainValidationException(
+                            $"Can't apply this time — the teacher already has a session from " +
+                            $"{DateTimeDisplay.ToLocal(conflict.ScheduledStartAtUtc)} to {DateTimeDisplay.ToLocal(conflict.ScheduledEndAtUtc)}.");
+                    }
+                }
+
+                foreach (var session in remainingSessions)
+                {
+                    var newStart = newStartBySessionId[session.Id];
+                    session.ScheduledStartAtUtc = newStart;
+                    session.ScheduledEndAtUtc = newStart.AddMinutes(durationMinutes);
+                }
+
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
+                    changesJson: $"{{\"batchId\":\"{batch.Id}\",\"scheduleTimeAdjusted\":true,\"sessionCount\":{remainingSessions.Count}}}",
+                    cancellationToken: cancellationToken);
+            }
+            else
+            {
+                // General path — the weekday pattern and/or the remaining count changed, so the
+                // old remaining sessions' dates no longer mean anything: cancel them (not
+                // deleted — same convention CancelAsync uses, so history/audit stays intact) and
+                // re-place `targetCount` fresh sessions on the new pattern starting today.
+                var holidays = (await _unitOfWork.Repository<Holiday>().Query()
+                        .Select(h => h.Date)
+                        .ToListAsync(cancellationToken))
+                    .ToHashSet();
+                var today = DateOnly.FromDateTime(now);
+                var newStarts = PlaceSessionStartTimes(today, timeByDay, targetCount, holidays);
+                if (newStarts.Count < targetCount)
+                {
+                    throw new DomainValidationException("Could not place all remaining sessions within two years; check the selected weekdays.");
+                }
+
+                var windowStart = newStarts.Min();
+                var windowEnd = newStarts.Max().AddMinutes(durationMinutes);
+                var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.TeacherProfileId == batch.TeacherProfileId
+                        && s.BatchId != batchId
+                        && (s.Status == SessionStatus.Scheduled
+                            || s.Status == SessionStatus.InProgress
+                            || s.Status == SessionStatus.CarriedForward)
+                        && s.ScheduledStartAtUtc < windowEnd
+                        && s.ScheduledEndAtUtc > windowStart)
+                    .ToListAsync(cancellationToken);
+
+                foreach (var startUtc in newStarts)
+                {
+                    var endUtc = startUtc.AddMinutes(durationMinutes);
+                    var conflict = otherTeacherSessions.FirstOrDefault(
+                        o => o.ScheduledStartAtUtc < endUtc && o.ScheduledEndAtUtc > startUtc);
+                    if (conflict is not null)
+                    {
+                        throw new DomainValidationException(
+                            $"Can't apply this schedule — the teacher already has a session from " +
+                            $"{DateTimeDisplay.ToLocal(conflict.ScheduledStartAtUtc)} to {DateTimeDisplay.ToLocal(conflict.ScheduledEndAtUtc)}.");
+                    }
+                }
+
+                foreach (var session in remainingSessions)
+                {
+                    session.Status = SessionStatus.Cancelled;
+                    session.CancellationReason = "Schedule adjusted";
+                }
+
+                var sessionRepository = _unitOfWork.Repository<ClassSession>();
+                DateOnly? lastDate = null;
+                foreach (var startUtc in newStarts)
+                {
+                    await sessionRepository.AddAsync(
+                        new ClassSession
+                        {
+                            BatchId = batch.Id,
+                            TeacherProfileId = batch.TeacherProfileId,
+                            ScheduledStartAtUtc = startUtc,
+                            ScheduledEndAtUtc = startUtc.AddMinutes(durationMinutes),
+                            MeetingRoomId = $"trn-{Guid.NewGuid():N}",
+                        },
+                        cancellationToken);
+                    lastDate = DateOnly.FromDateTime(startUtc);
+                }
+                batch.EndDate = lastDate;
+
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
+                    changesJson: $"{{\"batchId\":\"{batch.Id}\",\"scheduleRegenerated\":true,\"cancelledCount\":{remainingSessions.Count},\"newCount\":{newStarts.Count}}}",
+                    cancellationToken: cancellationToken);
+            }
+
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return await ListAsync(DateTime.MinValue, DateTime.MaxValue, null, batch.Id, cancellationToken);
         }
