@@ -340,6 +340,24 @@ namespace iucs.readernest.application.Common
                     """,
                     "InvoiceNumber", "DueDate", "Outstanding", "Currency"),
 
+                New("payment-plan-reminder-sessions", "Payment Reminder (Batch Session Plan)",
+                    "Sent to the parent once a batch's \"payment after N sessions\" plan reaches its session count.",
+                    NotificationType.PaymentReminder, "Payment due — {{BatchName}} has completed {{SessionCount}} session(s)",
+                    """
+                    <p>{{BatchName}} has now completed <strong>{{SessionCount}}</strong> session(s), the point at which payment for this batch is due.</p>
+                    <p>Please arrange payment at your earliest convenience to keep classes uninterrupted.</p>
+                    """,
+                    "BatchName", "SessionCount"),
+
+                New("payment-plan-reminder-date", "Payment Reminder (Batch Due Date Plan)",
+                    "Sent to the parent once a batch's \"payment due on a specific date\" plan reaches its due date.",
+                    NotificationType.PaymentReminder, "Payment due — {{BatchName}}",
+                    """
+                    <p>Payment for {{BatchName}} was due on <strong>{{DueDate}}</strong>.</p>
+                    <p>Please arrange payment at your earliest convenience to keep classes uninterrupted.</p>
+                    """,
+                    "BatchName", "DueDate"),
+
                 New("payment-received-admin", "Payment Received (Admin Alert)",
                     "Sent to Admins whenever a payment settles against an invoice (manual or gateway).",
                     NotificationType.PaymentReceived, "Payment received",

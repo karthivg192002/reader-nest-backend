@@ -95,6 +95,8 @@ builder.Services.AddHostedService<SessionReminderBackgroundService>();
 // Automatic no-show detection: flags a session once its grace period elapses with one
 // side never having joined, instead of relying solely on a human clicking "Mark No-Show"
 builder.Services.AddHostedService<NoShowDetectionBackgroundService>();
+// Batch payment plan reminders: "payment after N sessions" / "payment due on a specific date"
+builder.Services.AddHostedService<PaymentPlanReminderBackgroundService>();
 // Catches a completed class that never received a recording — auto-record can start
 // with no error yet still fail later in the pipeline, which nothing else catches
 builder.Services.AddHostedService<RecordingReconciliationBackgroundService>();

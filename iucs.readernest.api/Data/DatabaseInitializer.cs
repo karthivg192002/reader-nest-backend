@@ -66,6 +66,7 @@ namespace iucs.readernest.api.Data
             await EnsureDemoScheduledTeacherEmailTemplateAsync(context);
             await EnsurePinResetEmailTemplateAsync(context);
             await EnsureAccessRequestEmailTemplatesAsync(context);
+            await EnsurePaymentPlanReminderEmailTemplatesAsync(context);
             await ReconcileOrgNameEmailTemplatesAsync(context);
             await EnsureProgressReportsMenuAsync(context);
             await EnsureStoreInquiriesMenuAsync(context);
@@ -1947,6 +1948,38 @@ namespace iucs.readernest.api.Data
                 IsActive = true,
                 IsSystem = true,
             });
+        }
+
+        /// <summary>
+        /// SeedEmailTemplatesAsync is insert-only, so a live DB that predates the batch payment
+        /// plan feature never picks these up on its own — inserts the
+        /// "payment-plan-reminder-sessions" / "payment-plan-reminder-date" rows if missing,
+        /// mirroring EnsureProgressReportEmailTemplateAsync.
+        /// </summary>
+        private static async Task EnsurePaymentPlanReminderEmailTemplatesAsync(ReaderNestDbContext context)
+        {
+            foreach (var key in new[] { "payment-plan-reminder-sessions", "payment-plan-reminder-date" })
+            {
+                if (context.EmailTemplates.Local.Any(t => t.Key == key) ||
+                    await context.EmailTemplates.AnyAsync(t => t.Key == key))
+                {
+                    continue;
+                }
+
+                var seed = EmailTemplateSeedData.All.First(s => s.Key == key);
+                context.EmailTemplates.Add(new EmailTemplate
+                {
+                    Key = seed.Key,
+                    Name = seed.Name,
+                    Description = seed.Description,
+                    Category = seed.Category,
+                    Subject = seed.Subject,
+                    HtmlBody = seed.HtmlBody,
+                    PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders),
+                    IsActive = true,
+                    IsSystem = true,
+                });
+            }
         }
 
         /// <summary>

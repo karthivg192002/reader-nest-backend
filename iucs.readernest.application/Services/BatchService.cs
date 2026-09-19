@@ -63,6 +63,9 @@ namespace iucs.readernest.application.Services
                 StartDate = request.StartDate,
                 EndDate = request.EndDate,
                 DurationMinutesOverride = request.DurationMinutesOverride,
+                PaymentPlanType = request.PaymentPlanType,
+                PaymentAfterSessionsCount = request.PaymentAfterSessionsCount,
+                PaymentDueDate = request.PaymentDueDate,
             };
             await _unitOfWork.Repository<Batch>().AddAsync(batch, cancellationToken);
             await _auditLog.StageAsync(AuditAction.Create, nameof(Batch), batch.Id.ToString(), cancellationToken: cancellationToken);
@@ -220,6 +223,13 @@ namespace iucs.readernest.application.Services
                 }
             }
 
+            // Re-arm the reminder whenever the plan itself changes — a corrected session count,
+            // a pushed-out due date, or switching plan type entirely all mean whatever reminder
+            // already fired (if any) was for a since-superseded plan.
+            var paymentPlanChanged = batch.PaymentPlanType != request.PaymentPlanType
+                || batch.PaymentAfterSessionsCount != request.PaymentAfterSessionsCount
+                || batch.PaymentDueDate != request.PaymentDueDate;
+
             batch.CourseId = request.CourseId;
             batch.TeacherProfileId = request.TeacherProfileId;
             batch.Name = request.Name.Trim();
@@ -227,6 +237,13 @@ namespace iucs.readernest.application.Services
             batch.StartDate = request.StartDate;
             batch.EndDate = request.EndDate;
             batch.DurationMinutesOverride = request.DurationMinutesOverride;
+            batch.PaymentPlanType = request.PaymentPlanType;
+            batch.PaymentAfterSessionsCount = request.PaymentAfterSessionsCount;
+            batch.PaymentDueDate = request.PaymentDueDate;
+            if (paymentPlanChanged)
+            {
+                batch.PaymentReminderSentAtUtc = null;
+            }
 
             if (movingSessions.Count > 0)
             {
