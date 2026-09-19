@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using iucs.readernest.api.Auth;
 using iucs.readernest.api.Hubs;
 using iucs.readernest.application.Dto.Monitoring;
@@ -16,17 +17,20 @@ namespace iucs.readernest.api.Controllers
         private readonly IMonitoringService _monitoringService;
         private readonly IServerLogService _serverLogService;
         private readonly IServerControlService _serverControlService;
+        private readonly IBurstWorkerControlService _burstWorkerControlService;
         private readonly IHubContext<ClassroomHub> _classroomHub;
 
         public MonitoringController(
             IMonitoringService monitoringService,
             IServerLogService serverLogService,
             IServerControlService serverControlService,
+            IBurstWorkerControlService burstWorkerControlService,
             IHubContext<ClassroomHub> classroomHub)
         {
             _monitoringService = monitoringService;
             _serverLogService = serverLogService;
             _serverControlService = serverControlService;
+            _burstWorkerControlService = burstWorkerControlService;
             _classroomHub = classroomHub;
         }
 
@@ -140,6 +144,51 @@ namespace iucs.readernest.api.Controllers
             catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
             {
                 return BadRequest(new { message = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Emergency manual start of the on-demand burst recording worker (billed hourly while it
+        /// exists). Holds it up for <paramref name="holdMinutes"/> so it isn't deleted while idle.
+        /// </summary>
+        [HttpPost("burst-worker/start")]
+        [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.Edit)]
+        public async Task<ActionResult<BurstWorkerControlResultDto>> StartBurstWorker([FromQuery] int holdMinutes = 120, CancellationToken cancellationToken = default)
+        {
+            var requestedBy = User.FindFirst(ClaimTypes.Email)?.Value
+                ?? User.FindFirst("email")?.Value
+                ?? User.Identity?.Name
+                ?? "admin";
+            try
+            {
+                return Ok(await _burstWorkerControlService.StartAsync(holdMinutes, requestedBy, cancellationToken));
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return StatusCode(StatusCodes.Status502BadGateway, new { message = "Couldn't reach the Jitsi server to start the burst worker: " + ex.Message });
+            }
+        }
+
+        /// <summary>Stops the burst worker as soon as it is safe: every recorder idle and every recording fully on main. Never force-deletes.</summary>
+        [HttpPost("burst-worker/stop")]
+        [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.Edit)]
+        public async Task<ActionResult<BurstWorkerControlResultDto>> StopBurstWorker(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                return Ok(await _burstWorkerControlService.StopAsync(cancellationToken));
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return StatusCode(StatusCodes.Status502BadGateway, new { message = "Couldn't reach the Jitsi server to stop the burst worker: " + ex.Message });
             }
         }
 
