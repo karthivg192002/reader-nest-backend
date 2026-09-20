@@ -124,9 +124,15 @@ namespace iucs.readernest.application.Services
                     throw new NotFoundException(nameof(Batch), batchId);
                 }
             }
+            if (request.FolderId.HasValue
+                && !await _unitOfWork.Repository<ResourceFolder>().ExistsAsync(f => f.Id == request.FolderId.Value, cancellationToken))
+            {
+                throw new NotFoundException(nameof(ResourceFolder), request.FolderId.Value);
+            }
 
             var resource = new Resource
             {
+                FolderId = request.FolderId,
                 Title = request.Title.Trim(),
                 Type = request.Type,
                 FileUrl = storedRelativePath,

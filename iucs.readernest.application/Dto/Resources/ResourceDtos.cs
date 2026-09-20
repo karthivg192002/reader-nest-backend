@@ -19,6 +19,9 @@ namespace iucs.readernest.application.Dto.Resources
 
         public Guid? BatchId { get; set; }
 
+        /// <summary>The folder this file sits in; null = top level.</summary>
+        public Guid? FolderId { get; set; }
+
         /// <summary>Batch display name, when the resource is tied to a batch.</summary>
         public string? BatchName { get; set; }
 
@@ -45,6 +48,9 @@ namespace iucs.readernest.application.Dto.Resources
         public Guid? CourseId { get; set; }
 
         public Guid? BatchId { get; set; }
+
+        /// <summary>Folder to upload into; omit for the top level.</summary>
+        public Guid? FolderId { get; set; }
 
         /// <summary>Uploader-chosen batches the resource is visible to (multi-batch visibility).</summary>
         public List<Guid> BatchIds { get; set; } = [];

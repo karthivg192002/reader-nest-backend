@@ -33,6 +33,11 @@ namespace iucs.readernest.domain.Entities.Resources
 
         public Batch? Batch { get; set; }
 
+        /// <summary>The Content and Resources folder this file lives in; null = top level.</summary>
+        public Guid? FolderId { get; set; }
+
+        public ResourceFolder? Folder { get; set; }
+
         public bool IsDownloadable { get; set; }
 
         [MaxLength(1000)]

@@ -27,6 +27,7 @@ using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Communication;
 using iucs.readernest.domain.Entities.Payouts;
 using iucs.readernest.domain.Entities.Quizzes;
+using iucs.readernest.domain.Entities.Resources;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Settings;
 using iucs.readernest.domain.Entities.Users;
@@ -9147,6 +9148,179 @@ namespace iucs.readernest.tests
 
             Assert.Equal(replacement.Id, join.SessionId);
             Assert.Equal(replacement.MeetingRoomId, join.Room);
+        }
+
+        private ResourceFolderService CreateFolderService() => new(_db.UnitOfWork, _auditLog);
+
+        private async Task<(ParentProfile Profile, User User)> SeedFolderParentAsync()
+        {
+            var user = await _db.SeedUserAsync($"fp-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var profile = new ParentProfile { UserId = user.Id };
+            _db.Context.ParentProfiles.Add(profile);
+            await _db.Context.SaveChangesAsync();
+            return (profile, user);
+        }
+
+        private async Task<Resource> SeedFolderFileAsync(Guid? folderId, bool downloadable = true)
+        {
+            var file = new Resource { Title = "Worksheets 1-12", Type = ResourceType.Worksheet, FileUrl = "x.pdf", IsDownloadable = downloadable, FolderId = folderId };
+            _db.Context.Resources.Add(file);
+            await _db.Context.SaveChangesAsync();
+            return file;
+        }
+
+        [Fact]
+        public async Task ResourceFolders_ShareOneFolderWithManyParents_FilesAppearForEachAndSubfoldersInherit()
+        {
+            var folders = CreateFolderService();
+            var level1 = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Phonics Level 1" });
+            var worksheets = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Worksheets 1-12", ParentFolderId = level1.Id });
+            var file = await SeedFolderFileAsync(worksheets.Id);
+            var unshared = await SeedFolderFileAsync(null);
+
+            var parents = new List<(ParentProfile Profile, User User)>();
+            for (var i = 0; i < 5; i++) parents.Add(await SeedFolderParentAsync());
+            var outsider = await SeedFolderParentAsync();
+
+            // Sharing the PARENT folder reaches the file in its subfolder, for all five parents at once.
+            await folders.SetAccessAsync(level1.Id, Guid.NewGuid(), new SetResourceFolderAccessRequest
+            {
+                AddParentProfileIds = parents.Select(p => p.Profile.Id).ToList(),
+            });
+
+            var portal = new ParentPortalService(_db.UnitOfWork);
+            foreach (var p in parents)
+            {
+                var visible = await portal.GetResourcesAsync(p.User.Id);
+                Assert.Contains(visible, r => r.Id == file.Id);
+                Assert.DoesNotContain(visible, r => r.Id == unshared.Id);
+                Assert.Equal(file.Id, (await portal.GetResourceForDownloadAsync(p.User.Id, file.Id)).Id);
+            }
+            Assert.Empty(await portal.GetResourcesAsync(outsider.User.Id));
+            await Assert.ThrowsAsync<NotFoundException>(() => portal.GetResourceForDownloadAsync(outsider.User.Id, file.Id));
+
+            // Unsharing one parent removes just theirs.
+            var removed = parents[0];
+            await folders.SetAccessAsync(level1.Id, Guid.NewGuid(), new SetResourceFolderAccessRequest { RemoveParentProfileIds = [removed.Profile.Id] });
+            Assert.Empty(await portal.GetResourcesAsync(removed.User.Id));
+            Assert.Contains(await portal.GetResourcesAsync(parents[1].User.Id), r => r.Id == file.Id);
+            Assert.Equal(4, (await folders.ListAccessAsync(level1.Id)).Count);
+        }
+
+        [Fact]
+        public async Task ResourceFolders_RejectDuplicateNames_MoveIntoOwnSubfolder_AndDeletingANonEmptyFolder()
+        {
+            var folders = CreateFolderService();
+            var a = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Level 1" });
+            var b = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Sub", ParentFolderId = a.Id });
+            await SeedFolderFileAsync(b.Id);
+
+            await Assert.ThrowsAsync<ConflictException>(() => folders.CreateAsync(new CreateResourceFolderRequest { Name = "level 1" }));
+            await Assert.ThrowsAsync<DomainValidationException>(() => folders.UpdateAsync(a.Id, new UpdateResourceFolderRequest { Name = "Level 1", ParentFolderId = b.Id }));
+            await Assert.ThrowsAsync<DomainValidationException>(() => folders.DeleteAsync(b.Id)); // has a file
+            await Assert.ThrowsAsync<DomainValidationException>(() => folders.DeleteAsync(a.Id)); // has a subfolder
+        }
+
+        [Fact]
+        public async Task ResourceFolders_MoveFile_ChangesFolder_AndEmptyFolderCanBeDeleted()
+        {
+            var folders = CreateFolderService();
+            var one = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "One" });
+            var two = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Two" });
+            var file = await SeedFolderFileAsync(one.Id);
+
+            var moved = await folders.MoveResourceAsync(file.Id, new MoveResourceRequest { FolderId = two.Id });
+            Assert.Equal(two.Id, moved.FolderId);
+
+            var listed = await folders.ListAsync();
+            Assert.Equal(0, listed.Single(f => f.Id == one.Id).FileCount);
+            Assert.Equal(1, listed.Single(f => f.Id == two.Id).FileCount);
+
+            await folders.DeleteAsync(one.Id);
+            Assert.DoesNotContain(await folders.ListAsync(), f => f.Id == one.Id);
+        }
+
+        private ParentFeedbackService CreateParentFeedbackService() =>
+            new(_db.UnitOfWork, _notifications, NullLogger<ParentFeedbackService>.Instance);
+
+        [Fact]
+        public async Task ParentFeedback_DemoOnlyPromptsOnceItIsCompleted_AndOnlyForThatParent()
+        {
+            var parentEmail = $"pf-{Guid.NewGuid():N}@test.com";
+            var (session, booking) = await SeedDemoSessionAsync(parentEmail);
+            var parent = await _db.SeedUserAsync(parentEmail, "x", UserRole.Parent);
+            var stranger = await _db.SeedUserAsync($"pf-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var service = CreateParentFeedbackService();
+
+            Assert.Empty(await service.GetPendingAsync(parent.Id)); // demo hasn't happened yet
+
+            session.Status = SessionStatus.Completed;
+            session.ActualEndAtUtc = DateTime.UtcNow;
+            await _db.Context.SaveChangesAsync();
+
+            var pending = Assert.Single(await service.GetPendingAsync(parent.Id));
+            Assert.Equal(ParentFeedbackKind.Demo, pending.Kind);
+            Assert.Equal(booking.Id, pending.DemoBookingId);
+            Assert.Empty(await service.GetPendingAsync(stranger.Id)); // someone else's demo
+        }
+
+        [Fact]
+        public async Task ParentFeedback_Submit_SavesOnce_ClearsThePrompt_AndAppearsInTheReport()
+        {
+            var parentEmail = $"pf-{Guid.NewGuid():N}@test.com";
+            var (session, booking) = await SeedDemoSessionAsync(parentEmail);
+            var parent = await _db.SeedUserAsync(parentEmail, "x", UserRole.Parent);
+            session.Status = SessionStatus.Completed;
+            session.ActualEndAtUtc = DateTime.UtcNow;
+            await _db.Context.SaveChangesAsync();
+            var service = CreateParentFeedbackService();
+
+            await service.SubmitAsync(parent.Id, new SubmitParentFeedbackRequest
+            {
+                Kind = ParentFeedbackKind.Demo, DemoBookingId = booking.Id, Rating = 5, Comment = "  Loved it  ",
+            });
+
+            Assert.Empty(await service.GetPendingAsync(parent.Id));
+            var row = Assert.Single(await service.ListAsync(ParentFeedbackKind.Demo));
+            Assert.Equal(5, row.Rating);
+            Assert.Equal("Loved it", row.Comment);
+            Assert.Empty(await service.ListAsync(ParentFeedbackKind.CourseCompletion));
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.SubmitAsync(parent.Id, new SubmitParentFeedbackRequest
+            {
+                Kind = ParentFeedbackKind.Demo, DemoBookingId = booking.Id, Rating = 1,
+            })); // no second rating for the same demo
+        }
+
+        [Fact]
+        public async Task ParentFeedback_CourseCompletion_PromptsWhenBatchCompletes_ForEnrolledParentOnly()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var parent = await _db.SeedUserAsync($"pf-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var other = await _db.SeedUserAsync($"pf-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var profile = new ParentProfile { UserId = parent.Id };
+            var child = new Child { ParentProfile = profile, FirstName = "Kid", LastName = "Y" };
+            _db.Context.AddRange(profile, child, new ParentProfile { UserId = other.Id });
+            _db.Context.Add(new BatchEnrollment { BatchId = batch.Id, Child = child, Status = EnrollmentStatus.Active });
+            await _db.Context.SaveChangesAsync();
+            var service = CreateParentFeedbackService();
+
+            Assert.Empty(await service.GetPendingAsync(parent.Id)); // batch still running
+
+            var tracked = await _db.Context.Batches.FirstAsync(b => b.Id == batch.Id);
+            tracked.CompletedAtUtc = DateTime.UtcNow;
+            await _db.Context.SaveChangesAsync();
+
+            var pending = Assert.Single(await service.GetPendingAsync(parent.Id));
+            Assert.Equal(ParentFeedbackKind.CourseCompletion, pending.Kind);
+            Assert.Equal(child.Id, pending.ChildId);
+            Assert.Empty(await service.GetPendingAsync(other.Id));
+
+            await service.SubmitAsync(parent.Id, new SubmitParentFeedbackRequest
+            {
+                Kind = ParentFeedbackKind.CourseCompletion, BatchId = batch.Id, ChildId = child.Id, Rating = 4,
+            });
+            Assert.Empty(await service.GetPendingAsync(parent.Id));
         }
 
         public void Dispose() => _db.Dispose();

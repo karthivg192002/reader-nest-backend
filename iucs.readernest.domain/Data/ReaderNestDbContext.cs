@@ -74,6 +74,7 @@ namespace iucs.readernest.domain.Data
         public DbSet<DemoBooking> DemoBookings => Set<DemoBooking>();
         public DbSet<DemoParticipant> DemoParticipants => Set<DemoParticipant>();
         public DbSet<DemoFeedback> DemoFeedbacks => Set<DemoFeedback>();
+        public DbSet<ParentFeedback> ParentFeedbacks => Set<ParentFeedback>();
         public DbSet<StoreInquiry> StoreInquiries => Set<StoreInquiry>();
 
         // Billing
@@ -94,6 +95,8 @@ namespace iucs.readernest.domain.Data
         public DbSet<Resource> Resources => Set<Resource>();
         public DbSet<ResourceAccess> ResourceAccesses => Set<ResourceAccess>();
         public DbSet<ResourceBatchVisibility> ResourceBatchVisibilities => Set<ResourceBatchVisibility>();
+        public DbSet<ResourceFolder> ResourceFolders => Set<ResourceFolder>();
+        public DbSet<ResourceFolderAccess> ResourceFolderAccesses => Set<ResourceFolderAccess>();
 
         // Communication & auditing
         public DbSet<Notification> Notifications => Set<Notification>();

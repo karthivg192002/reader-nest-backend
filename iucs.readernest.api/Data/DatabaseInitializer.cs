@@ -65,6 +65,8 @@ namespace iucs.readernest.api.Data
             await EnsureProgressReportEmailTemplateAsync(context);
             await EnsureDemoScheduledTeacherEmailTemplateAsync(context);
             await EnsurePinResetEmailTemplateAsync(context);
+            await EnsureParentFeedbackEmailTemplateAsync(context);
+            await EnsureParentFeedbackMenusAsync(context);
             await EnsureAccessRequestEmailTemplatesAsync(context);
             await EnsurePaymentPlanReminderEmailTemplatesAsync(context);
             await ReconcileOrgNameEmailTemplatesAsync(context);
@@ -546,6 +548,7 @@ namespace iucs.readernest.api.Data
             ("admin", "People", "Roles & Permissions", "/admin/permissions", "ShieldCheck", PermissionModule.UserManagement.ToString()),
             ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck", PermissionModule.Admission.ToString()),
             ("admin", "People", "Store Inquiries", "/admin/store-inquiries", "ShoppingBag", PermissionModule.Admission.ToString()),
+            ("admin", "People", "Parent Feedback", "/admin/parent-feedback", "Star", PermissionModule.Admission.ToString()),
             ("admin", "People", "Leave Management", "/admin/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
             ("admin", "People", "Teacher Availability", "/admin/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
             ("admin", "Content", "Content & Resources", "/admin/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
@@ -595,6 +598,7 @@ namespace iucs.readernest.api.Data
             ("admission", "CRM", "Leads & Parents", "/admission/leads", "UserSearch", PermissionModule.Admission.ToString()),
             ("admission", "CRM", "Payment Tracking", "/admission/payments", "Link2", PermissionModule.BillingFinance.ToString()),
             ("admission", "Insights", "Reports", "/admission/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
+            ("admission", "Insights", "Parent Feedback", "/admission/parent-feedback", "Star", PermissionModule.Admission.ToString()),
             ("coordinator", null, "Dashboard", "/coordinator", "LayoutDashboard", null),
             ("coordinator", "Monitoring", "Academic Calendar", "/coordinator/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement.ToString()),
             ("coordinator", "Monitoring", "Teacher Availability", "/coordinator/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
@@ -2008,6 +2012,71 @@ namespace iucs.readernest.api.Data
                 IsActive = true,
                 IsSystem = true,
             });
+        }
+
+        /// <summary>Inserts the "parent-feedback-received" alert template into a DB seeded before it existed.</summary>
+        private static async Task EnsureParentFeedbackEmailTemplateAsync(ReaderNestDbContext context)
+        {
+            const string key = "parent-feedback-received";
+            if (context.EmailTemplates.Local.Any(t => t.Key == key) || await context.EmailTemplates.AnyAsync(t => t.Key == key))
+            {
+                return;
+            }
+
+            var seed = EmailTemplateSeedData.All.First(s => s.Key == key);
+            context.EmailTemplates.Add(new EmailTemplate
+            {
+                Key = seed.Key,
+                Name = seed.Name,
+                Description = seed.Description,
+                Category = seed.Category,
+                Subject = seed.Subject,
+                HtmlBody = seed.HtmlBody,
+                PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders),
+                IsActive = true,
+                IsSystem = true,
+            });
+        }
+
+        /// <summary>
+        /// Adds the "Parent Feedback" page to the Admin (People) and Admission (Insights) menus in a
+        /// DB seeded before it existed. Gated on the Admission module, same as the demo-feedback
+        /// screens next to it, so who sees it stays admin-configurable through Roles and Permissions.
+        /// </summary>
+        private static async Task EnsureParentFeedbackMenusAsync(ReaderNestDbContext context)
+        {
+            foreach (var (portal, anchorPath, section) in new[]
+            {
+                ("admin", "/admin/store-inquiries", "People"),
+                ("admission", "/admission/reports", "Insights"),
+            })
+            {
+                var path = $"/{portal}/parent-feedback";
+                if (context.MenuItems.Local.Any(m => m.Portal == portal && m.Path == path) ||
+                    await context.MenuItems.AnyAsync(m => m.Portal == portal && m.Path == path))
+                {
+                    continue;
+                }
+
+                var anchor = await context.MenuItems.FirstOrDefaultAsync(m => m.Portal == portal && m.Path == anchorPath);
+                if (anchor is null)
+                {
+                    continue;
+                }
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = portal,
+                    Section = section,
+                    SectionOrder = anchor.SectionOrder,
+                    Label = "Parent Feedback",
+                    Path = path,
+                    Icon = "Star",
+                    SortOrder = anchor.SortOrder + 1,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.Admission.ToString(),
+                });
+            }
         }
 
         /// <summary>

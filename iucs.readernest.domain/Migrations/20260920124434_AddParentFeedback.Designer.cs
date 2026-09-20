@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using iucs.readernest.domain.Data;
@@ -11,9 +12,11 @@ using iucs.readernest.domain.Data;
 namespace iucs.readernest.domain.Migrations
 {
     [DbContext(typeof(ReaderNestDbContext))]
-    partial class ReaderNestDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260920124434_AddParentFeedback")]
+    partial class AddParentFeedback
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -3291,10 +3294,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("character varying(1000)")
                         .HasColumnName("file_url");
 
-                    b.Property<Guid?>("FolderId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("folder_id");
-
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("boolean")
                         .HasColumnName("is_deleted");
@@ -3336,9 +3335,6 @@ namespace iucs.readernest.domain.Migrations
 
                     b.HasIndex("CourseId")
                         .HasDatabaseName("ix_resources_course_id");
-
-                    b.HasIndex("FolderId")
-                        .HasDatabaseName("ix_resources_folder_id");
 
                     b.ToTable("resources");
                 });
@@ -3439,110 +3435,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasFilter("\"is_deleted\" = FALSE");
 
                     b.ToTable("resource_batch_visibilities");
-                });
-
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Resources.ResourceFolder", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at_utc");
-
-                    b.Property<Guid?>("CreatedBy")
-                        .HasColumnType("uuid")
-                        .HasColumnName("created_by");
-
-                    b.Property<DateTime?>("DeletedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("deleted_at_utc");
-
-                    b.Property<string>("Description")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)")
-                        .HasColumnName("description");
-
-                    b.Property<bool>("IsDeleted")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_deleted");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(150)
-                        .HasColumnType("character varying(150)")
-                        .HasColumnName("name");
-
-                    b.Property<Guid?>("ParentFolderId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("parent_folder_id");
-
-                    b.Property<DateTime?>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at_utc");
-
-                    b.Property<Guid?>("UpdatedBy")
-                        .HasColumnType("uuid")
-                        .HasColumnName("updated_by");
-
-                    b.HasKey("Id")
-                        .HasName("pk_resource_folders");
-
-                    b.HasIndex("ParentFolderId")
-                        .HasDatabaseName("ix_resource_folders_parent_folder_id");
-
-                    b.ToTable("resource_folders");
-                });
-
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Resources.ResourceFolderAccess", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at_utc");
-
-                    b.Property<DateTime?>("DeletedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("deleted_at_utc");
-
-                    b.Property<Guid>("FolderId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("folder_id");
-
-                    b.Property<Guid?>("GrantedBy")
-                        .HasColumnType("uuid")
-                        .HasColumnName("granted_by");
-
-                    b.Property<bool>("IsDeleted")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_deleted");
-
-                    b.Property<Guid>("ParentProfileId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("parent_profile_id");
-
-                    b.Property<DateTime?>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at_utc");
-
-                    b.HasKey("Id")
-                        .HasName("pk_resource_folder_accesses");
-
-                    b.HasIndex("ParentProfileId")
-                        .HasDatabaseName("ix_resource_folder_accesses_parent_profile_id");
-
-                    b.HasIndex("FolderId", "ParentProfileId")
-                        .IsUnique()
-                        .HasDatabaseName("ix_resource_folder_accesses_folder_id_parent_profile_id")
-                        .HasFilter("\"is_deleted\" = FALSE");
-
-                    b.ToTable("resource_folder_accesses");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Sessions.ClassSession", b =>
@@ -5541,17 +5433,9 @@ namespace iucs.readernest.domain.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .HasConstraintName("fk_resources_courses_course_id");
 
-                    b.HasOne("iucs.readernest.domain.Entities.Resources.ResourceFolder", "Folder")
-                        .WithMany()
-                        .HasForeignKey("FolderId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .HasConstraintName("fk_resources_resource_folders_folder_id");
-
                     b.Navigation("Batch");
 
                     b.Navigation("Course");
-
-                    b.Navigation("Folder");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Resources.ResourceAccess", b =>
@@ -5594,38 +5478,6 @@ namespace iucs.readernest.domain.Migrations
                     b.Navigation("Batch");
 
                     b.Navigation("Resource");
-                });
-
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Resources.ResourceFolder", b =>
-                {
-                    b.HasOne("iucs.readernest.domain.Entities.Resources.ResourceFolder", "ParentFolder")
-                        .WithMany()
-                        .HasForeignKey("ParentFolderId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .HasConstraintName("fk_resource_folders_resource_folders_parent_folder_id");
-
-                    b.Navigation("ParentFolder");
-                });
-
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Resources.ResourceFolderAccess", b =>
-                {
-                    b.HasOne("iucs.readernest.domain.Entities.Resources.ResourceFolder", "Folder")
-                        .WithMany()
-                        .HasForeignKey("FolderId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired()
-                        .HasConstraintName("fk_resource_folder_accesses_resource_folders_folder_id");
-
-                    b.HasOne("iucs.readernest.domain.Entities.Users.ParentProfile", "ParentProfile")
-                        .WithMany()
-                        .HasForeignKey("ParentProfileId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired()
-                        .HasConstraintName("fk_resource_folder_accesses_parent_profiles_parent_profile_id");
-
-                    b.Navigation("Folder");
-
-                    b.Navigation("ParentProfile");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Sessions.ClassSession", b =>

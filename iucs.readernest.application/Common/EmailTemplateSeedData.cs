@@ -78,6 +78,16 @@ namespace iucs.readernest.application.Common
                     """,
                     "FirstName", "Email", "ResetUrl", "ExpiryMinutes"),
 
+                New("parent-feedback-received", "Parent Feedback Received (Admin / Admission)",
+                    "Sent to Admins and the Admission team when a parent rates the demo class or a completed course.",
+                    NotificationType.General, "{{Stars}} from {{ParentName}} about {{Occasion}}",
+                    """
+                    <p><strong>{{ParentName}}</strong> rated {{Occasion}} for <strong>{{ChildName}}</strong>: <strong>{{Stars}}</strong>.</p>
+                    <p>&ldquo;{{Comment}}&rdquo;</p>
+                    <p style="font-size:12px;color:#6b7280;">Every parent rating is listed under Parent Feedback in your portal.</p>
+                    """,
+                    "Occasion", "ParentName", "ChildName", "Stars", "Comment"),
+
                 New("class-scheduled", "Class Scheduled (Teacher)",
                     "Sent to the teacher when a new session is scheduled for them.",
                     NotificationType.BookingConfirmation, "New class scheduled: {{SessionType}}",

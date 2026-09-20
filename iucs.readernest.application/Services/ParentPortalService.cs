@@ -4,6 +4,7 @@ using iucs.readernest.application.Dto.Billing;
 using iucs.readernest.application.Dto.Portal;
 using iucs.readernest.application.Dto.Resources;
 using iucs.readernest.application.Dto.Sessions;
+using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Admission;
@@ -249,6 +250,24 @@ namespace iucs.readernest.application.Services
                 .ToList();
         }
 
+        /// <summary>Every folder shared with this parent, including all subfolders beneath them.</summary>
+        private async Task<HashSet<Guid>> GetSharedFolderIdsAsync(Guid parentProfileId, CancellationToken cancellationToken)
+        {
+            var roots = await _unitOfWork.Repository<ResourceFolderAccess>().Query()
+                .Where(a => a.ParentProfileId == parentProfileId)
+                .Select(a => a.FolderId)
+                .ToListAsync(cancellationToken);
+            if (roots.Count == 0)
+            {
+                return new HashSet<Guid>();
+            }
+
+            var tree = await _unitOfWork.Repository<ResourceFolder>().Query()
+                .Select(f => new { f.Id, f.ParentFolderId })
+                .ToListAsync(cancellationToken);
+            return ResourceFolderTree.WithDescendants(tree.Select(f => (f.Id, f.ParentFolderId)).ToList(), roots);
+        }
+
         public async Task<IReadOnlyList<ResourceDto>> GetResourcesAsync(
             Guid parentUserId,
             CancellationToken cancellationToken = default)
@@ -290,7 +309,16 @@ namespace iucs.readernest.application.Services
                 .Select(v => v.Resource)
                 .ToListAsync(cancellationToken);
 
-            return granted.Concat(batchVisible)
+            // Folder sharing: everything in a folder shared with this parent (and its subfolders),
+            // however many other parents the same folder is shared with.
+            var sharedFolderIds = await GetSharedFolderIdsAsync(parent.Id, cancellationToken);
+            var folderShared = sharedFolderIds.Count == 0
+                ? new List<Resource>()
+                : await _unitOfWork.Repository<Resource>().Query()
+                    .Where(r => r.FolderId != null && sharedFolderIds.Contains(r.FolderId.Value))
+                    .ToListAsync(cancellationToken);
+
+            return granted.Concat(batchVisible).Concat(folderShared)
                 .GroupBy(r => r.Id)
                 .Select(g => g.First().ToDto())
                 .ToList();
@@ -332,6 +360,16 @@ namespace iucs.readernest.application.Services
                 .FirstOrDefaultAsync(a => a.ParentProfileId == parent.Id && a.ResourceId == resourceId, cancellationToken);
 
             var resource = direct?.Resource;
+            if (resource is null)
+            {
+                var folderShared = await _unitOfWork.Repository<Resource>().Query()
+                    .FirstOrDefaultAsync(r => r.Id == resourceId && r.FolderId != null, cancellationToken);
+                if (folderShared is not null
+                    && (await GetSharedFolderIdsAsync(parent.Id, cancellationToken)).Contains(folderShared.FolderId!.Value))
+                {
+                    resource = folderShared;
+                }
+            }
             if (resource is null)
             {
                 // A direct grant (ResourceAccess) has no ChildId to check per-child, so only
