@@ -68,6 +68,8 @@ builder.Services.AddScoped<ISmsSender, SmsSender>();
 // of silently depending on which environment you're in. Configured via Storage:S3:* (real
 // credentials come from user-secrets locally, environment variables in prod — never committed).
 builder.Services.AddSingleton<IFileStorage, S3FileStorage>();
+// Same instance, second role: browser-to-bucket multipart upload and presigned playback for big recordings.
+builder.Services.AddSingleton<IDirectUploadStorage>(sp => (S3FileStorage)sp.GetRequiredService<IFileStorage>());
 // Parses uploaded bulk-import spreadsheets (.csv/.xlsx) for Users/Students/Departments/
 // Courses/Package Plans/Quiz Questions — stateless, so singleton is fine.
 builder.Services.AddSingleton<IBulkFileReader, BulkFileReader>();

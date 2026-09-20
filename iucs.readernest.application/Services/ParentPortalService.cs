@@ -343,6 +343,31 @@ namespace iucs.readernest.application.Services
             Guid resourceId,
             CancellationToken cancellationToken = default)
         {
+            var resource = await ResolveSharedResourceAsync(parentUserId, resourceId, cancellationToken);
+
+            if (!resource.IsDownloadable)
+            {
+                throw new DomainValidationException("This resource is view-only and cannot be downloaded.");
+            }
+
+            return resource.ToDto();
+        }
+
+        /// <summary>Same grant and suspension checks as a download, but for watching/reading in the
+        /// portal, so it does not require the resource to be downloadable (recordings never are).</summary>
+        public async Task<ResourceDto> GetResourceForViewAsync(
+            Guid parentUserId,
+            Guid resourceId,
+            CancellationToken cancellationToken = default)
+        {
+            return (await ResolveSharedResourceAsync(parentUserId, resourceId, cancellationToken)).ToDto();
+        }
+
+        private async Task<Resource> ResolveSharedResourceAsync(
+            Guid parentUserId,
+            Guid resourceId,
+            CancellationToken cancellationToken)
+        {
             var parent = await GetParentAsync(parentUserId, cancellationToken);
 
             if (await SuspensionCheck.IsAccountBlockedAsync(_unitOfWork, parent.Id, cancellationToken))
@@ -400,12 +425,7 @@ namespace iucs.readernest.application.Services
                 throw new NotFoundException("This resource has not been shared with your account.");
             }
 
-            if (!resource.IsDownloadable)
-            {
-                throw new DomainValidationException("This resource is view-only and cannot be downloaded.");
-            }
-
-            return resource.ToDto();
+            return resource;
         }
 
         public async Task<IReadOnlyList<SessionRecordingDto>> GetRecordingsAsync(

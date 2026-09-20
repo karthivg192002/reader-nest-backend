@@ -12,7 +12,7 @@ namespace iucs.readernest.api.Services
     /// resources survive a redeploy without depending on a correctly-mapped Docker volume,
     /// which local disk storage requires and which is easy to misconfigure.
     /// </summary>
-    public class S3FileStorage : IFileStorage
+    public class S3FileStorage : IFileStorage, IDirectUploadStorage
     {
         // Same allowlist as LocalFileStorage — learning-resource types only, deliberately
         // excluding executables and script/markup types that could be served back with a
@@ -110,6 +110,124 @@ namespace iucs.readernest.api.Services
 
             return new StoredFile { RelativePath = key, SizeBytes = buffered.Length };
         }
+
+        // ---- IDirectUploadStorage: browser-to-bucket multipart upload and presigned playback ----
+
+        /// <summary>64 MB parts: a multi-GB recording is a few dozen requests, and S3's 10,000-part cap
+        /// still allows 640 GB. (S3's own minimum is 5 MB for every part but the last.)</summary>
+        private const long PartSizeBytes = 64L * 1024 * 1024;
+
+        public async Task<DirectUploadSession> StartMultipartAsync(
+            string originalFileName, string? contentType, CancellationToken cancellationToken = default)
+        {
+            var extension = Path.GetExtension(originalFileName);
+            if (string.IsNullOrEmpty(extension) || !AllowedExtensions.Contains(extension))
+            {
+                throw new DomainValidationException(
+                    $"File type '{extension}' is not allowed. Supported types: " +
+                    string.Join(", ", AllowedExtensions.OrderBy(e => e)) + ".");
+            }
+
+            var key = $"{Guid.NewGuid():N}{extension.ToLowerInvariant()}";
+            try
+            {
+                var response = await _client.InitiateMultipartUploadAsync(
+                    new InitiateMultipartUploadRequest
+                    {
+                        BucketName = _bucket,
+                        Key = key,
+                        ContentType = string.IsNullOrWhiteSpace(contentType) ? null : contentType,
+                    },
+                    cancellationToken);
+                return new DirectUploadSession { Key = key, UploadId = response.UploadId, PartSizeBytes = PartSizeBytes };
+            }
+            catch (AmazonServiceException ex)
+            {
+                throw StorageFailure("start the upload", ex);
+            }
+        }
+
+        public IReadOnlyList<PresignedPart> GetPartUrls(string key, string uploadId, IEnumerable<int> partNumbers)
+        {
+            return partNumbers.Distinct().Select(n => new PresignedPart
+            {
+                PartNumber = n,
+                Url = _client.GetPreSignedURL(new GetPreSignedUrlRequest
+                {
+                    BucketName = _bucket,
+                    Key = key,
+                    Verb = HttpVerb.PUT,
+                    UploadId = uploadId,
+                    PartNumber = n,
+                    // Long enough for a slow connection to push one 64 MB part.
+                    Expires = DateTime.UtcNow.AddHours(2),
+                }),
+            }).ToList();
+        }
+
+        public async Task<long> CompleteMultipartAsync(
+            string key, string uploadId, IReadOnlyList<UploadedPart> parts, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                await _client.CompleteMultipartUploadAsync(
+                    new CompleteMultipartUploadRequest
+                    {
+                        BucketName = _bucket,
+                        Key = key,
+                        UploadId = uploadId,
+                        PartETags = parts.OrderBy(p => p.PartNumber).Select(p => new PartETag(p.PartNumber, p.ETag)).ToList(),
+                    },
+                    cancellationToken);
+                var head = await _client.GetObjectMetadataAsync(_bucket, key, cancellationToken);
+                return head.ContentLength;
+            }
+            catch (AmazonServiceException ex)
+            {
+                throw StorageFailure("finish the upload", ex);
+            }
+        }
+
+        public async Task AbortMultipartAsync(string key, string uploadId, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                await _client.AbortMultipartUploadAsync(
+                    new AbortMultipartUploadRequest { BucketName = _bucket, Key = key, UploadId = uploadId },
+                    cancellationToken);
+            }
+            catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                // already gone -- nothing to clean up
+            }
+            catch (AmazonServiceException ex)
+            {
+                throw StorageFailure("cancel the upload", ex);
+            }
+        }
+
+        public string GetReadUrl(string key, TimeSpan validFor, string? contentType)
+        {
+            var request = new GetPreSignedUrlRequest
+            {
+                BucketName = _bucket,
+                Key = key,
+                Verb = HttpVerb.GET,
+                Expires = DateTime.UtcNow.Add(validFor),
+            };
+            // "inline" so the browser plays it rather than saving it.
+            request.ResponseHeaderOverrides.ContentDisposition = "inline";
+            if (!string.IsNullOrWhiteSpace(contentType))
+            {
+                request.ResponseHeaderOverrides.ContentType = contentType;
+            }
+
+            return _client.GetPreSignedURL(request);
+        }
+
+        private static ExternalServiceException StorageFailure(string action, AmazonServiceException ex) =>
+            new($"Could not {action} in object storage ({ex.StatusCode}): {ex.Message}. " +
+                "Check the Storage:S3 configuration (endpoint, credentials, bucket).");
 
         public async Task<Stream?> OpenReadAsync(string relativePath, CancellationToken cancellationToken = default)
         {

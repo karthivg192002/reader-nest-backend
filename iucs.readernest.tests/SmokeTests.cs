@@ -9240,6 +9240,26 @@ namespace iucs.readernest.tests
             Assert.DoesNotContain(await folders.ListAsync(), f => f.Id == one.Id);
         }
 
+        [Fact]
+        public async Task SharedRecording_ParentCanViewButNotDownload_AndOutsiderCanDoNeither()
+        {
+            var folders = CreateFolderService();
+            var folder = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Sold recordings" });
+            var recording = await SeedFolderFileAsync(folder.Id, downloadable: false); // recordings are view-only
+            var buyer = await SeedFolderParentAsync();
+            var outsider = await SeedFolderParentAsync();
+            await folders.SetAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderAccessRequest { AddParentProfileIds = [buyer.Profile.Id] });
+            var portal = new ParentPortalService(_db.UnitOfWork);
+
+            Assert.Equal(recording.Id, (await portal.GetResourceForViewAsync(buyer.User.Id, recording.Id)).Id);
+            await Assert.ThrowsAsync<DomainValidationException>(() => portal.GetResourceForDownloadAsync(buyer.User.Id, recording.Id));
+            await Assert.ThrowsAsync<NotFoundException>(() => portal.GetResourceForViewAsync(outsider.User.Id, recording.Id));
+
+            // Unsharing takes the recording away again without touching the file.
+            await folders.SetAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderAccessRequest { RemoveParentProfileIds = [buyer.Profile.Id] });
+            await Assert.ThrowsAsync<NotFoundException>(() => portal.GetResourceForViewAsync(buyer.User.Id, recording.Id));
+        }
+
         private ParentFeedbackService CreateParentFeedbackService() =>
             new(_db.UnitOfWork, _notifications, NullLogger<ParentFeedbackService>.Instance);
 

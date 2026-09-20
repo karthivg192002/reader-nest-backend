@@ -28,6 +28,9 @@ namespace iucs.readernest.application.Services
         /// </summary>
         Task<ResourceDto> GetResourceForDownloadAsync(Guid parentUserId, Guid resourceId, CancellationToken cancellationToken = default);
 
+        /// <summary>Same access checks as a download, for viewing in the portal (no downloadable flag needed).</summary>
+        Task<ResourceDto> GetResourceForViewAsync(Guid parentUserId, Guid resourceId, CancellationToken cancellationToken = default);
+
         /// <summary>
         /// Non-expired recordings for a session, once the caller's own child is confirmed
         /// enrolled in that session's batch. The "15-day parent view window" this feature

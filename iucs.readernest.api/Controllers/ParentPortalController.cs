@@ -164,6 +164,29 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _parentPortal.GetMyRecordingsAsync(UserId(), cancellationToken));
         }
 
+        /// <summary>
+        /// A short-lived link to watch a shared resource (e.g. a sold recording) in the browser. Grant-
+        /// and suspension-checked like a download, but view-only: the link is inline and the portal
+        /// player has no download button. Video bytes come straight from object storage.
+        /// </summary>
+        [HttpGet("resources/{id:guid}/play")]
+        public async Task<ActionResult<ResourcePlaybackDto>> PlayResource(
+            Guid id,
+            [FromServices] IResourceService resourceService,
+            [FromServices] application.Common.Interfaces.IDirectUploadStorage directUploads,
+            CancellationToken cancellationToken)
+        {
+            await _parentPortal.GetResourceForViewAsync(UserId(), id, cancellationToken);
+            var resource = await resourceService.GetForDownloadAsync(id, cancellationToken); // also audits the access
+            var validFor = TimeSpan.FromMinutes(30);
+            return Ok(new ResourcePlaybackDto
+            {
+                Url = directUploads.GetReadUrl(resource.FileUrl, validFor, resource.MimeType),
+                MimeType = resource.MimeType,
+                ExpiresAtUtc = DateTime.UtcNow.Add(validFor),
+            });
+        }
+
         /// <summary>Grant-checked worksheet download (books stay view-only).</summary>
         [HttpGet("resources/{id:guid}/download")]
         public async Task<IActionResult> DownloadResource(
