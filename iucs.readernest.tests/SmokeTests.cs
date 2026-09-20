@@ -7647,6 +7647,23 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public void FrontendUrl_UsesTheCallersOrigin_OnlyWhenItIsAnAllowedOrigin()
+        {
+            var allowed = new[] { "https://thereadernest.in", "https://uat.thereadernest.in/" };
+            const string configured = "https://thereadernest.in";
+
+            // UAT site calling the UAT API (still configured with the production address).
+            Assert.Equal("https://uat.thereadernest.in", iucs.readernest.application.Helper.FrontendUrl.Resolve(configured, "https://uat.thereadernest.in", allowed));
+            // Production behaves exactly as before.
+            Assert.Equal("https://thereadernest.in", iucs.readernest.application.Helper.FrontendUrl.Resolve(configured, "https://thereadernest.in", allowed));
+            // An origin that is not on the allow-list can never steer the link.
+            Assert.Equal(configured, iucs.readernest.application.Helper.FrontendUrl.Resolve(configured, "https://evil.example.com", allowed));
+            // No Origin header (server-to-server, same-origin GET) -> configured value.
+            Assert.Equal(configured, iucs.readernest.application.Helper.FrontendUrl.Resolve(configured, null, allowed));
+            Assert.Equal("http://localhost:5173", iucs.readernest.application.Helper.FrontendUrl.Resolve(null, "", null));
+        }
+
+        [Fact]
         public void PinVault_RoundTrips_RejectsTampering_AndAWrongKey()
         {
             iucs.readernest.application.Common.Interfaces.IPinVault Vault(string key) => new AesGcmPinVault(Microsoft.Extensions.Options.Options.Create(new PinVaultOptions { Key = key }));

@@ -241,7 +241,13 @@ namespace iucs.readernest.api.Controllers
             }
 
             var apiBaseUrl = $"{Request.Scheme}://{Request.Host}";
-            var frontendBaseUrl = (configuration["Frontend:BaseUrl"] ?? "http://localhost:5173").TrimEnd('/');
+            // The site this request came from (when it is an origin CORS already trusts) rather than the
+            // one fixed Frontend:BaseUrl -- on UAT that setting still names production, so the invite
+            // link used to open the wrong site.
+            var frontendBaseUrl = iucs.readernest.application.Helper.FrontendUrl.Resolve(
+                configuration["Frontend:BaseUrl"],
+                Request.Headers.Origin.ToString(),
+                configuration.GetSection("Cors:AllowedOrigins").Get<string[]>());
             var stableUrl = $"{frontendBaseUrl}/join/personal/{userId}";
             var slug = await shortLinks.CreateAsync(stableUrl, DateTime.UtcNow.AddYears(10), userId, cancellationToken);
             return Ok(new { url = $"{apiBaseUrl}/m/{slug}" });
