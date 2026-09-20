@@ -19,6 +19,7 @@ namespace iucs.readernest.application
             services.AddScoped<IServerControlService, ServerControlService>();
             services.AddSingleton<IClassroomPresenceTracker, ClassroomPresenceTracker>();
             services.AddSingleton<IPasswordHasher, BcryptPasswordHasher>();
+            services.AddSingleton<IPinVault, AesGcmPinVault>();
             services.AddScoped<IAuditLogService, AuditLogService>();
             services.AddScoped<IShortLinkService, ShortLinkService>();
             services.AddScoped<INotificationService, NotificationService>();

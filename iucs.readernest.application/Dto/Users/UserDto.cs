@@ -32,5 +32,8 @@ namespace iucs.readernest.application.Dto.Users
         public DateTime CreatedAtUtc { get; set; }
 
         public DateTime? LastLoginAtUtc { get; set; }
+
+        /// <summary>True when a system-issued PIN is stored (encrypted) and an admin can view it.</summary>
+        public bool PinViewable { get; set; }
     }
 }

@@ -470,6 +470,20 @@ namespace iucs.readernest.api.Controllers
             return Ok(new ResetPinResultDto { TemporaryPin = temporaryPin });
         }
 
+        /// <summary>
+        /// Shows the PIN the system last issued to this user (decrypted from the PIN vault) without
+        /// changing it. Admin role only -- deliberately stricter than Reset PIN, since this reveals a
+        /// credential rather than replacing one -- and every call is audit-logged.
+        /// </summary>
+        [HttpGet("{id:guid}/pin")]
+        [Authorize(Roles = nameof(UserRole.Admin))]
+        public async Task<ActionResult<RevealedPinDto>> RevealPin(Guid id, CancellationToken cancellationToken)
+        {
+            var pin = await _userService.RevealPinAsync(id, cancellationToken);
+            Response.Headers.CacheControl = "no-store";
+            return Ok(new RevealedPinDto { Pin = pin });
+        }
+
         /// <summary>Which credential-delivery channels are enabled (Settings → Integrations), so the UI shows only usable Send buttons.</summary>
         [HttpGet("credential-channels")]
         [HasPermission(PermissionModule.UserManagement, PermissionAction.View)]

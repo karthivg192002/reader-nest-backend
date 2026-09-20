@@ -66,7 +66,7 @@ namespace iucs.readernest.tests
 
         private readonly FakeInvoicePdfGenerator _invoicePdfGenerator = new();
 
-        private UserService CreateUserService() => new(_db.UnitOfWork, _hasher, _notifications, _emailTemplates, _auditLog, _emailSender, _whatsAppSender, _smsSender, _bulkFileReader, NullLogger<UserService>.Instance);
+        private UserService CreateUserService() => new(_db.UnitOfWork, _hasher, _notifications, _emailTemplates, _auditLog, _emailSender, _whatsAppSender, _smsSender, _bulkFileReader, new AesGcmPinVault(Microsoft.Extensions.Options.Options.Create(new PinVaultOptions { Key = "test-key-test-key-test-key-test-key" })), NullLogger<UserService>.Instance);
 
         private CourseService CreateCourseService() => new(_db.UnitOfWork, _auditLog, _bulkFileReader);
 
@@ -5631,7 +5631,7 @@ namespace iucs.readernest.tests
             var emailTemplates2 = new EmailTemplateService(uow2, auditLog2, new MemoryCache(new MemoryCacheOptions()));
             var notifications2 = new NotificationService(uow2, _emailSender, emailTemplates2, NullLogger<NotificationService>.Instance);
             var userService2 = new UserService(
-                uow2, _hasher, notifications2, emailTemplates2, auditLog2, _emailSender, _whatsAppSender, _smsSender, _bulkFileReader, NullLogger<UserService>.Instance);
+                uow2, _hasher, notifications2, emailTemplates2, auditLog2, _emailSender, _whatsAppSender, _smsSender, _bulkFileReader, new AesGcmPinVault(Microsoft.Extensions.Options.Options.Create(new PinVaultOptions { Key = "test-key-test-key-test-key-test-key" })), NullLogger<UserService>.Instance);
             var sessionService2 = new SessionService(
                 uow2, auditLog2, CreatePayoutService(), notifications2, _db.CurrentUser, new FakeJitsiTokenService(), new ClassSessionEventLogService(uow2), new FakeTokenService());
             var service1 = CreateStoreService();
@@ -7593,6 +7593,73 @@ namespace iucs.readernest.tests
 
             var stored = await _db.Context.Users.FirstAsync(u => u.Id == admin.Id);
             Assert.Equal(originalHash, stored.PinHash); // untouched
+        }
+
+        [Fact]
+        public async Task RevealPin_ReturnsTheSystemIssuedPin_AfterAReset_AndIsAudited()
+        {
+            var user = await _db.SeedUserAsync($"reveal-{Guid.NewGuid():N}@test.com", "old-pin", UserRole.Parent);
+            var service = CreateUserService();
+
+            var issued = await service.ResetPinAsync(user.Id);
+            var revealed = await service.RevealPinAsync(user.Id);
+
+            Assert.Equal(issued, revealed);
+            var stored = await _db.Context.Users.AsNoTracking().FirstAsync(u => u.Id == user.Id);
+            Assert.NotNull(stored.PinEncrypted);
+            Assert.DoesNotContain(issued, stored.PinEncrypted!); // ciphertext, not the digits
+            Assert.True(_hasher.Verify(issued, stored.PinHash)); // login still checks the hash
+            Assert.True(await _db.Context.AuditLogs.AnyAsync(a => a.EntityId == user.Id.ToString() && (a.ChangesJson ?? "").Contains("System-issued PIN viewed by admin")));
+        }
+
+        [Fact]
+        public async Task RevealPin_FailsWhenNoSystemIssuedPinIsStored()
+        {
+            // A seeded/legacy account, or one whose user chose their own PIN: only a hash exists.
+            var user = await _db.SeedUserAsync($"nopin-{Guid.NewGuid():N}@test.com", "chosen-by-user", UserRole.Parent);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => CreateUserService().RevealPinAsync(user.Id));
+        }
+
+        [Fact]
+        public async Task RevealPin_RefusesAnAdminTarget()
+        {
+            var admin = await _db.SeedUserAsync($"admin-{Guid.NewGuid():N}@test.com", "old-pin", UserRole.Admin);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => CreateUserService().RevealPinAsync(admin.Id));
+        }
+
+        [Fact]
+        public async Task UserChoosingTheirOwnPin_DropsTheStoredSystemIssuedOne()
+        {
+            var user = await _db.SeedUserAsync($"own-{Guid.NewGuid():N}@test.com", "old-pin", UserRole.Parent);
+            await CreateUserService().ResetPinAsync(user.Id);
+            Assert.NotNull((await _db.Context.Users.AsNoTracking().FirstAsync(u => u.Id == user.Id)).PinEncrypted);
+
+            var auth = CreateAuthService();
+            await auth.RequestPinResetAsync(new ForgotPinRequest { Email = user.Email });
+            var token = await _db.Context.PinResetTokens.FirstAsync(t => t.UserId == user.Id);
+            await auth.ResetPinAsync(new ResetPinRequest { Token = token.Token, NewPin = "7351" });
+
+            var stored = await _db.Context.Users.AsNoTracking().FirstAsync(u => u.Id == user.Id);
+            Assert.Null(stored.PinEncrypted); // the PIN they picked is never kept readable
+            await Assert.ThrowsAsync<DomainValidationException>(() => CreateUserService().RevealPinAsync(user.Id));
+        }
+
+        [Fact]
+        public void PinVault_RoundTrips_RejectsTampering_AndAWrongKey()
+        {
+            iucs.readernest.application.Common.Interfaces.IPinVault Vault(string key) => new AesGcmPinVault(Microsoft.Extensions.Options.Options.Create(new PinVaultOptions { Key = key }));
+            var vault = Vault("first-secret-first-secret-first-secret");
+
+            var a = vault.Protect("4821");
+            var b = vault.Protect("4821");
+
+            Assert.NotEqual(a, b); // fresh nonce each time
+            Assert.Equal("4821", vault.TryReveal(a));
+            Assert.Null(Vault("other-secret-other-secret-other-secret").TryReveal(a));
+            Assert.Null(vault.TryReveal(a.Substring(0, a.Length - 4) + "AAAA")); // tampered
+            Assert.Null(vault.TryReveal("not-a-vault-value"));
         }
 
         [Fact]

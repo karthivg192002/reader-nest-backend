@@ -31,6 +31,15 @@ namespace iucs.readernest.domain.Entities.Users
         [JsonIgnore]
         public string PinHash { get; set; } = null!;
 
+        /// <summary>
+        /// The PIN the SYSTEM last issued (temporary PIN on create / resend / admin reset), encrypted
+        /// (see IPinVault) so an admin can view it again. Null when the user has since chosen their
+        /// own PIN (never stored) or for accounts that predate this column -- reset to populate it.
+        /// </summary>
+        [MaxLength(256)]
+        [JsonIgnore]
+        public string? PinEncrypted { get; set; }
+
         [MaxLength(100)]
         public string FirstName { get; set; } = null!;
 

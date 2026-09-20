@@ -111,6 +111,11 @@ builder.Services.AddHostedService<ProgressReportsBackgroundService>();
 // Authentication: JWT bearer
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
 builder.Services.Configure<MonitoringOptions>(builder.Configuration.GetSection(MonitoringOptions.SectionName));
+builder.Services.Configure<iucs.readernest.application.Helper.PinVaultOptions>(o =>
+{
+    o.Key = builder.Configuration["PinVault:Key"];
+    o.FallbackSecret = builder.Configuration["Jwt:SigningKey"];
+});
 var jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>()
     ?? throw new InvalidOperationException("Missing 'Jwt' configuration section.");
 if (string.IsNullOrWhiteSpace(jwt.SigningKey) || Encoding.UTF8.GetByteCount(jwt.SigningKey) < 32)
