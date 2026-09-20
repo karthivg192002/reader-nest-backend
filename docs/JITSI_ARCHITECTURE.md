@@ -19,8 +19,12 @@ self-hosting; JaaS remains the fallback if ops capacity becomes a risk.
 - `ClassSession.MeetingRoomId` (generated `trn-…`, never manual links) is the room name.
 - Frontend `JitsiRoom` component loads `external_api.js` and joins with the user's
   display name; teachers join as moderators.
-- **Production hardening (Sprint 2)**: JWT-secured rooms (prosody `token_verification`)
-  so only authenticated portal users can join; secure domain to enforce lobby/waiting room.
+- **JWT-secured rooms (done, live in production)**: Prosody runs with `authentication = "token"`
+  and `allow_empty_token = false`, so only users holding a token minted by the backend can join.
+  The backend sets the `moderator` claim per role (teachers and admins only -- see
+  `SessionService`), which is what decides who can mute others / start recording. A parent joining
+  before the teacher does not become moderator.
+- **Still open**: a secure-domain lobby / waiting room (not enabled).
 - **Recording (auto-start blocked on infra decision)**: the "jitsi" Integration's
   `autoRecord` config field (Settings → Integrations → Jitsi Meet, default `"true"`)
   gates whether `JitsiLive` calls `startRecording` on host join — on = auto, off =
