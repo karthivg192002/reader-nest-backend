@@ -3004,6 +3004,57 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task Menu_ExecutiveRole_ResolvesOwnPortal_AndShowsAdminAndManagementItemsByPermission()
+        {
+            // The "admin-management" persona: a Sub Admin whose RoleDefinition.DefaultRoute is
+            // "/executive". Its portal menu mixes Admin-style and Management-style items, and which
+            // ones show is decided only by the modules the role grants — nothing hardcoded per role.
+            var role = new domain.Entities.Users.RoleDefinition
+            {
+                Name = $"admin-management-{Guid.NewGuid():N}", DisplayName = "Admin & Management", DefaultRoute = "/executive",
+            };
+            _db.Context.RoleDefinitions.Add(role);
+            var user = await _db.SeedUserAsync($"exec-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+            user.RoleDefinitionId = role.Id;
+            _db.Context.MenuItems.AddRange(
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "executive", Label = "Overall Dashboard", Path = "/executive", Icon = "LayoutDashboard",
+                    SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = null,
+                },
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "executive", Section = "Management", Label = "Revenue & Courses", Path = "/executive/revenue", Icon = "TrendingUp",
+                    SectionOrder = 1, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.ReportsAnalytics.ToString(),
+                },
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "executive", Section = "Finance", Label = "Billing & Finance", Path = "/executive/billing", Icon = "Receipt",
+                    SectionOrder = 2, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.BillingFinance.ToString(),
+                },
+                // Same path in another portal must never leak in.
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "management", Label = "Revenue & Courses", Path = "/management/revenue", Icon = "TrendingUp",
+                    SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = null,
+                });
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateMenuService();
+
+            var managementOnly = await service.GetForUserAsync(user.Id, UserRole.SubAdmin, [PermissionModule.ReportsAnalytics.ToString()]);
+            Assert.Contains(managementOnly, m => m.Path == "/executive/revenue");
+            Assert.DoesNotContain(managementOnly, m => m.Path == "/executive/billing");
+            Assert.DoesNotContain(managementOnly, m => m.Portal != "executive");
+
+            var both = await service.GetForUserAsync(
+                user.Id, UserRole.SubAdmin,
+                [PermissionModule.ReportsAnalytics.ToString(), PermissionModule.BillingFinance.ToString()]);
+            Assert.Contains(both, m => m.Path == "/executive/revenue");
+            Assert.Contains(both, m => m.Path == "/executive/billing");
+        }
+
+        [Fact]
         public async Task Login_Succeeds_WithValidCredentials()
         {
             await _db.SeedUserAsync("admin@test.com", _hasher.Hash("4821"), UserRole.Admin);
@@ -9258,6 +9309,69 @@ namespace iucs.readernest.tests
             // Unsharing takes the recording away again without touching the file.
             await folders.SetAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderAccessRequest { RemoveParentProfileIds = [buyer.Profile.Id] });
             await Assert.ThrowsAsync<NotFoundException>(() => portal.GetResourceForViewAsync(buyer.User.Id, recording.Id));
+        }
+
+        private async Task<(User User, BatchEnrollment Enrollment)> SeedFolderParentEnrolledAsync(Guid batchId)
+        {
+            var (profile, user) = await SeedFolderParentAsync();
+            var child = new Child { ParentProfileId = profile.Id, FirstName = "Kid", LastName = "One" };
+            _db.Context.Add(child);
+            await _db.Context.SaveChangesAsync();
+            var enrollment = new BatchEnrollment { BatchId = batchId, ChildId = child.Id, Status = EnrollmentStatus.Active };
+            _db.Context.Add(enrollment);
+            await _db.Context.SaveChangesAsync();
+            return (user, enrollment);
+        }
+
+        [Fact]
+        public async Task ResourceFolders_ShareWithSeveralBatches_ReachesEnrolledParentsLive_IncludingLaterEnrolments()
+        {
+            var folders = CreateFolderService();
+            var folder = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Jolly Phonics Level 1" });
+            var sub = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Worksheets", ParentFolderId = folder.Id });
+            var file = await SeedFolderFileAsync(sub.Id);
+
+            var (batchA, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var (batchB, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var (otherBatch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var inA = await SeedFolderParentEnrolledAsync(batchA.Id);
+            var inB = await SeedFolderParentEnrolledAsync(batchB.Id);
+            var inOther = await SeedFolderParentEnrolledAsync(otherBatch.Id);
+            var portal = new ParentPortalService(_db.UnitOfWork);
+
+            // Nothing is shared yet, so nobody sees the file.
+            Assert.Empty(await portal.GetResourcesAsync(inA.User.Id));
+
+            // One call shares with two batches; sharing the parent folder reaches the subfolder's file.
+            var shared = await folders.SetBatchAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderBatchAccessRequest { AddBatchIds = [batchA.Id, batchB.Id] });
+            Assert.Equal(2, shared.Count);
+            Assert.Equal(2, (await folders.ListAsync()).Single(f => f.Id == folder.Id).SharedBatchCount);
+            foreach (var parent in new[] { inA, inB })
+            {
+                Assert.Contains(await portal.GetResourcesAsync(parent.User.Id), r => r.Id == file.Id);
+                Assert.Equal(file.Id, (await portal.GetResourceForDownloadAsync(parent.User.Id, file.Id)).Id);
+            }
+            Assert.Empty(await portal.GetResourcesAsync(inOther.User.Id));
+            await Assert.ThrowsAsync<NotFoundException>(() => portal.GetResourceForDownloadAsync(inOther.User.Id, file.Id));
+
+            // Re-sharing is idempotent.
+            Assert.Equal(2, (await folders.SetBatchAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderBatchAccessRequest { AddBatchIds = [batchA.Id] })).Count);
+
+            // A parent who enrols in a shared batch AFTER the share still gets it, with no further step.
+            var lateJoiner = await SeedFolderParentEnrolledAsync(batchA.Id);
+            Assert.Contains(await portal.GetResourcesAsync(lateJoiner.User.Id), r => r.Id == file.Id);
+
+            // A withdrawn enrolment stops counting.
+            inA.Enrollment.Status = EnrollmentStatus.Withdrawn;
+            await _db.Context.SaveChangesAsync();
+            Assert.Empty(await portal.GetResourcesAsync(inA.User.Id));
+
+            // Unsharing one batch removes just that batch's parents.
+            await folders.SetBatchAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderBatchAccessRequest { RemoveBatchIds = [batchB.Id] });
+            Assert.Empty(await portal.GetResourcesAsync(inB.User.Id));
+            Assert.Contains(await portal.GetResourcesAsync(lateJoiner.User.Id), r => r.Id == file.Id);
+
+            await Assert.ThrowsAsync<NotFoundException>(() => folders.SetBatchAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderBatchAccessRequest { AddBatchIds = [Guid.NewGuid()] }));
         }
 
         private ParentFeedbackService CreateParentFeedbackService() =>

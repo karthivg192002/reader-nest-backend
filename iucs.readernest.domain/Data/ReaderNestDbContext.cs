@@ -97,6 +97,7 @@ namespace iucs.readernest.domain.Data
         public DbSet<ResourceBatchVisibility> ResourceBatchVisibilities => Set<ResourceBatchVisibility>();
         public DbSet<ResourceFolder> ResourceFolders => Set<ResourceFolder>();
         public DbSet<ResourceFolderAccess> ResourceFolderAccesses => Set<ResourceFolderAccess>();
+        public DbSet<ResourceFolderBatchAccess> ResourceFolderBatchAccesses => Set<ResourceFolderBatchAccess>();
 
         // Communication & auditing
         public DbSet<Notification> Notifications => Set<Notification>();

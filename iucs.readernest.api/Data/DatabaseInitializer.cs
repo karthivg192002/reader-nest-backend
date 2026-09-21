@@ -52,6 +52,7 @@ namespace iucs.readernest.api.Data
             await EnsureAdminServerMonitoringMenuAsync(context);
             await EnsureClassSessionLogsMenuAsync(context);
             await EnsureItAdminMenuAsync(context);
+            await EnsureExecutiveMenuAsync(context);
             await EnsureBulkEmailHistoryMenuAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
@@ -506,6 +507,12 @@ namespace iucs.readernest.api.Data
                     // ₹0 total" instead of the real figures shown by the chart above it.
                     Grant(PermissionModule.CourseBatchManagement, view: true),
                 ]),
+                // Admin-portal breadth plus the Management executive pages, under one login. Not a
+                // merge of the two portals — a separate persona whose menu (the "executive"
+                // portal, see EnsureExecutiveMenuAsync) shows exactly the items whose module the
+                // role is granted, so what it sees is edited on the Roles & Permissions screen,
+                // not in code. Seeded with every module; trim it there for a narrower persona.
+                ("admin-management", "Admin & Management", "Admin and Management menus together under one login; what shows is driven by this role's permissions.", "/executive", AllModulesFull()),
                 ("student", "Student", "Learner experience surfaced through the parent account.", "/student", []),
             ];
         }
@@ -1140,6 +1147,93 @@ namespace iucs.readernest.api.Data
                 context.MenuItems.Add(new MenuItem
                 {
                     Portal = "itadmin",
+                    Section = section,
+                    SectionOrder = sectionOrder,
+                    Label = label,
+                    Path = path,
+                    Icon = icon,
+                    SortOrder = sortOrder,
+                    RequiredModule = requiredModule,
+                    IsActive = true,
+                });
+            }
+        }
+
+        /// <summary>
+        /// Seeds the "executive" portal menu — the landing console for the "admin-management"
+        /// Sub Admin persona (see SystemRoleSeeds): every Admin-portal item plus the Management
+        /// executive pages (Overview, Revenue &amp; Courses, Teacher &amp; Batch Performance,
+        /// Management Reports), each gated by the same RequiredModule as its Admin/Management
+        /// original. Nothing about who sees what is decided in code — MenuService only shows an
+        /// item when the user's role grants View on its module, so narrowing this persona is a
+        /// Roles &amp; Permissions edit, and any row can be reordered/hidden in Menu Manager. The
+        /// Admin and Management portals themselves are untouched. Same idiom as
+        /// EnsureItAdminMenuAsync: runs once, a no-op if the portal already has rows.
+        /// </summary>
+        private static async Task EnsureExecutiveMenuAsync(ReaderNestDbContext context)
+        {
+            if (context.MenuItems.Local.Any(m => m.Portal == "executive") ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "executive"))
+            {
+                return;
+            }
+
+            (string? Section, string Label, string Path, string Icon, string? RequiredModule)[] items =
+            [
+                (null, "Overall Dashboard", "/executive", "LayoutDashboard", null),
+                ("Management", "Executive Overview", "/executive/overview", "LineChart", PermissionModule.ReportsAnalytics.ToString()),
+                ("Management", "Revenue & Courses", "/executive/revenue", "TrendingUp", PermissionModule.ReportsAnalytics.ToString()),
+                ("Management", "Teacher & Batch Performance", "/executive/performance", "Gauge", PermissionModule.ReportsAnalytics.ToString()),
+                ("Management", "Management Reports", "/executive/management-reports", "FileBarChart", PermissionModule.ReportsAnalytics.ToString()),
+                ("Academics", "Courses", "/executive/courses", "BookOpen", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Departments", "/executive/departments", "Building2", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Batches", "/executive/batches", "Layers", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Academic Calendar", "/executive/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement.ToString()),
+                ("Academics", "Sessions", "/executive/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+                ("Academics", "Recordings", "/executive/recordings", "Video", PermissionModule.SessionCalendarManagement.ToString()),
+                ("Academics", "Quiz Bank", "/executive/quiz-bank", "Sparkles", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Activity Bank", "/executive/activity-bank", "PencilRuler", PermissionModule.CourseBatchManagement.ToString()),
+                ("People", "Users", "/executive/users", "Users", PermissionModule.UserManagement.ToString()),
+                ("People", "Roles & Permissions", "/executive/permissions", "ShieldCheck", PermissionModule.UserManagement.ToString()),
+                ("People", "Enrollment Review", "/executive/enrollments", "ClipboardCheck", PermissionModule.Admission.ToString()),
+                ("People", "Store Inquiries", "/executive/store-inquiries", "ShoppingBag", PermissionModule.Admission.ToString()),
+                ("People", "Parent Feedback", "/executive/parent-feedback", "Star", PermissionModule.Admission.ToString()),
+                ("People", "Leave Management", "/executive/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
+                ("People", "Teacher Availability", "/executive/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
+                ("Content", "Content & Resources", "/executive/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
+                ("Finance", "Billing & Finance", "/executive/billing", "Receipt", PermissionModule.BillingFinance.ToString()),
+                ("Finance", "Packages & Subscriptions", "/executive/packages", "CreditCard", PermissionModule.BillingFinance.ToString()),
+                ("Finance", "Payment Gateway Mapping", "/executive/payment-mapping", "Landmark", PermissionModule.BillingFinance.ToString()),
+                ("Finance", "Teacher Payouts", "/executive/payouts", "Wallet", PermissionModule.Payouts.ToString()),
+                ("Finance", "Fee Suspension", "/executive/fee-suspension", "Ban", PermissionModule.BillingFinance.ToString()),
+                ("Insights", "Reports & Analytics", "/executive/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
+                ("Insights", "Bulk Email", "/executive/bulk-email", "Mail", PermissionModule.Communication.ToString()),
+                ("Insights", "Bulk Email History", "/executive/bulk-email/history", "History", PermissionModule.Communication.ToString()),
+                ("Insights", "Email Templates", "/executive/email-templates", "FileText", PermissionModule.Communication.ToString()),
+                ("Insights", "Progress Reports", "/executive/progress-reports", "ScrollText", PermissionModule.Communication.ToString()),
+                ("Insights", "Doubt Chatbot", "/executive/chatbot", "MessageCircleQuestion", PermissionModule.Communication.ToString()),
+                ("System", "Settings & Branding", "/executive/settings", "Settings", PermissionModule.Settings.ToString()),
+                ("System", "Server Monitoring", "/executive/monitoring", "Activity", PermissionModule.SystemMonitoring.ToString()),
+                ("System", "Class Session Logs", "/executive/class-logs", "Radar", PermissionModule.ClassSessionLogs.ToString()),
+            ];
+
+            var sectionOrders = new Dictionary<string, int>();
+            var sortOrders = new Dictionary<string, int>();
+            foreach (var (section, label, path, icon, requiredModule) in items)
+            {
+                var sectionKey = section ?? "";
+                if (!sectionOrders.TryGetValue(sectionKey, out var sectionOrder))
+                {
+                    sectionOrder = sectionOrders.Count;
+                    sectionOrders[sectionKey] = sectionOrder;
+                }
+
+                var sortOrder = sortOrders.TryGetValue(sectionKey, out var current) ? current : 0;
+                sortOrders[sectionKey] = sortOrder + 1;
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "executive",
                     Section = section,
                     SectionOrder = sectionOrder,
                     Label = label,
