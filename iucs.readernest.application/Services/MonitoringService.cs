@@ -26,6 +26,7 @@ namespace iucs.readernest.application.Services
         private readonly IUnitOfWork _unitOfWork;
         private readonly IClassroomPresenceTracker _presenceTracker;
         private readonly IBurstWorkerUsageService _burstWorkerUsage;
+        private readonly IRecordingPipelineService _recordingPipeline;
         private readonly MonitoringOptions _options;
 
         public MonitoringService(
@@ -33,12 +34,14 @@ namespace iucs.readernest.application.Services
             IUnitOfWork unitOfWork,
             IClassroomPresenceTracker presenceTracker,
             IBurstWorkerUsageService burstWorkerUsage,
+            IRecordingPipelineService recordingPipeline,
             IOptions<MonitoringOptions> options)
         {
             _prometheus = prometheus;
             _unitOfWork = unitOfWork;
             _presenceTracker = presenceTracker;
             _burstWorkerUsage = burstWorkerUsage;
+            _recordingPipeline = recordingPipeline;
             _options = options.Value;
         }
 
@@ -51,8 +54,9 @@ namespace iucs.readernest.application.Services
             var insightsTask = GetDatabaseInsightsAsync(cancellationToken);
             var alertsTask = _prometheus.GetActiveAlertsAsync(_options.PrometheusBaseUrl, cancellationToken);
             var burstUsageTask = _burstWorkerUsage.GetUsageSummaryAsync(cancellationToken);
+            var pipelineTask = _recordingPipeline.GetAsync(cancellationToken);
 
-            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask).Append(burstUsageTask));
+            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask).Append(burstUsageTask).Append(pipelineTask));
             var (dbHealthy, dbLatencyMs) = await databaseTask;
             // Sequential, not joined into the WhenAll above: this also queries via _unitOfWork,
             // and CheckDatabaseAsync already does too -- both use the same scoped DbContext,
@@ -71,6 +75,7 @@ namespace iucs.readernest.application.Services
                 DatabaseLatencyMs = dbLatencyMs,
                 DatabaseInsights = await insightsTask,
                 BurstWorkerUsage = await burstUsageTask,
+                RecordingPipeline = await pipelineTask,
                 ConcurrentClassroomUsers = _presenceTracker.TotalConnectedUsers,
                 ActiveClassCount = _presenceTracker.ActiveClassCount,
                 ActiveAlerts = (await alertsTask)

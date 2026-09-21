@@ -404,6 +404,38 @@ namespace iucs.readernest.application.Dto.Monitoring
         public List<BurstWorkerEpisodeDto> RecentEpisodes { get; set; } = new();
     }
 
+    /// <summary>A recording that finished today but was deliberately not attached to any class (finalize hook got HTTP 204: personal/demo/ad-hoc room with no ClassSession).</summary>
+    public class UnattachedRecordingDto
+    {
+        public string Room { get; set; } = "";
+        public DateTime AtUtc { get; set; }
+        public int DurationSeconds { get; set; }
+    }
+
+    /// <summary>
+    /// Health of the recording pipeline on the video server: did today's finished recordings reach the
+    /// portal, is anything stuck, and how much disk headroom is left.
+    /// </summary>
+    public class RecordingPipelineDto
+    {
+        /// <summary>Recordings attached to a class today (finalize hook returned 200).</summary>
+        public int RegisteredToday { get; set; }
+        /// <summary>Finished recordings not attached to any class today (HTTP 204) -- on disk, but will never show under a class.</summary>
+        public int UnattachedToday { get; set; }
+        /// <summary>Finalize calls today that ended in neither 200 nor 204 (last outcome per file).</summary>
+        public int FailedToday { get; set; }
+        /// <summary>Recordings copied to main whose registration failed and is still being retried.</summary>
+        public int PendingRegistration { get; set; }
+        public DateTime? NewestRecordingUtc { get; set; }
+        public double DiskTotalGb { get; set; }
+        public double DiskFreeGb { get; set; }
+        public double DiskFreePercent { get; set; }
+        public double GrowthLast24hGb { get; set; }
+        /// <summary>Free disk divided by last-24h growth; null when nothing was written.</summary>
+        public double? DaysOfDiskLeft { get; set; }
+        public List<UnattachedRecordingDto> Unattached { get; set; } = new();
+    }
+
     /// <summary>Everything the Server Monitoring dashboard needs in one call.</summary>
     public class MonitoringSummaryDto
     {
@@ -419,6 +451,8 @@ namespace iucs.readernest.application.Dto.Monitoring
         public RecordingSummaryDto TodayRecordings { get; set; } = new();
         /// <summary>Null if the usage log couldn't be fetched (e.g. main unreachable) -- absent, not zeroed out, so the UI doesn't show a false "never used."</summary>
         public BurstWorkerUsageDto? BurstWorkerUsage { get; set; }
+        /// <summary>Null if main could not be reached -- unknown, not "healthy".</summary>
+        public RecordingPipelineDto? RecordingPipeline { get; set; }
         public DateTime GeneratedAtUtc { get; set; }
     }
 }
