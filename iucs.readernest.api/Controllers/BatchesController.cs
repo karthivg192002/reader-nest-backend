@@ -1,8 +1,10 @@
+using System.Security.Claims;
 using iucs.readernest.api.Auth;
 using iucs.readernest.application.Dto.Batches;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace iucs.readernest.api.Controllers
@@ -51,6 +53,15 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _batchService.UpdateAsync(id, request, cancellationToken));
         }
 
+        /// <summary>Soft-deletes the batch — refused while it still has an active student (withdraw them, or move them to another batch, first).</summary>
+        [HttpDelete("{id:guid}")]
+        [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.Delete)]
+        public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
+        {
+            await _batchService.DeleteAsync(id, cancellationToken);
+            return NoContent();
+        }
+
         /// <summary>Automated scheduling: places every course session on the chosen weekdays, skipping holidays.</summary>
         [HttpPost("{id:guid}/generate-schedule")]
         [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Create)]
@@ -60,6 +71,49 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             return Ok(await _sessionService.GenerateScheduleAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>
+        /// Edits a batch's already-generated schedule from now on (new weekday/time pattern
+        /// and/or remaining session count) — the "Manage" dialog's answer to a schedule that
+        /// already has sessions, where GenerateSchedule above refuses to run. Only still-upcoming
+        /// sessions are touched; anything already completed/in progress is untouched.
+        /// </summary>
+        [HttpPut("{id:guid}/schedule")]
+        [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Edit)]
+        public async Task<ActionResult<IReadOnlyList<ClassSessionDto>>> UpdateFutureSchedule(
+            Guid id,
+            UpdateFutureScheduleRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.UpdateFutureScheduleAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>
+        /// One-time data repair for batches reassigned before UpdateAsync's teacher-reassignment
+        /// cascade existed: moves any still-undelivered ClassSession that's out of sync with its
+        /// own batch's current teacher onto that teacher. Safe to call repeatedly.
+        /// </summary>
+        [HttpPost("reconcile-stale-teachers")]
+        [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.Edit)]
+        public async Task<ActionResult<ReconcileStaleSessionTeachersResultDto>> ReconcileStaleTeachers(
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _batchService.ReconcileStaleSessionTeachersAsync(cancellationToken));
+        }
+
+        /// <summary>
+        /// One-time data repair for batches whose duration was edited before UpdateAsync's
+        /// duration cascade existed: corrects any still-undelivered ClassSession whose real
+        /// length is out of sync with its own batch's current effective duration. Safe to call
+        /// repeatedly.
+        /// </summary>
+        [HttpPost("reconcile-stale-durations")]
+        [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.Edit)]
+        public async Task<ActionResult<ReconcileStaleSessionDurationsResultDto>> ReconcileStaleDurations(
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _batchService.ReconcileStaleSessionDurationsAsync(cancellationToken));
         }
 
         [HttpPut("{id:guid}/status")]
@@ -86,6 +140,17 @@ namespace iucs.readernest.api.Controllers
         public async Task<ActionResult<IReadOnlyList<UnassignedChildDto>>> ListUnassigned(Guid id, CancellationToken cancellationToken)
         {
             return Ok(await _batchService.ListUnassignedStudentsAsync(id, cancellationToken));
+        }
+
+        /// <summary>A teacher's own "My Students" roster — see TeacherStudentDto's own doc
+        /// comment for the feedback this answers. Same "mine" shape as SessionsController's
+        /// mine/recordings: caller identity from the token, not a route parameter.</summary>
+        [HttpGet("mine/students")]
+        [Authorize(Roles = nameof(UserRole.Teacher))]
+        public async Task<ActionResult<IReadOnlyList<TeacherStudentDto>>> ListMyStudents(CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _batchService.ListMyStudentsAsync(userId, cancellationToken));
         }
 
         /// <summary>Places a child in the batch (rejected once the batch is at capacity).</summary>

@@ -19,6 +19,9 @@ namespace iucs.readernest.application.Dto.Resources
 
         public Guid? BatchId { get; set; }
 
+        /// <summary>The folder this file sits in; null = top level.</summary>
+        public Guid? FolderId { get; set; }
+
         /// <summary>Batch display name, when the resource is tied to a batch.</summary>
         public string? BatchName { get; set; }
 
@@ -46,6 +49,9 @@ namespace iucs.readernest.application.Dto.Resources
 
         public Guid? BatchId { get; set; }
 
+        /// <summary>Folder to upload into; omit for the top level.</summary>
+        public Guid? FolderId { get; set; }
+
         /// <summary>Uploader-chosen batches the resource is visible to (multi-batch visibility).</summary>
         public List<Guid> BatchIds { get; set; } = [];
 
@@ -69,5 +75,95 @@ namespace iucs.readernest.application.Dto.Resources
         public List<Guid> ParentProfileIds { get; set; } = [];
 
         public bool VisibleOnDashboard { get; set; } = true;
+    }
+
+    public class StartLargeUploadRequest
+    {
+        [Required]
+        [MaxLength(260)]
+        public string FileName { get; set; } = null!;
+
+        [MaxLength(100)]
+        public string? ContentType { get; set; }
+
+        [Range(1, long.MaxValue)]
+        public long SizeBytes { get; set; }
+    }
+
+    public class LargeUploadDto
+    {
+        public string Key { get; set; } = null!;
+
+        public string UploadId { get; set; } = null!;
+
+        public long PartSizeBytes { get; set; }
+
+        public int TotalParts { get; set; }
+    }
+
+    public class LargeUploadPartsRequest
+    {
+        [Required]
+        public string Key { get; set; } = null!;
+
+        [Required]
+        public string UploadId { get; set; } = null!;
+
+        [Required]
+        [MinLength(1)]
+        [MaxLength(200)]
+        public List<int> PartNumbers { get; set; } = [];
+    }
+
+    public class LargeUploadPartUrlDto
+    {
+        public int PartNumber { get; set; }
+
+        public string Url { get; set; } = null!;
+    }
+
+    public class LargeUploadPartDto
+    {
+        [Range(1, 10000)]
+        public int PartNumber { get; set; }
+
+        [Required]
+        public string ETag { get; set; } = null!;
+    }
+
+    /// <summary>Finishes a browser-to-bucket upload and creates the Resource, with the same metadata as a normal upload.</summary>
+    public class CompleteLargeUploadRequest : CreateResourceRequest
+    {
+        [Required]
+        public string Key { get; set; } = null!;
+
+        [Required]
+        public string UploadId { get; set; } = null!;
+
+        [MaxLength(100)]
+        public string? ContentType { get; set; }
+
+        [Required]
+        [MinLength(1)]
+        public List<LargeUploadPartDto> Parts { get; set; } = [];
+    }
+
+    public class AbortLargeUploadRequest
+    {
+        [Required]
+        public string Key { get; set; } = null!;
+
+        [Required]
+        public string UploadId { get; set; } = null!;
+    }
+
+    /// <summary>A short-lived URL a parent's browser plays a shared recording from.</summary>
+    public class ResourcePlaybackDto
+    {
+        public string Url { get; set; } = null!;
+
+        public string? MimeType { get; set; }
+
+        public DateTime ExpiresAtUtc { get; set; }
     }
 }

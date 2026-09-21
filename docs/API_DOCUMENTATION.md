@@ -14,7 +14,7 @@ grant shown per endpoint; `/mine` endpoints are scoped to the caller's role.
 | Auth | `POST /api/auth/login`, `GET /api/auth/me` | anonymous / any |
 | Users | `GET|POST /api/users`, `GET /api/users/teachers`, `GET|PUT /api/users/{id}`, `PUT /{id}/status`, `GET|PUT /{id}/permissions` | UserManagement |
 | Courses | `GET|POST /api/courses`, `GET|PUT /{id}`, `GET|POST /categories` | CourseBatchManagement |
-| Batches | `GET|POST /api/batches`, `GET|PUT /{id}`, `PUT /{id}/status`, `POST /{id}/generate-schedule` | CourseBatchManagement |
+| Batches | `GET|POST /api/batches`, `GET|PUT|DELETE /{id}`, `PUT /{id}/status`, `POST /{id}/generate-schedule` | CourseBatchManagement |
 | Sessions | `GET|POST /api/sessions`, `GET /mine`, `GET /{id}`, `POST /{id}/reschedule|cancel|complete|no-show`, `GET|POST /{id}/recordings`, `POST /{id}/attendance`, `GET /{id}/attendance` | SessionCalendarManagement (teacher for own) |
 | Holidays | `GET|POST /api/holidays`, `DELETE /{id}` | SessionCalendarManagement |
 | Leave | `POST /api/leave-requests`, `GET /mine` (teacher), `GET /api/leave-requests`, `POST /{id}/review` | LeaveManagement |

@@ -25,17 +25,23 @@ namespace iucs.readernest.application.Services
         private readonly IPrometheusClient _prometheus;
         private readonly IUnitOfWork _unitOfWork;
         private readonly IClassroomPresenceTracker _presenceTracker;
+        private readonly IBurstWorkerUsageService _burstWorkerUsage;
+        private readonly IRecordingPipelineService _recordingPipeline;
         private readonly MonitoringOptions _options;
 
         public MonitoringService(
             IPrometheusClient prometheus,
             IUnitOfWork unitOfWork,
             IClassroomPresenceTracker presenceTracker,
+            IBurstWorkerUsageService burstWorkerUsage,
+            IRecordingPipelineService recordingPipeline,
             IOptions<MonitoringOptions> options)
         {
             _prometheus = prometheus;
             _unitOfWork = unitOfWork;
             _presenceTracker = presenceTracker;
+            _burstWorkerUsage = burstWorkerUsage;
+            _recordingPipeline = recordingPipeline;
             _options = options.Value;
         }
 
@@ -47,9 +53,18 @@ namespace iucs.readernest.application.Services
             var databaseTask = CheckDatabaseAsync(cancellationToken);
             var insightsTask = GetDatabaseInsightsAsync(cancellationToken);
             var alertsTask = _prometheus.GetActiveAlertsAsync(_options.PrometheusBaseUrl, cancellationToken);
+            var burstUsageTask = _burstWorkerUsage.GetUsageSummaryAsync(cancellationToken);
+            var pipelineTask = _recordingPipeline.GetAsync(cancellationToken);
 
-            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask));
+            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask).Append(burstUsageTask).Append(pipelineTask));
             var (dbHealthy, dbLatencyMs) = await databaseTask;
+            // Sequential, not joined into the WhenAll above: this also queries via _unitOfWork,
+            // and CheckDatabaseAsync already does too -- both use the same scoped DbContext,
+            // which throws "a second operation was started on this context instance before a
+            // previous operation completed" the instant two EF queries on it actually run
+            // concurrently (confirmed live: this exact crash took down the whole /summary
+            // endpoint, not just this one field, the first time these ran side by side).
+            var todayRecordings = await GetTodayRecordingSummaryAsync(cancellationToken);
 
             return new MonitoringSummaryDto
             {
@@ -59,6 +74,8 @@ namespace iucs.readernest.application.Services
                 DatabaseHealthy = dbHealthy,
                 DatabaseLatencyMs = dbLatencyMs,
                 DatabaseInsights = await insightsTask,
+                BurstWorkerUsage = await burstUsageTask,
+                RecordingPipeline = await pipelineTask,
                 ConcurrentClassroomUsers = _presenceTracker.TotalConnectedUsers,
                 ActiveClassCount = _presenceTracker.ActiveClassCount,
                 ActiveAlerts = (await alertsTask)
@@ -75,7 +92,51 @@ namespace iucs.readernest.application.Services
                     .OrderByDescending(a => a.Severity == "critical")
                     .ThenBy(a => a.ActiveSince)
                     .ToList(),
+                TodayRecordings = todayRecordings,
                 GeneratedAtUtc = DateTime.UtcNow,
+            };
+        }
+
+        /// <summary>
+        /// Same "started, not still live, no session_recordings row" definition used all night
+        /// to trace individual sync failures by hand (real batch classes only -- no demo/
+        /// personal-link noise) -- now surfaced on the dashboard instead of a one-off SQL query.
+        /// </summary>
+        private async Task<RecordingSummaryDto> GetTodayRecordingSummaryAsync(CancellationToken cancellationToken)
+        {
+            // "Today" in IST, same boundary GetTodaySessionsAsync already uses.
+            var istNow = DateTime.UtcNow.AddHours(5).AddMinutes(30);
+            var dayStartUtc = istNow.Date.AddHours(-5).AddMinutes(-30);
+            var dayEndUtc = dayStartUtc.AddDays(1);
+
+            var started = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.Type == SessionType.Regular
+                    && s.BatchId != null
+                    && s.ScheduledStartAtUtc >= dayStartUtc
+                    && s.ScheduledStartAtUtc < dayEndUtc
+                    && s.ActualStartAtUtc != null)
+                .Select(s => new { s.Id, s.Status })
+                .ToListAsync(cancellationToken);
+
+            if (started.Count == 0)
+            {
+                return new RecordingSummaryDto();
+            }
+
+            var startedIds = started.Select(s => s.Id).ToList();
+            var recordedIds = (await _unitOfWork.Repository<SessionRecording>().Query()
+                .Where(r => startedIds.Contains(r.ClassSessionId))
+                .Select(r => r.ClassSessionId)
+                .Distinct()
+                .ToListAsync(cancellationToken))
+                .ToHashSet();
+
+            return new RecordingSummaryDto
+            {
+                Started = started.Count,
+                Succeeded = started.Count(s => recordedIds.Contains(s.Id)),
+                Failed = started.Count(s => s.Status != SessionStatus.InProgress && !recordedIds.Contains(s.Id)),
+                StillProcessing = started.Count(s => s.Status == SessionStatus.InProgress && !recordedIds.Contains(s.Id)),
             };
         }
 
@@ -253,6 +314,12 @@ namespace iucs.readernest.application.Services
                 .ToListAsync(cancellationToken))
                 .GroupBy(a => a.ClassSessionId)
                 .ToDictionary(g => g.Key, g => g.Count());
+            var recordedIds = (await _unitOfWork.Repository<SessionRecording>().Query()
+                .Where(r => sessionIds.Contains(r.ClassSessionId))
+                .Select(r => r.ClassSessionId)
+                .Distinct()
+                .ToListAsync(cancellationToken))
+                .ToHashSet();
 
             return sessions.Select(s => new SessionHistoryEntryDto
             {
@@ -267,6 +334,7 @@ namespace iucs.readernest.application.Services
                 Status = s.Status.ToString(),
                 AttendedCount = attendedCounts.TryGetValue(s.Id, out var count) ? count : 0,
                 ExpectedCount = 1 + (s.Batch?.Enrollments.Count(e => e.Status == EnrollmentStatus.Active) ?? 0),
+                HasRecording = recordedIds.Contains(s.Id),
             }).ToList();
         }
 
@@ -358,19 +426,23 @@ namespace iucs.readernest.application.Services
                 ? _prometheus.QueryScalarAsync(baseUrl, $"jitsi_jvb_current_endpoints{{instance=\"{instanceLabel}\"}}", cancellationToken)
                 : Task.FromResult<double?>(null);
 
-            // rn_jibri_instances_total/busy come from the textfile-collector autoscaler script
-            // on the Jitsi box (/opt/rn-monitoring/jibri-autoscale.sh) -- same publishing pattern
-            // as rn_service_active above, not a native Jibri Prometheus endpoint.
-            var jibriTotalTask = server.TracksLiveCalls
+            // rn_jibri_instances_total/busy come from each server's own textfile-collector
+            // autoscaler script (jibri-overflow-watcher.sh on the Jitsi box, jibri-worker-autoscale.sh
+            // on the recording worker) -- same publishing pattern as rn_service_active above, not a
+            // native Jibri Prometheus endpoint. Gated on HasJibriFleet, NOT TracksLiveCalls: the
+            // worker runs a real Jibri fleet but never tracks JVB/live-call metrics itself, so gating
+            // this on TracksLiveCalls (as it used to be) silently hid every recorder detail for it.
+            var hasJibriFleet = !string.IsNullOrWhiteSpace(server.JibriAutoscaleScript);
+            var jibriTotalTask = hasJibriFleet
                 ? _prometheus.QueryScalarAsync(baseUrl, $"rn_jibri_instances_total{{instance=\"{instanceLabel}\"}}", cancellationToken)
                 : Task.FromResult<double?>(null);
-            var jibriBusyTask = server.TracksLiveCalls
+            var jibriBusyTask = hasJibriFleet
                 ? _prometheus.QueryScalarAsync(baseUrl, $"rn_jibri_instances_busy{{instance=\"{instanceLabel}\"}}", cancellationToken)
                 : Task.FromResult<double?>(null);
-            var jibriMinTask = server.TracksLiveCalls
+            var jibriMinTask = hasJibriFleet
                 ? _prometheus.QueryScalarAsync(baseUrl, $"rn_jibri_min_replicas{{instance=\"{instanceLabel}\"}}", cancellationToken)
                 : Task.FromResult<double?>(null);
-            var jibriMaxTask = server.TracksLiveCalls
+            var jibriMaxTask = hasJibriFleet
                 ? _prometheus.QueryScalarAsync(baseUrl, $"rn_jibri_max_replicas{{instance=\"{instanceLabel}\"}}", cancellationToken)
                 : Task.FromResult<double?>(null);
 
@@ -387,12 +459,29 @@ namespace iucs.readernest.application.Services
             var sendingVideoTask = jvbMetric("jitsi_jvb_endpoints_sending_video");
             var stressTask = jvbMetric("jitsi_jvb_stress");
             var jvbHealthyTask = jvbMetric("jitsi_jvb_healthy");
+            // jitsi_jvb_ice_succeeded(_relayed)_total come from the same native JVB endpoint --
+            // "relayed" means the winning ICE candidate pair used the Cloudflare TURN fallback
+            // (see turn-credentials-refresh.sh) instead of a direct UDP path, i.e. this
+            // participant would likely have had no working audio/video before that fix.
+            var iceSucceededTask = jvbMetric("jitsi_jvb_ice_succeeded_total");
+            var iceSucceededRelayedTask = jvbMetric("jitsi_jvb_ice_succeeded_relayed_total");
+
+            // rn_turn_credentials_* come from the same textfile-collector mechanism as
+            // rn_service_active -- published by turn-credentials-refresh.sh each time it runs
+            // (see /opt/rn-monitoring/turn-credentials-refresh.sh on the Jitsi box).
+            var turnRefreshedTask = server.TracksLiveCalls
+                ? _prometheus.QueryScalarAsync(baseUrl, $"rn_turn_credentials_refreshed_timestamp_seconds{{instance=\"{instanceLabel}\"}}", cancellationToken)
+                : Task.FromResult<double?>(null);
+            var turnTtlTask = server.TracksLiveCalls
+                ? _prometheus.QueryScalarAsync(baseUrl, $"rn_turn_credentials_ttl_seconds{{instance=\"{instanceLabel}\"}}", cancellationToken)
+                : Task.FromResult<double?>(null);
 
             await Task.WhenAll(
                 upTask, freshnessTask, cpuCoresTask, cpuUsageTask, memUsedPercentTask, memTotalTask, swapTotalTask, swapFreeTask,
                 diskUsedPercentTask, diskTotalTask, loadTask, uptimeTask, servicesTask, containerCpuTask, containerMemTask, conferencesTask, participantsTask,
                 netRxTask, netTxTask, diskReadTask, diskWriteTask,
                 rttTask, lossInTask, lossOutTask, bitrateInTask, bitrateOutTask, sendingAudioTask, sendingVideoTask, stressTask, jvbHealthyTask,
+                iceSucceededTask, iceSucceededRelayedTask, turnRefreshedTask, turnTtlTask,
                 jibriTotalTask, jibriBusyTask, jibriMinTask, jibriMaxTask);
 
             var up = await upTask;
@@ -403,9 +492,13 @@ namespace iucs.readernest.application.Services
                     Name = server.Name,
                     Hostname = server.Hostname,
                     Reachable = false,
-                    Error = up is null
-                        ? "No data — this server isn't being scraped yet (check the Prometheus target)."
-                        : "node-exporter on this server is down or unreachable.",
+                    IsOnDemand = server.IsOnDemand,
+                    ConfiguredServices = server.Services,
+                    Error = server.IsOnDemand
+                        ? "Standby — this is on-demand burst capacity, created automatically only during a scheduled peak."
+                        : up is null
+                            ? "No data — this server isn't being scraped yet (check the Prometheus target)."
+                            : "node-exporter on this server is down or unreachable.",
                 };
             }
 
@@ -456,6 +549,22 @@ namespace iucs.readernest.application.Services
                 }
                 : null;
 
+            var turnRefreshedAt = await turnRefreshedTask;
+            var iceSucceeded = await iceSucceededTask ?? 0;
+            var iceSucceededRelayed = await iceSucceededRelayedTask ?? 0;
+            TurnStatusDto? turnStatus = server.TracksLiveCalls && turnRefreshedAt is not null
+                ? new TurnStatusDto
+                {
+                    LastRefreshedAtUtc = DateTimeOffset.FromUnixTimeSeconds((long)turnRefreshedAt.Value).UtcDateTime,
+                    SecondsSinceRefresh = Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeSeconds() - turnRefreshedAt.Value),
+                    CredentialsTtlSeconds = await turnTtlTask ?? 0,
+                    CredentialsHealthy = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - turnRefreshedAt.Value < (await turnTtlTask ?? 86400),
+                    IceSucceededTotal = (long)iceSucceeded,
+                    IceSucceededRelayedTotal = (long)iceSucceededRelayed,
+                    RelayedUsagePercent = iceSucceeded > 0 ? Math.Round(iceSucceededRelayed / iceSucceeded * 100, 1) : 0,
+                }
+                : null;
+
             var now = DateTime.UtcNow;
             var historyStart = now.AddHours(-1);
             var historyStep = TimeSpan.FromMinutes(2);
@@ -465,13 +574,28 @@ namespace iucs.readernest.application.Services
             var memHistoryTask = _prometheus.QueryRangeAsync(
                 baseUrl, $"100 * (1 - node_memory_MemAvailable_bytes{{instance=\"{instanceLabel}\"}} / node_memory_MemTotal_bytes{{instance=\"{instanceLabel}\"}})",
                 historyStart, now, historyStep, cancellationToken);
+            // Same ~1h/2min window as CPU/memory history, but for recorder occupancy --
+            // requested after several live incidents (recording dropped, voice glitching)
+            // where the only capacity signal available was a single "at capacity" snapshot
+            // or a 7-day-average percentage (recordingAtCapacity7dTask below), neither of
+            // which shows *when* a specific incident's capacity crunch actually happened.
+            var recorderBusyHistoryTask = hasJibriFleet
+                ? _prometheus.QueryRangeAsync(baseUrl, $"rn_jibri_instances_busy{{instance=\"{instanceLabel}\"}}", historyStart, now, historyStep, cancellationToken)
+                : Task.FromResult<IReadOnlyList<(DateTime Timestamp, double Value)>>([]);
+            var recorderTotalHistoryTask = hasJibriFleet
+                ? _prometheus.QueryRangeAsync(baseUrl, $"rn_jibri_instances_total{{instance=\"{instanceLabel}\"}}", historyStart, now, historyStep, cancellationToken)
+                : Task.FromResult<IReadOnlyList<(DateTime Timestamp, double Value)>>([]);
             // deriv() is a real linear-regression rate over the window, not a naive two-point
             // delta -- exactly Prometheus's own tool for "is this trending toward a problem."
             var diskAvailBytesTask = _prometheus.QueryScalarAsync(
                 baseUrl, $"node_filesystem_avail_bytes{{instance=\"{instanceLabel}\",mountpoint=\"/\",fstype!=\"tmpfs\"}}", cancellationToken);
             var diskTrendTask = _prometheus.QueryScalarAsync(
-                baseUrl, $"deriv(node_filesystem_avail_bytes{{instance=\"{instanceLabel}\",mountpoint=\"/\",fstype!=\"tmpfs\"}}[6h])", cancellationToken);
-            await Task.WhenAll(cpuHistoryTask, memHistoryTask, diskAvailBytesTask, diskTrendTask);
+                // 24h, not 6h: recordings land in the evening class peak, so a 6h window taken then
+                // extrapolates the busiest stretch of the day as if it were constant (showed "disk
+                // full in ~5 days" on the Recording Worker while its real average growth was ~9GB/day,
+                // i.e. ~25 days). A full day averages the peak and the quiet hours.
+                baseUrl, $"deriv(node_filesystem_avail_bytes{{instance=\"{instanceLabel}\",mountpoint=\"/\",fstype!=\"tmpfs\"}}[24h])", cancellationToken);
+            await Task.WhenAll(cpuHistoryTask, memHistoryTask, diskAvailBytesTask, diskTrendTask, recorderBusyHistoryTask, recorderTotalHistoryTask);
 
             // Week-over-week trend, not a fake day-countdown -- CPU and recording load are
             // bursty real-time signals, unlike disk fill's smooth accumulation, so a linear
@@ -485,7 +609,7 @@ namespace iucs.readernest.application.Services
             var cpuAvgPrev7dTask = _prometheus.QueryScalarAsync(baseUrl, cpuAvgExpr(" offset 7d"), cancellationToken);
             var cpuPeak7dTask = _prometheus.QueryScalarAsync(
                 baseUrl, $"max_over_time((100 - (avg(rate(node_cpu_seconds_total{{instance=\"{instanceLabel}\",mode=\"idle\"}}[5m])) * 100))[7d:15m])", cancellationToken);
-            var recordingAtCapacity7dTask = server.TracksLiveCalls
+            var recordingAtCapacity7dTask = hasJibriFleet
                 ? _prometheus.QueryScalarAsync(
                     baseUrl, $"avg_over_time((rn_jibri_instances_busy{{instance=\"{instanceLabel}\"}} >= bool rn_jibri_max_replicas{{instance=\"{instanceLabel}\"}})[7d:1m]) * 100", cancellationToken)
                 : Task.FromResult<double?>(null);
@@ -520,6 +644,8 @@ namespace iucs.readernest.application.Services
                 Name = server.Name,
                 Hostname = server.Hostname,
                 Reachable = true,
+                IsOnDemand = server.IsOnDemand,
+                ConfiguredServices = server.Services,
                 UptimeSeconds = (long)(await uptimeTask ?? 0),
                 LoadAverage1m = await loadTask ?? 0,
                 CpuCores = (int)(await cpuCoresTask ?? 0),
@@ -539,6 +665,7 @@ namespace iucs.readernest.application.Services
                 CpuHistory = (await cpuHistoryTask).Select(p => new TimeSeriesPointDto { Timestamp = p.Timestamp, Value = Clamp(p.Value) }).ToList(),
                 MemoryHistory = (await memHistoryTask).Select(p => new TimeSeriesPointDto { Timestamp = p.Timestamp, Value = Clamp(p.Value) }).ToList(),
                 CallQuality = callQuality,
+                TurnStatus = turnStatus,
                 DiskForecast = diskForecast,
                 ContainerMetrics = containerMetrics,
                 CapacityTrend = capacityTrend,
@@ -551,13 +678,15 @@ namespace iucs.readernest.application.Services
                     : null,
                 // No data (jibriTotal null) means the autoscaler script hasn't published a
                 // metrics file yet on this box -- surface as absent, not "0 recorders".
-                RecorderStatus = server.TracksLiveCalls && jibriTotal is not null
+                RecorderStatus = hasJibriFleet && jibriTotal is not null
                     ? new RecorderStatusDto
                     {
                         TotalInstances = (int)jibriTotal.Value,
                         BusyInstances = (int)(await jibriBusyTask ?? 0),
                         MinInstances = (int)(await jibriMinTask ?? 1),
                         MaxInstances = (int)(await jibriMaxTask ?? jibriTotal.Value),
+                        BusyHistory = (await recorderBusyHistoryTask).Select(p => new TimeSeriesPointDto { Timestamp = p.Timestamp, Value = Math.Max(0, p.Value) }).ToList(),
+                        TotalHistory = (await recorderTotalHistoryTask).Select(p => new TimeSeriesPointDto { Timestamp = p.Timestamp, Value = Math.Max(0, p.Value) }).ToList(),
                     }
                     : null,
             };

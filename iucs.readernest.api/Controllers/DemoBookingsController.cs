@@ -1,10 +1,12 @@
 using System.Security.Claims;
 using iucs.readernest.api.Auth;
 using iucs.readernest.application.Dto.Admission;
+using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace iucs.readernest.api.Controllers
 {
@@ -114,6 +116,18 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _demoBookingService.ReassignTeacherAsync(id, request, cancellationToken));
         }
 
+        /// <summary>Move a still-scheduled demo to a new date/time. Notifies the parent, invitees
+        /// and teacher with the new time, same as resend-link.</summary>
+        [HttpPut("{id:guid}/reschedule")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<DemoBookingDto>> Reschedule(
+            Guid id,
+            RescheduleSessionRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _demoBookingService.RescheduleAsync(id, request, cancellationToken));
+        }
+
         /// <summary>Manually re-send the demo's join link to the parent, invitees and teacher.</summary>
         [HttpPost("{id:guid}/resend-link")]
         [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
@@ -123,9 +137,17 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>
-        /// A short, shareable link to the parent's join link for this demo -- the raw form
-        /// carries a full signed JWT in its fragment, which reads as broken/suspicious pasted
-        /// into WhatsApp or email. For staff to copy and share manually.
+        /// The parent's join link for this demo -- a stable URL (no JWT dangling off the end
+        /// that reads as broken/suspicious pasted into WhatsApp or email) staff can copy and
+        /// share manually. Points at this controller's own public <see cref="Join"/> redirect,
+        /// which re-resolves the room/domain/token fresh on every click and never expires --
+        /// unlike the old short-link wrapper this replaced, copying it now versus a parent
+        /// opening it next month behave identically instead of the latter silently 404-ing.
+        /// Also returns a genuinely short /m/{slug} form of that same stable URL (staff asked
+        /// for one directly, e.g. for WhatsApp/SMS where every character counts) -- it wraps
+        /// <see cref="Join"/> itself, not a baked token, so it inherits the same never-stale
+        /// behavior; only the shortener's own row (effectively permanent -- 10 years out) ever
+        /// needs renewing, which in practice it won't.
         /// </summary>
         [HttpGet("{id:guid}/join-link")]
         [HasPermission(PermissionModule.Admission, PermissionAction.View)]
@@ -134,11 +156,50 @@ namespace iucs.readernest.api.Controllers
             [FromServices] IShortLinkService shortLinks,
             CancellationToken cancellationToken)
         {
-            var (joinUrl, expiresAtUtc) = await _demoBookingService.GetJoinLinkAsync(id, cancellationToken);
-            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-            var slug = await shortLinks.CreateAsync(joinUrl, expiresAtUtc, userId, cancellationToken);
+            var joinUrl = await _demoBookingService.GetJoinLinkAsync(id, cancellationToken);
+            var userId = Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+            var slug = await shortLinks.CreateAsync(joinUrl, DateTime.UtcNow.AddYears(10), userId, cancellationToken);
             var apiBaseUrl = $"{Request.Scheme}://{Request.Host}";
-            return Ok(new { joinUrl = $"{apiBaseUrl}/m/{slug}", expiresAtUtc });
+            return Ok(new { joinUrl, shortUrl = $"{apiBaseUrl}/m/{slug}" });
+        }
+
+        /// <summary>
+        /// The link a parent/invitee actually clicks -- from the confirmation email, a resend, or
+        /// staff's "Copy Link". Deliberately public and unauthenticated (a demo lead has no
+        /// account to sign in with) and deliberately NOT a static URL: it resolves the current
+        /// Jitsi domain and mints a fresh signed token on every single hit, so it can never go
+        /// stale the way a URL with those baked in at send time could -- reported live as a
+        /// parent's join link 404-ing while the teacher, who always re-resolves fresh through
+        /// the authenticated app, kept joining fine. Never expires -- see
+        /// ResolveLiveJoinUrlAsync's own remarks. <paramref name="p"/> selects one of the
+        /// booking's extra invitees; omitted, this is the primary parent's own link.
+        /// </summary>
+        [HttpGet("{id:guid}/join")]
+        [EnableRateLimiting("demo-join")]
+        public async Task<IActionResult> Join(Guid id, [FromQuery] Guid? p, CancellationToken cancellationToken)
+        {
+            // A share channel's own link-preview bot, or an intermediary proxy, has no business
+            // caching this redirect -- see the matching comment on GET /m/{slug} in Program.cs.
+            Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+            Response.Headers.Pragma = "no-cache";
+
+            var url = await _demoBookingService.ResolveLiveJoinUrlAsync(id, p, cancellationToken);
+            return url is null
+                ? NotFound("This demo booking (or that invitee) no longer exists.")
+                : Redirect(url);
+        }
+
+        /// <summary>
+        /// Permanently removes a demo booking -- a test entry, a mistaken double-booking -- and
+        /// frees the teacher's slot. Refused once the lead is already invoiced or Enrolled; use
+        /// its conversion status for that instead (see <see cref="UpdateConversionStatus"/>).
+        /// </summary>
+        [HttpDelete("{id:guid}")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Delete)]
+        public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
+        {
+            await _demoBookingService.DeleteAsync(id, cancellationToken);
+            return NoContent();
         }
 
         /// <summary>Every active teacher's load around this booking's slot, for the reassignment page.</summary>

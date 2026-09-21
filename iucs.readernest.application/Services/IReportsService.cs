@@ -1,4 +1,5 @@
 using iucs.readernest.application.Dto.Reports;
+using iucs.readernest.domain.Enums;
 
 namespace iucs.readernest.application.Services
 {
@@ -28,6 +29,16 @@ namespace iucs.readernest.application.Services
         /// or the recipient row doesn't belong to them.</summary>
         Task ReplyToBulkEmailAsync(
             Guid parentUserId, Guid bulkEmailRecipientId, ReplyToBulkEmailRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Every individual (non-Bulk-Email) email ever sent, newest first -- the "Bulk Email
+        /// History" screen's other view, for when staff want to see everything else that went
+        /// out rather than just Bulk Email sends. Optional <paramref name="type"/> narrows to one
+        /// NotificationType; omitted returns every type. Capped at <paramref name="take"/> so a
+        /// deployment with years of reminders/confirmations can't return an unbounded table.
+        /// </summary>
+        Task<IReadOnlyList<EmailHistoryItemDto>> GetEmailHistoryAsync(
+            NotificationType? type, int take, CancellationToken cancellationToken = default);
 
         /// <summary>Teacher performance view: sessions delivered, no-shows, attendance, summaries.</summary>
         Task<IReadOnlyList<TeacherPerformanceDto>> GetTeacherPerformanceAsync(CancellationToken cancellationToken = default);

@@ -27,6 +27,7 @@ using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Communication;
 using iucs.readernest.domain.Entities.Payouts;
 using iucs.readernest.domain.Entities.Quizzes;
+using iucs.readernest.domain.Entities.Resources;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Settings;
 using iucs.readernest.domain.Entities.Users;
@@ -66,7 +67,7 @@ namespace iucs.readernest.tests
 
         private readonly FakeInvoicePdfGenerator _invoicePdfGenerator = new();
 
-        private UserService CreateUserService() => new(_db.UnitOfWork, _hasher, _notifications, _emailTemplates, _auditLog, _emailSender, _whatsAppSender, _smsSender, _bulkFileReader, NullLogger<UserService>.Instance);
+        private UserService CreateUserService() => new(_db.UnitOfWork, _hasher, _notifications, _emailTemplates, _auditLog, _emailSender, _whatsAppSender, _smsSender, _bulkFileReader, new AesGcmPinVault(Microsoft.Extensions.Options.Options.Create(new PinVaultOptions { Key = "test-key-test-key-test-key-test-key" })), NullLogger<UserService>.Instance);
 
         private CourseService CreateCourseService() => new(_db.UnitOfWork, _auditLog, _bulkFileReader);
 
@@ -80,11 +81,13 @@ namespace iucs.readernest.tests
 
         private StoreService CreateStoreService() => new(_db.UnitOfWork, _auditLog, CreateDemoBookingService());
 
+        private ClassSessionEventLogService CreateEventLogService() => new(_db.UnitOfWork);
+
         private SessionService CreateSessionService() =>
-            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, new FakeJitsiTokenService(), new FakeTokenService());
+            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, new FakeJitsiTokenService(), CreateEventLogService(), new FakeTokenService());
 
         private SessionService CreateSessionService(FakeJitsiTokenService jitsiTokens) =>
-            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, jitsiTokens, new FakeTokenService());
+            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, jitsiTokens, CreateEventLogService(), new FakeTokenService());
 
         private BillingService CreateBillingService() =>
             new(_db.UnitOfWork, _auditLog, new FakePaymentGateway(), _notifications, _db.CurrentUser, _bulkFileReader, _invoicePdfGenerator);
@@ -99,14 +102,14 @@ namespace iucs.readernest.tests
         private PermissionModuleService CreatePermissionModuleService() => new(_db.UnitOfWork, _auditLog);
 
         private AcademicOpsService CreateAcademicOpsService() =>
-            new(_db.UnitOfWork, _auditLog, _notifications, _db.CurrentUser, CreateSessionService());
+            new(_db.UnitOfWork, _auditLog, _notifications, _db.CurrentUser, CreateSessionService(), CreateEventLogService());
 
         private GamificationService CreateGamificationService() => new(_db.UnitOfWork, CreateSessionService());
 
         private ResourceService CreateResourceService() => new(_db.UnitOfWork, _auditLog);
 
         private DemoBookingService CreateDemoBookingService() =>
-            new(_db.UnitOfWork, _auditLog, _emailSender, _emailTemplates, new FakeCrmNotifier(), new FakeJitsiTokenService(), _notifications, CreateUserService(), NullLogger<DemoBookingService>.Instance);
+            new(_db.UnitOfWork, _auditLog, _emailSender, _emailTemplates, new FakeCrmNotifier(), new FakeJitsiTokenService(), _notifications, CreateUserService(), CreateSessionService(), new ConfigurationBuilder().Build(), NullLogger<DemoBookingService>.Instance);
 
         private QuizQuestionService CreateQuizQuestionService() => new(_db.UnitOfWork, _auditLog, CreateSessionService(), _bulkFileReader);
 
@@ -235,6 +238,141 @@ namespace iucs.readernest.tests
 
             await Assert.ThrowsAsync<ForbiddenException>(
                 () => service.GetJitsiJoinAsync(session.Id, billingOnlySubAdmin.Id));
+        }
+
+        /// <summary>Shared setup for the Guest Link tests below: a batch+session within the
+        /// join window (SeedBatchWithSessionAsync's own default is a day out, too far for
+        /// GetGuestJoinAsync's -10min/scheduled-end window) plus one actively enrolled child.</summary>
+        private async Task<(ClassSession Session, Child Child)> SeedGuestLinkFixtureAsync()
+        {
+            var (batch, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            session.ScheduledStartAtUtc = DateTime.UtcNow.AddMinutes(5);
+            session.ScheduledEndAtUtc = DateTime.UtcNow.AddMinutes(50);
+            session.MeetingRoomId = "guest-link-room";
+
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            parentUser.FirstName = "Priya";
+            parentUser.LastName = "Sharma";
+            parentUser.Phone = "9876500000";
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var child = new Child { ParentProfile = parentProfile, FirstName = "Aarav", LastName = "Sharma" };
+            _db.Context.AddRange(parentProfile, child);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.Add(new BatchEnrollment { BatchId = batch.Id, ChildId = child.Id, Status = EnrollmentStatus.Active });
+            await _db.Context.SaveChangesAsync();
+
+            return (session, child);
+        }
+
+        [Fact]
+        public async Task GuestLink_Generic_RoundTripsToAGuestJoin_WithPrejoinShown()
+        {
+            var (session, _) = await SeedGuestLinkFixtureAsync();
+            var service = CreateSessionService();
+
+            var link = await service.CreateGuestLinkAsync(session.Id, childId: null);
+            var join = await service.GetGuestJoinAsync(link.Token);
+
+            Assert.Equal("guest-link-room", join.Room);
+            Assert.Equal("Guest", join.DisplayName);
+            Assert.False(join.SkipPrejoin);
+            Assert.Null(join.ChildId);
+            // The ClassroomHub token that lets the landing page join the real interactive
+            // classroom (whiteboard/quiz/roster), not just a bare Jitsi call -- both link types
+            // get one, not just the student-bound case below.
+            Assert.False(string.IsNullOrEmpty(join.HubToken));
+        }
+
+        [Fact]
+        public async Task GuestLink_StudentBound_RoundTripsWithNamePresetAndSkipsPrejoin_AndMarksAttendance()
+        {
+            // The "auto-fetch name, skip prejoin, auto-mark attendance" half of the client's
+            // spec (2026-09-15 follow-up) — the generic link above deliberately does none of
+            // this; a teacher marks that case's attendance by hand instead.
+            var (session, child) = await SeedGuestLinkFixtureAsync();
+            var service = CreateSessionService();
+
+            var link = await service.CreateGuestLinkAsync(session.Id, child.Id);
+            var join = await service.GetGuestJoinAsync(link.Token);
+
+            Assert.Equal("Aarav Sharma", join.DisplayName);
+            Assert.True(join.SkipPrejoin);
+            Assert.Equal(child.Id, join.ChildId);
+            Assert.False(string.IsNullOrEmpty(join.HubToken));
+
+            // Mirrors SessionsController.GuestJoin's own split call (SessionService can't depend
+            // on IAcademicOpsService directly -- see that controller method's doc comment).
+            await CreateAcademicOpsService().CaptureGuestJoinAttendanceAsync(join.SessionId, join.ChildId!.Value);
+
+            var attendance = Assert.Single(_db.Context.SessionAttendances.Where(a => a.ChildId == child.Id));
+            Assert.Equal(AttendanceStatus.Present, attendance.Status);
+        }
+
+        [Fact]
+        public async Task GuestLink_StudentPicker_ListsTheBatchsActiveEnrollments_WithParentContact()
+        {
+            var (session, child) = await SeedGuestLinkFixtureAsync();
+
+            var students = await CreateSessionService().GetGuestLinkStudentsAsync(session.Id);
+
+            var row = Assert.Single(students);
+            Assert.Equal(child.Id, row.ChildId);
+            Assert.Equal("Aarav Sharma", row.ChildName);
+            Assert.Equal("Priya Sharma", row.ParentName);
+            Assert.Equal("9876500000", row.ParentPhone);
+        }
+
+        [Fact]
+        public async Task GuestLink_RejectsAnInvalidToken_AndACompletedSession_EvenWithinTheTokensOwnExpiry()
+        {
+            // The client's own requirement: the link must die the instant the class is marked
+            // Completed (even early), not just at some fixed token expiry -- this is what makes
+            // that actually true: GetGuestJoinAsync re-checks live status on every open rather
+            // than trusting the token's own (deliberately generous) expiry bound.
+            var (session, _) = await SeedGuestLinkFixtureAsync();
+            var service = CreateSessionService();
+            var link = await service.CreateGuestLinkAsync(session.Id, childId: null);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.GetGuestJoinAsync("not-a-real-token"));
+
+            session.Status = SessionStatus.Completed;
+            await _db.Context.SaveChangesAsync();
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.GetGuestJoinAsync(link.Token));
+        }
+
+        [Fact]
+        public async Task GuestLink_CreateSucceeds_ForASessionThatEndedMoreThanADayAgo()
+        {
+            // Bug caught live in production 2026-09-16: opening "Copy Guest Link" on an old,
+            // already-over session (nothing in the admin UI stops that) used to throw an
+            // unhandled exception -- CreateGuestLinkAsync minted the token's expiry as
+            // ScheduledEndAtUtc.AddDays(1), which lands BEFORE "now" once the session is more
+            // than a day in the past, and JwtSecurityToken's constructor requires expires to be
+            // after notBefore ("now"). Surfaced to the RM/admin as a generic 500
+            // ("An unexpected error occurred"), not the specific message an AppException would
+            // have shown.
+            var (session, _) = await SeedGuestLinkFixtureAsync();
+            session.ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-3);
+            session.ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-3).AddMinutes(45);
+            await _db.Context.SaveChangesAsync();
+
+            var link = await CreateSessionService().CreateGuestLinkAsync(session.Id, childId: null);
+
+            Assert.False(string.IsNullOrEmpty(link.Token));
+        }
+
+        [Fact]
+        public async Task GuestLink_CreateRejectsAChildNotActivelyEnrolledInThatSessionsBatch()
+        {
+            var (session, _) = await SeedGuestLinkFixtureAsync();
+            var strangerChildUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var strangerParent = new ParentProfile { UserId = strangerChildUser.Id };
+            var strangerChild = new Child { ParentProfile = strangerParent, FirstName = "Not", LastName = "Enrolled" };
+            _db.Context.AddRange(strangerParent, strangerChild);
+            await _db.Context.SaveChangesAsync();
+
+            await Assert.ThrowsAsync<DomainValidationException>(
+                () => CreateSessionService().CreateGuestLinkAsync(session.Id, strangerChild.Id));
         }
 
         [Fact]
@@ -784,6 +922,232 @@ namespace iucs.readernest.tests
             await Assert.ThrowsAsync<NotFoundException>(() => ops.CancelLeaveAsync(otherTeacherUser.Id, leave.Id));
         }
 
+        /// <summary>Seeds one teacher with `count` scheduled sessions, all safely beyond the
+        /// 6-hour leave cutoff, for the class-wise leave tests below.</summary>
+        private async Task<(TeacherProfile Teacher, List<ClassSession> Sessions)> SeedTeacherWithSessionsAsync(int count)
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: count, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync(t => t.Id == batch.TeacherProfileId);
+            var baseStart = DateTime.UtcNow.AddDays(10).Date.AddHours(9); // well beyond the 6-hour cutoff
+            var sessions = new List<ClassSession>();
+            for (var i = 0; i < count; i++)
+            {
+                var start = baseStart.AddHours(i);
+                var session = new ClassSession
+                {
+                    BatchId = batch.Id,
+                    TeacherProfileId = teacher.Id,
+                    Status = SessionStatus.Scheduled,
+                    ScheduledStartAtUtc = start,
+                    ScheduledEndAtUtc = start.AddMinutes(45),
+                };
+                _db.Context.ClassSessions.Add(session);
+                sessions.Add(session);
+            }
+            await _db.Context.SaveChangesAsync();
+            _db.CurrentUser.UserId = teacher.UserId;
+            return (teacher, sessions);
+        }
+
+        [Fact]
+        public async Task ClassWiseLeave_AutoApproves_AndCancelsExactlyThePickedSessions_WhenWithinAllowance()
+        {
+            var (teacher, sessions) = await SeedTeacherWithSessionsAsync(count: 3);
+            var ops = CreateAcademicOpsService();
+
+            await ops.SetLeaveAllowanceAsync(new SaveLeaveAllowanceRequest { TeacherProfileId = teacher.Id, MonthlyAllowance = 2 });
+            _db.Context.ChangeTracker.Clear();
+
+            var leave = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                SessionIds = new List<Guid> { sessions[0].Id, sessions[1].Id },
+                Reason = "Two of my three classes today",
+            });
+
+            Assert.True(leave.IsClassWise);
+            Assert.Equal(LeaveStatus.Approved, leave.Status);
+            Assert.Equal(2, leave.AffectedSessionCount);
+            Assert.Equal(2, leave.Sessions.Count);
+
+            _db.Context.ChangeTracker.Clear();
+            var refreshed = await _db.Context.ClassSessions.ToListAsync();
+            Assert.Equal(SessionStatus.Cancelled, refreshed.Single(s => s.Id == sessions[0].Id).Status);
+            Assert.Equal(SessionStatus.Cancelled, refreshed.Single(s => s.Id == sessions[1].Id).Status);
+            // The third class was never picked -- must stay untouched, proving cancellation
+            // targets exactly the selected sessions rather than sweeping a whole time window.
+            Assert.Equal(SessionStatus.Scheduled, refreshed.Single(s => s.Id == sessions[2].Id).Status);
+        }
+
+        [Fact]
+        public async Task ClassWiseLeave_FallsBackToPendingReview_WhenExceedingTheMonthlyAllowance()
+        {
+            var (teacher, sessions) = await SeedTeacherWithSessionsAsync(count: 2);
+            var ops = CreateAcademicOpsService();
+
+            await ops.SetLeaveAllowanceAsync(new SaveLeaveAllowanceRequest { TeacherProfileId = teacher.Id, MonthlyAllowance = 1 });
+            _db.Context.ChangeTracker.Clear();
+
+            var leave = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                SessionIds = sessions.Select(s => s.Id).ToList(),
+                Reason = "Both of my two classes today",
+            });
+
+            // 2 requested > 1 allowed -- not auto-approved, but not blocked either.
+            Assert.True(leave.IsClassWise);
+            Assert.Equal(LeaveStatus.Pending, leave.Status);
+            Assert.Equal(2, leave.AffectedSessionCount);
+
+            _db.Context.ChangeTracker.Clear();
+            var beforeApproval = await _db.Context.ClassSessions.ToListAsync();
+            Assert.All(beforeApproval, s => Assert.Equal(SessionStatus.Scheduled, s.Status));
+
+            _db.Context.ChangeTracker.Clear();
+            var reviewed = await ops.ReviewLeaveAsync(leave.Id, new ReviewLeaveRequest { Approve = true });
+            Assert.Equal(LeaveStatus.Approved, reviewed.Status);
+            Assert.Equal(2, reviewed.AffectedSessionCount);
+
+            _db.Context.ChangeTracker.Clear();
+            var afterApproval = await _db.Context.ClassSessions.ToListAsync();
+            Assert.All(afterApproval, s => Assert.Equal(SessionStatus.Cancelled, s.Status));
+        }
+
+        [Fact]
+        public async Task ClassWiseLeave_UsesDefaultAllowance_WhenTeacherHasNoOverrideOfHerOwn()
+        {
+            var (teacher, sessions) = await SeedTeacherWithSessionsAsync(count: 1);
+            var ops = CreateAcademicOpsService();
+
+            // No per-teacher row -- only the centre-wide default (null TeacherProfileId).
+            await ops.SetLeaveAllowanceAsync(new SaveLeaveAllowanceRequest { TeacherProfileId = null, MonthlyAllowance = 5 });
+            _db.Context.ChangeTracker.Clear();
+
+            var status = await ops.GetMyLeaveAllowanceStatusAsync(teacher.UserId);
+            Assert.Equal(5, status.MonthlyAllowance);
+            Assert.Equal(0, status.UsedThisMonth);
+            Assert.Equal(5, status.Remaining);
+
+            var leave = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                SessionIds = new List<Guid> { sessions[0].Id },
+                Reason = "One class",
+            });
+            Assert.Equal(LeaveStatus.Approved, leave.Status);
+        }
+
+        [Fact]
+        public async Task ClassWiseLeave_RejectsASessionThatIsNotHerOwn()
+        {
+            var (_, otherSessions) = await SeedTeacherWithSessionsAsync(count: 1);
+            var (teacher, _) = await SeedTeacherWithSessionsAsync(count: 1);
+            var ops = CreateAcademicOpsService();
+
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+                {
+                    SessionIds = new List<Guid> { otherSessions[0].Id },
+                    Reason = "Not mine",
+                }));
+        }
+
+        [Fact]
+        public async Task ClassWiseLeave_WithinSixHoursOfClass_IsBlocked()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync(t => t.Id == batch.TeacherProfileId);
+            var soon = DateTime.UtcNow.AddHours(2);
+            var session = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = teacher.Id,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = soon,
+                ScheduledEndAtUtc = soon.AddMinutes(45),
+            };
+            _db.Context.ClassSessions.Add(session);
+            await _db.Context.SaveChangesAsync();
+
+            var ops = CreateAcademicOpsService();
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+                {
+                    SessionIds = new List<Guid> { session.Id },
+                    Reason = "Too late",
+                }));
+        }
+
+        [Fact]
+        public async Task ClassWiseLeave_RejectsASessionAlreadyCoveredByAnotherPendingRequest()
+        {
+            var (teacher, sessions) = await SeedTeacherWithSessionsAsync(count: 1);
+            var ops = CreateAcademicOpsService();
+
+            // No allowance configured -- default is 0, so this lands Pending, still "holding"
+            // the session for the duplicate check below.
+            var first = await ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+            {
+                SessionIds = new List<Guid> { sessions[0].Id },
+                Reason = "First",
+            });
+            Assert.Equal(LeaveStatus.Pending, first.Status);
+
+            _db.Context.ChangeTracker.Clear();
+            var ex = await Assert.ThrowsAsync<ConflictException>(() =>
+                ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+                {
+                    SessionIds = new List<Guid> { sessions[0].Id },
+                    Reason = "Second, same class",
+                }));
+            Assert.Contains("already has a pending or approved leave request", ex.Message);
+        }
+
+        [Fact]
+        public async Task SubmitLeaveAsync_RejectsBothAWindowAndSpecificSessions_AndRejectsNeither()
+        {
+            var (teacher, sessions) = await SeedTeacherWithSessionsAsync(count: 1);
+            var ops = CreateAcademicOpsService();
+            var start = DateTime.UtcNow.AddDays(10);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest
+                {
+                    StartAtUtc = start,
+                    EndAtUtc = start.AddHours(1),
+                    SessionIds = new List<Guid> { sessions[0].Id },
+                    Reason = "Both given",
+                }));
+
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                ops.SubmitLeaveAsync(teacher.UserId, new SubmitLeaveRequest { Reason = "Neither given" }));
+        }
+
+        [Fact]
+        public async Task SetLeaveAllowanceAsync_RejectsANegativeAllowance()
+        {
+            var ops = CreateAcademicOpsService();
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                ops.SetLeaveAllowanceAsync(new SaveLeaveAllowanceRequest { MonthlyAllowance = -1 }));
+        }
+
+        [Fact]
+        public async Task SetLeaveAllowanceAsync_PerTeacherOverride_WinsOverTheDefault()
+        {
+            var (teacher, _) = await SeedTeacherWithSessionsAsync(count: 1);
+            var ops = CreateAcademicOpsService();
+
+            await ops.SetLeaveAllowanceAsync(new SaveLeaveAllowanceRequest { TeacherProfileId = null, MonthlyAllowance = 2 });
+            await ops.SetLeaveAllowanceAsync(new SaveLeaveAllowanceRequest { TeacherProfileId = teacher.Id, MonthlyAllowance = 7 });
+            _db.Context.ChangeTracker.Clear();
+
+            var status = await ops.GetMyLeaveAllowanceStatusAsync(teacher.UserId);
+            Assert.Equal(7, status.MonthlyAllowance);
+
+            var allowances = await ops.ListLeaveAllowancesAsync();
+            Assert.Equal(2, allowances.Count);
+            Assert.Contains(allowances, a => a.TeacherProfileId == null && a.MonthlyAllowance == 2 && a.TeacherName == "All teachers (default)");
+            Assert.Contains(allowances, a => a.TeacherProfileId == teacher.Id && a.MonthlyAllowance == 7);
+        }
+
         [Fact]
         public async Task CaptureAttendance_Rejoin_UpdatesRow_NeverDuplicates()
         {
@@ -1004,6 +1368,69 @@ namespace iucs.readernest.tests
             await CreateAcademicOpsService().CaptureJoinAttendanceAsync(session.Id, unrelatedParent.Id);
 
             Assert.Null((await _db.Context.DemoBookings.FindAsync(booking.Id))!.ParentJoinedAtUtc);
+        }
+
+        [Fact]
+        public async Task MarkNoShow_DemoSession_RelinksDemoBookingToTheCarriedForwardSession_AndResetsJoinFlags()
+        {
+            // Regression: the carried-forward session used to be created with no DemoBooking of
+            // its own — the booking stayed pointed at the old, now-terminal session, so the
+            // rescheduled demo slot looked exactly like a fresh no-show ("Teacher set, Type
+            // Demo, no student assigned") and NoShowDetectionBackgroundService flagged it a
+            // no-show again the following week regardless of who actually showed up, repeating
+            // indefinitely (until the carry-forward cap silently froze it).
+            var parentEmail = $"lead-{Guid.NewGuid():N}@test.com";
+            var participantEmail = $"guardian-{Guid.NewGuid():N}@test.com";
+            var (session, booking) = await SeedDemoSessionAsync(parentEmail, participantEmail);
+
+            // The student side already joined (this is a teacher no-show) — these flags describe
+            // attendance of the OLD session and must not leak onto the new one as if the parent/
+            // guardian had already joined a class they've never even been notified is happening.
+            booking.ParentJoinedAtUtc = DateTime.UtcNow;
+            booking.Participants.Single().HasJoined = true;
+            await _db.Context.SaveChangesAsync();
+
+            var carried = await CreateSessionService().MarkNoShowAsync(
+                session.Id, new MarkNoShowRequest { Party = NoShowParty.Teacher });
+
+            Assert.Equal(SessionStatus.CarriedForward, carried.Status);
+            var reloadedBooking = await _db.Context.DemoBookings.Include(b => b.Participants)
+                .FirstAsync(b => b.Id == booking.Id);
+            Assert.Equal(carried.Id, reloadedBooking.ClassSessionId);
+            Assert.Null(reloadedBooking.ParentJoinedAtUtc);
+            Assert.False(Assert.Single(reloadedBooking.Participants).HasJoined);
+        }
+
+        [Fact]
+        public async Task FlagOrphanedDemoSessionAsync_AlertsAdmins_WithoutTouchingStatusOrPayout()
+        {
+            // A Demo session with no DemoBooking linked to it at all (as opposed to one that
+            // exists but nobody joined) never had a student to begin with — flagging it a
+            // no-show would falsely dock the teacher and hide the real data problem behind a
+            // routine-looking no-show. This path must alert instead of touching status/payout.
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            var session = new ClassSession
+            {
+                BatchId = null,
+                TeacherProfile = teacher,
+                Type = SessionType.Demo,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-1),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-1).AddMinutes(30),
+            };
+            _db.Context.ClassSessions.Add(session);
+            await _db.Context.SaveChangesAsync();
+            var admin = await _db.SeedUserAsync($"admin-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+
+            await CreateSessionService().FlagOrphanedDemoSessionAsync(session.Id);
+
+            Assert.Contains(_emailSender.Sent, m => m.To == admin.Email && m.Subject.Contains("no student booked"));
+            var reloaded = await _db.Context.ClassSessions.FindAsync(session.Id);
+            Assert.Equal(SessionStatus.Scheduled, reloaded!.Status); // untouched — not a no-show
+            Assert.NotNull(reloaded.OrphanedDemoAlertSentAtUtc);
+            Assert.Empty(_db.Context.PayoutItems.ToList()); // no financial side effect
         }
 
         [Fact]
@@ -3104,8 +3531,172 @@ namespace iucs.readernest.tests
                 ScheduledEndAtUtc = DateTime.UtcNow.AddDays(1).AddMinutes(30),
             });
 
+            // The email carries the stable, self-resolving join redirect now (see
+            // DemoBookingService.BuildStableJoinUrl) rather than a raw Jitsi URL with the
+            // domain/token baked in at send time -- that's what let a parent's copy of the link
+            // go stale (and 404) independently of the teacher's own always-fresh join.
             var email = Assert.Single(_emailSender.Sent, e => e.To == "lead@test.com");
-            Assert.Contains($"https://meet.techmisai.com/{dto.MeetingRoomId}", email.Body);
+            Assert.Contains($"https://api.thereadernest.in/api/demo-bookings/{dto.Id}/join", email.Body);
+        }
+
+        [Fact]
+        public async Task ResolveLiveJoinUrl_ForThePrimaryParent_ResolvesTheCurrentRoom()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var demoService = CreateDemoBookingService();
+            var dto = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Lead Parent",
+                ParentEmail = "join-parent@test.com",
+                ChildName = "Kid",
+                TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddHours(1),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddHours(1).AddMinutes(30),
+            });
+
+            var url = await demoService.ResolveLiveJoinUrlAsync(dto.Id, participantId: null);
+
+            // 2026-09-15 fix: this now points at the app's own "/guest-join" bridge (so the
+            // parent gets the real interactive classroom, not a bare Jitsi call) rather than a
+            // raw Jitsi URL with the room id literally in it -- resolve the token it carries the
+            // same way the anonymous landing page would, to confirm it's still the right room.
+            Assert.NotNull(url);
+            Assert.Contains("/guest-join?token=", url);
+            var join = await CreateSessionService().GetGuestJoinAsync(ExtractGuestJoinToken(url!));
+            Assert.Equal(dto.MeetingRoomId, join.Room);
+            Assert.Equal("Lead Parent", join.DisplayName);
+            Assert.True(join.SkipPrejoin);
+        }
+
+        /// <summary>Pulls the ?token= value back out of a "/guest-join?token=..." URL, same as
+        /// the frontend's own useSearchParams().get("token") would.</summary>
+        private static string ExtractGuestJoinToken(string guestJoinUrl) =>
+            Uri.UnescapeDataString(guestJoinUrl.Split("token=")[1]);
+
+        [Fact]
+        public async Task ResolveLiveJoinUrl_UnknownBooking_ReturnsNull()
+        {
+            var url = await CreateDemoBookingService().ResolveLiveJoinUrlAsync(Guid.NewGuid(), participantId: null);
+
+            Assert.Null(url);
+        }
+
+        [Fact]
+        public async Task ResolveLiveJoinUrl_LongAfterTheOriginalSchedule_StillResolves()
+        {
+            // "No expire" per explicit product decision: a demo whose scheduled time is long
+            // past (missed, or just revisited later) must still resolve -- only a deleted
+            // booking (DeleteAsync) or an unrelated participant id return null now.
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var demoService = CreateDemoBookingService();
+            var dto = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Lead Parent",
+                ParentEmail = "long-past-parent@test.com",
+                ChildName = "Kid",
+                TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-90),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-90).AddMinutes(30),
+            });
+
+            var url = await demoService.ResolveLiveJoinUrlAsync(dto.Id, participantId: null);
+
+            // Same "no time-based cutoff" contract as before, now proven all the way through the
+            // new bridge token too: GetGuestJoinAsync deliberately skips its own expiry/live-
+            // status gate for a "named guest" (demo) link, unlike an RM-generated Guest Link.
+            Assert.NotNull(url);
+            var join = await CreateSessionService().GetGuestJoinAsync(ExtractGuestJoinToken(url!));
+            Assert.Equal(dto.MeetingRoomId, join.Room);
+        }
+
+        [Fact]
+        public async Task DeleteAsync_RemovesTheBooking_AndTheLinkStopsResolving()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var demoService = CreateDemoBookingService();
+            var dto = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Lead Parent",
+                ParentEmail = "to-delete@test.com",
+                ChildName = "Kid",
+                TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddHours(1),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddHours(1).AddMinutes(30),
+            });
+
+            await demoService.DeleteAsync(dto.Id);
+
+            await Assert.ThrowsAsync<NotFoundException>(() => demoService.GetAsync(dto.Id));
+            Assert.Null(await demoService.ResolveLiveJoinUrlAsync(dto.Id, participantId: null));
+
+            var session = await _db.Context.ClassSessions.SingleAsync(s => s.Id == dto.ClassSessionId);
+            Assert.Equal(SessionStatus.Cancelled, session.Status);
+        }
+
+        [Fact]
+        public async Task DeleteAsync_RejectsAnAlreadyEnrolledBooking()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var demoService = CreateDemoBookingService();
+            var dto = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Lead Parent",
+                ParentEmail = "already-enrolled@test.com",
+                ChildName = "Kid",
+                TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddHours(1),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddHours(1).AddMinutes(30),
+            });
+
+            var booking = await _db.Context.DemoBookings.SingleAsync(b => b.Id == dto.Id);
+            booking.ConversionStatus = ConversionStatus.Enrolled;
+            await _db.Context.SaveChangesAsync();
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => demoService.DeleteAsync(dto.Id));
+        }
+
+        [Fact]
+        public async Task ResolveLiveJoinUrl_ForAnInvitedParticipant_ResolvesTheirOwnLink_AndRejectsAnUnrelatedParticipantId()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var demoService = CreateDemoBookingService();
+            var dto = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Lead Parent",
+                ParentEmail = "primary-parent@test.com",
+                ChildName = "Kid",
+                TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddHours(1),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddHours(1).AddMinutes(30),
+                Participants = [new DemoParticipantDto { Name = "Grandma", Email = "grandma@test.com" }],
+            });
+
+            var participantId = _db.Context.DemoParticipants.Single(p => p.Email == "grandma@test.com").Id;
+            var participantUrl = await demoService.ResolveLiveJoinUrlAsync(dto.Id, participantId);
+            Assert.NotNull(participantUrl);
+
+            var unrelatedUrl = await demoService.ResolveLiveJoinUrlAsync(dto.Id, Guid.NewGuid());
+            Assert.Null(unrelatedUrl);
         }
 
         [Fact]
@@ -3118,7 +3709,8 @@ namespace iucs.readernest.tests
 
             var service = new DemoBookingService(
                 _db.UnitOfWork, _auditLog, new ThrowingEmailSender(), _emailTemplates,
-                new FakeCrmNotifier(), new FakeJitsiTokenService(), _notifications, CreateUserService(), NullLogger<DemoBookingService>.Instance);
+                new FakeCrmNotifier(), new FakeJitsiTokenService(), _notifications, CreateUserService(), CreateSessionService(),
+                new ConfigurationBuilder().Build(), NullLogger<DemoBookingService>.Instance);
 
             // An SMTP failure (confirmed in production logs as an uncaught exception here) must
             // not turn an already-committed booking into a 500 — the booking is real by the time
@@ -4242,6 +4834,187 @@ namespace iucs.readernest.tests
             }));
         }
 
+        // ---- UpdateFutureSchedule: partial schedule edits for a batch with existing sessions ----
+
+        [Fact]
+        public async Task UpdateFutureSchedule_TimeOnlyChange_MovesOnlyUpcomingSessions_LeavesCompletedAlone()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 3, includeSession: false);
+
+            var day7 = DateTime.UtcNow.AddDays(7);
+            var start1 = new DateTime(day7.Year, day7.Month, day7.Day, 10, 0, 0, DateTimeKind.Utc);
+            var day14 = DateTime.UtcNow.AddDays(14);
+            var start2 = new DateTime(day14.Year, day14.Month, day14.Day, 10, 0, 0, DateTimeKind.Utc);
+
+            var future1 = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = start1,
+                ScheduledEndAtUtc = start1.AddMinutes(45),
+            };
+            var future2 = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = start2,
+                ScheduledEndAtUtc = start2.AddMinutes(45),
+            };
+            var past = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Completed,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-3).AddMinutes(45),
+            };
+            _db.Context.AddRange(future1, future2, past);
+            await _db.Context.SaveChangesAsync();
+
+            await CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                Slots = [new GenerateScheduleSlot { DayOfWeek = start1.DayOfWeek, StartTimeUtc = new TimeOnly(2, 0) }],
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            var reloaded1 = await _db.Context.ClassSessions.FirstAsync(s => s.Id == future1.Id);
+            var reloaded2 = await _db.Context.ClassSessions.FirstAsync(s => s.Id == future2.Id);
+            var reloadedPast = await _db.Context.ClassSessions.FirstAsync(s => s.Id == past.Id);
+
+            Assert.Equal(new TimeOnly(2, 0), TimeOnly.FromDateTime(reloaded1.ScheduledStartAtUtc));
+            Assert.Equal(DateOnly.FromDateTime(start1), DateOnly.FromDateTime(reloaded1.ScheduledStartAtUtc));
+            Assert.Equal(new TimeOnly(2, 0), TimeOnly.FromDateTime(reloaded2.ScheduledStartAtUtc));
+            Assert.Equal(DateOnly.FromDateTime(start2), DateOnly.FromDateTime(reloaded2.ScheduledStartAtUtc));
+            Assert.Equal(TimeOnly.FromDateTime(past.ScheduledStartAtUtc), TimeOnly.FromDateTime(reloadedPast.ScheduledStartAtUtc));
+            Assert.Equal(SessionStatus.Completed, reloadedPast.Status);
+        }
+
+        [Fact]
+        public async Task UpdateFutureSchedule_WeekdayPatternChange_RegeneratesRemainingSessions_CancellingOldOnes()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 3, includeSession: false);
+
+            var day7 = DateTime.UtcNow.AddDays(7);
+            var oldDay = day7.DayOfWeek;
+            var oldSessions = new List<ClassSession>();
+            for (var i = 0; i < 3; i++)
+            {
+                var d = day7.AddDays(7 * i);
+                var start = new DateTime(d.Year, d.Month, d.Day, 10, 0, 0, DateTimeKind.Utc);
+                var s = new ClassSession
+                {
+                    BatchId = batch.Id,
+                    TeacherProfileId = batch.TeacherProfileId,
+                    Status = SessionStatus.Scheduled,
+                    ScheduledStartAtUtc = start,
+                    ScheduledEndAtUtc = start.AddMinutes(45),
+                };
+                oldSessions.Add(s);
+                _db.Context.Add(s);
+            }
+            await _db.Context.SaveChangesAsync();
+
+            var newDay = oldDay == DayOfWeek.Saturday ? DayOfWeek.Sunday : oldDay + 1;
+
+            await CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                Slots = [new GenerateScheduleSlot { DayOfWeek = newDay, StartTimeUtc = new TimeOnly(3, 0) }],
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            foreach (var old in oldSessions)
+            {
+                var reloaded = await _db.Context.ClassSessions.FirstAsync(s => s.Id == old.Id);
+                Assert.Equal(SessionStatus.Cancelled, reloaded.Status);
+                Assert.Equal("Schedule adjusted", reloaded.CancellationReason);
+            }
+
+            var newSessions = await _db.Context.ClassSessions
+                .Where(s => s.BatchId == batch.Id && s.Status == SessionStatus.Scheduled)
+                .ToListAsync();
+            Assert.Equal(3, newSessions.Count);
+            Assert.All(newSessions, s => Assert.Equal(newDay, s.ScheduledStartAtUtc.DayOfWeek));
+            Assert.All(newSessions, s => Assert.Equal(new TimeOnly(3, 0), TimeOnly.FromDateTime(s.ScheduledStartAtUtc)));
+        }
+
+        [Fact]
+        public async Task UpdateFutureSchedule_TimeOnlyChange_BlocksWhenNewTimeDoubleBooksTheTeacher()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var day7 = DateTime.UtcNow.AddDays(7);
+            var originalStart = new DateTime(day7.Year, day7.Month, day7.Day, 10, 0, 0, DateTimeKind.Utc);
+            var moving = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = originalStart,
+                ScheduledEndAtUtc = originalStart.AddMinutes(45),
+            };
+            _db.Context.Add(moving);
+
+            // A second batch with the SAME teacher, already booked at the time this update would
+            // move `moving` to — the cross-batch double-booking check this shares with
+            // BatchService.UpdateAsync's own duration/teacher cascades.
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var otherCourse = new Course
+            {
+                CourseCategory = category,
+                Name = "Other course",
+                Type = CourseType.Group,
+                DurationMinutes = 45,
+                Price = 100,
+                TotalSessions = 1,
+                DepartmentId = WellKnownDepartments.Phonics,
+            };
+            var otherBatch = new Batch { Course = otherCourse, TeacherProfileId = batch.TeacherProfileId, Name = "Other batch", Capacity = 5 };
+            var newStart = new DateTime(day7.Year, day7.Month, day7.Day, 14, 0, 0, DateTimeKind.Utc);
+            var busy = new ClassSession
+            {
+                Batch = otherBatch,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = newStart,
+                ScheduledEndAtUtc = newStart.AddMinutes(45),
+            };
+            _db.Context.AddRange(category, otherCourse, otherBatch, busy);
+            await _db.Context.SaveChangesAsync();
+
+            var ex = await Assert.ThrowsAsync<DomainValidationException>(() => CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                Slots = [new GenerateScheduleSlot { DayOfWeek = originalStart.DayOfWeek, StartTimeUtc = new TimeOnly(14, 0) }],
+            }));
+            Assert.Contains("already has a session", ex.Message);
+
+            _db.Context.ChangeTracker.Clear();
+            var reloaded = await _db.Context.ClassSessions.FirstAsync(s => s.Id == moving.Id);
+            Assert.Equal(TimeOnly.FromDateTime(originalStart), TimeOnly.FromDateTime(reloaded.ScheduledStartAtUtc));
+        }
+
+        [Fact]
+        public async Task UpdateFutureSchedule_ThrowsWhenTheBatchHasNoUpcomingSessions()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var past = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Completed,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-3).AddMinutes(45),
+            };
+            _db.Context.Add(past);
+            await _db.Context.SaveChangesAsync();
+
+            var ex = await Assert.ThrowsAsync<DomainValidationException>(() => CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                Slots = [new GenerateScheduleSlot { DayOfWeek = DayOfWeek.Monday, StartTimeUtc = new TimeOnly(4, 0) }],
+            }));
+            Assert.Contains("no upcoming sessions", ex.Message);
+        }
+
         [Fact]
         public async Task CompleteSession_AccruesPayoutEarning_AtConfiguredRate()
         {
@@ -4859,11 +5632,13 @@ namespace iucs.readernest.tests
             var emailTemplates2 = new EmailTemplateService(uow2, auditLog2, new MemoryCache(new MemoryCacheOptions()));
             var notifications2 = new NotificationService(uow2, _emailSender, emailTemplates2, NullLogger<NotificationService>.Instance);
             var userService2 = new UserService(
-                uow2, _hasher, notifications2, emailTemplates2, auditLog2, _emailSender, _whatsAppSender, _smsSender, _bulkFileReader, NullLogger<UserService>.Instance);
+                uow2, _hasher, notifications2, emailTemplates2, auditLog2, _emailSender, _whatsAppSender, _smsSender, _bulkFileReader, new AesGcmPinVault(Microsoft.Extensions.Options.Options.Create(new PinVaultOptions { Key = "test-key-test-key-test-key-test-key" })), NullLogger<UserService>.Instance);
+            var sessionService2 = new SessionService(
+                uow2, auditLog2, CreatePayoutService(), notifications2, _db.CurrentUser, new FakeJitsiTokenService(), new ClassSessionEventLogService(uow2), new FakeTokenService());
             var service1 = CreateStoreService();
             var service2 = new StoreService(
                 uow2, auditLog2,
-                new DemoBookingService(uow2, auditLog2, _emailSender, emailTemplates2, new FakeCrmNotifier(), new FakeJitsiTokenService(), notifications2, userService2, NullLogger<DemoBookingService>.Instance));
+                new DemoBookingService(uow2, auditLog2, _emailSender, emailTemplates2, new FakeCrmNotifier(), new FakeJitsiTokenService(), notifications2, userService2, sessionService2, new ConfigurationBuilder().Build(), NullLogger<DemoBookingService>.Instance));
 
             var request1 = new CreateStoreDemoBookingRequest
             {
@@ -5771,6 +6546,43 @@ namespace iucs.readernest.tests
             var dashboard = await new ParentPortalService(_db.UnitOfWork).GetDashboardAsync(parentUser.Id);
             var only = Assert.Single(dashboard.Children);
             Assert.Equal(kept.Id, only.ChildId);
+        }
+
+        [Fact]
+        public async Task ParentDashboard_EnrollmentGate_IsOpenForAParentWhoseChildWasImportedRatherThanApproved()
+        {
+            // A bulk-imported child (the wise.live migration) never passes through an approved
+            // enrollment form, so the stored flag stays false -- but the family is already
+            // onboarded and must not be sent back to fill the enrollment form again.
+            var parentUser = await _db.SeedUserAsync($"imp-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            _db.Context.Add(parentProfile);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.Children.Add(new Child { ParentProfileId = parentProfile.Id, FirstName = "Imported", LastName = "Kid", IsActive = true });
+            await _db.Context.SaveChangesAsync();
+            Assert.False((await _db.Context.ParentProfiles.FirstAsync(p => p.Id == parentProfile.Id)).EnrollmentFormCompleted);
+
+            var dashboard = await new ParentPortalService(_db.UnitOfWork).GetDashboardAsync(parentUser.Id);
+
+            Assert.True(dashboard.EnrollmentFormCompleted);
+        }
+
+        [Fact]
+        public async Task ParentDashboard_EnrollmentGate_StaysClosedWithoutAnActiveChild()
+        {
+            var noChildUser = await _db.SeedUserAsync($"nochild-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            _db.Context.Add(new ParentProfile { UserId = noChildUser.Id });
+
+            var inactiveUser = await _db.SeedUserAsync($"inactive-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var inactiveProfile = new ParentProfile { UserId = inactiveUser.Id };
+            _db.Context.Add(inactiveProfile);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.Children.Add(new Child { ParentProfileId = inactiveProfile.Id, FirstName = "Withdrawn", LastName = "Kid", IsActive = false });
+            await _db.Context.SaveChangesAsync();
+
+            var service = new ParentPortalService(_db.UnitOfWork);
+            Assert.False((await service.GetDashboardAsync(noChildUser.Id)).EnrollmentFormCompleted);
+            Assert.False((await service.GetDashboardAsync(inactiveUser.Id)).EnrollmentFormCompleted);
         }
 
         // ---- QA pass: cross-account isolation on the parent portal ----
@@ -6785,6 +7597,90 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task RevealPin_ReturnsTheSystemIssuedPin_AfterAReset_AndIsAudited()
+        {
+            var user = await _db.SeedUserAsync($"reveal-{Guid.NewGuid():N}@test.com", "old-pin", UserRole.Parent);
+            var service = CreateUserService();
+
+            var issued = await service.ResetPinAsync(user.Id);
+            var revealed = await service.RevealPinAsync(user.Id);
+
+            Assert.Equal(issued, revealed);
+            var stored = await _db.Context.Users.AsNoTracking().FirstAsync(u => u.Id == user.Id);
+            Assert.NotNull(stored.PinEncrypted);
+            Assert.DoesNotContain(issued, stored.PinEncrypted!); // ciphertext, not the digits
+            Assert.True(_hasher.Verify(issued, stored.PinHash)); // login still checks the hash
+            Assert.True(await _db.Context.AuditLogs.AnyAsync(a => a.EntityId == user.Id.ToString() && (a.ChangesJson ?? "").Contains("System-issued PIN viewed by admin")));
+        }
+
+        [Fact]
+        public async Task RevealPin_FailsWhenNoSystemIssuedPinIsStored()
+        {
+            // A seeded/legacy account, or one whose user chose their own PIN: only a hash exists.
+            var user = await _db.SeedUserAsync($"nopin-{Guid.NewGuid():N}@test.com", "chosen-by-user", UserRole.Parent);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => CreateUserService().RevealPinAsync(user.Id));
+        }
+
+        [Fact]
+        public async Task RevealPin_RefusesAnAdminTarget()
+        {
+            var admin = await _db.SeedUserAsync($"admin-{Guid.NewGuid():N}@test.com", "old-pin", UserRole.Admin);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => CreateUserService().RevealPinAsync(admin.Id));
+        }
+
+        [Fact]
+        public async Task UserChoosingTheirOwnPin_DropsTheStoredSystemIssuedOne()
+        {
+            var user = await _db.SeedUserAsync($"own-{Guid.NewGuid():N}@test.com", "old-pin", UserRole.Parent);
+            await CreateUserService().ResetPinAsync(user.Id);
+            Assert.NotNull((await _db.Context.Users.AsNoTracking().FirstAsync(u => u.Id == user.Id)).PinEncrypted);
+
+            var auth = CreateAuthService();
+            await auth.RequestPinResetAsync(new ForgotPinRequest { Email = user.Email });
+            var token = await _db.Context.PinResetTokens.FirstAsync(t => t.UserId == user.Id);
+            await auth.ResetPinAsync(new ResetPinRequest { Token = token.Token, NewPin = "7351" });
+
+            var stored = await _db.Context.Users.AsNoTracking().FirstAsync(u => u.Id == user.Id);
+            Assert.Null(stored.PinEncrypted); // the PIN they picked is never kept readable
+            await Assert.ThrowsAsync<DomainValidationException>(() => CreateUserService().RevealPinAsync(user.Id));
+        }
+
+        [Fact]
+        public void FrontendUrl_UsesTheCallersOrigin_OnlyWhenItIsAnAllowedOrigin()
+        {
+            var allowed = new[] { "https://thereadernest.in", "https://uat.thereadernest.in/" };
+            const string configured = "https://thereadernest.in";
+
+            // UAT site calling the UAT API (still configured with the production address).
+            Assert.Equal("https://uat.thereadernest.in", iucs.readernest.application.Helper.FrontendUrl.Resolve(configured, "https://uat.thereadernest.in", allowed));
+            // Production behaves exactly as before.
+            Assert.Equal("https://thereadernest.in", iucs.readernest.application.Helper.FrontendUrl.Resolve(configured, "https://thereadernest.in", allowed));
+            // An origin that is not on the allow-list can never steer the link.
+            Assert.Equal(configured, iucs.readernest.application.Helper.FrontendUrl.Resolve(configured, "https://evil.example.com", allowed));
+            // No Origin header (server-to-server, same-origin GET) -> configured value.
+            Assert.Equal(configured, iucs.readernest.application.Helper.FrontendUrl.Resolve(configured, null, allowed));
+            Assert.Equal("http://localhost:5173", iucs.readernest.application.Helper.FrontendUrl.Resolve(null, "", null));
+        }
+
+        [Fact]
+        public void PinVault_RoundTrips_RejectsTampering_AndAWrongKey()
+        {
+            iucs.readernest.application.Common.Interfaces.IPinVault Vault(string key) => new AesGcmPinVault(Microsoft.Extensions.Options.Options.Create(new PinVaultOptions { Key = key }));
+            var vault = Vault("first-secret-first-secret-first-secret");
+
+            var a = vault.Protect("4821");
+            var b = vault.Protect("4821");
+
+            Assert.NotEqual(a, b); // fresh nonce each time
+            Assert.Equal("4821", vault.TryReveal(a));
+            Assert.Null(Vault("other-secret-other-secret-other-secret").TryReveal(a));
+            Assert.Null(vault.TryReveal(a.Substring(0, a.Length - 4) + "AAAA")); // tampered
+            Assert.Null(vault.TryReveal("not-a-vault-value"));
+        }
+
+        [Fact]
         public async Task SetStatus_RefusesAnAdminTarget()
         {
             var admin = await _db.SeedUserAsync($"admin-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin, status: UserStatus.Active);
@@ -6975,6 +7871,85 @@ namespace iucs.readernest.tests
                 Assert.Equal(SubscriptionStatus.Expired, storedSubscription.Status);
                 Assert.Null(storedSubscription.NextBillingAtUtc); // and the billing job won't re-invoice
             }
+        }
+
+        /// <summary>
+        /// BatchService.DeleteAsync: a clean batch (no active students) is soft-deleted —
+        /// excluded from every future query via the global IsDeleted filter — and any
+        /// still-scheduled future session is cancelled the same way SetStatusAsync's
+        /// Dormant/Archived transition already does, so nothing is left dangling on a teacher's
+        /// calendar for a batch that no longer exists.
+        /// </summary>
+        [Fact]
+        public async Task DeleteBatch_WithNoActiveStudents_SoftDeletesIt_AndCancelsItsFutureSessions()
+        {
+            var (batch, _, futureSession) = await SeedBatchWithSessionAsync(totalSessions: 4);
+
+            await CreateBatchService().DeleteAsync(batch.Id);
+
+            var (context, _) = _db.CreateConcurrentSession();
+            using (context)
+            {
+                Assert.False(await context.Batches.AnyAsync(b => b.Id == batch.Id)); // excluded by the soft-delete filter
+                var stored = await context.Batches.IgnoreQueryFilters().FirstAsync(b => b.Id == batch.Id);
+                Assert.True(stored.IsDeleted);
+                Assert.NotNull(stored.DeletedAtUtc);
+
+                var session = await context.ClassSessions.FirstAsync(s => s.Id == futureSession.Id);
+                Assert.Equal(SessionStatus.Cancelled, session.Status);
+                Assert.Contains("deleted", session.CancellationReason!, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        /// <summary>
+        /// A batch with an active student can't just vanish — that student would be left
+        /// enrolled in a batch nobody can see or manage anymore. DeleteAsync must refuse instead
+        /// of silently orphaning them, mirroring UpdateAsync's own capacity-below-active-count
+        /// guard.
+        /// </summary>
+        [Fact]
+        public async Task DeleteBatch_WithAnActiveStudent_IsRefused()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 4, includeSession: false);
+            var parentUser = await _db.SeedUserAsync($"bd-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var child = new Child { ParentProfile = new ParentProfile { UserId = parentUser.Id }, FirstName = "Kid", LastName = "Y" };
+            _db.Context.Add(child);
+            _db.Context.Add(new BatchEnrollment { BatchId = batch.Id, Child = child, Status = EnrollmentStatus.Active });
+            await _db.Context.SaveChangesAsync();
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => CreateBatchService().DeleteAsync(batch.Id));
+
+            var (context, _) = _db.CreateConcurrentSession();
+            using (context)
+            {
+                Assert.True(await context.Batches.AnyAsync(b => b.Id == batch.Id)); // untouched
+            }
+        }
+
+        /// <summary>
+        /// ShortLinkService.CreateAsync is idempotent per (creator, target): the
+        /// personal-meeting-room and demo-booking "Copy Link" buttons both call it fresh on
+        /// every click, and before this fix each click minted a brand new slug even though the
+        /// underlying target never changed -- "your link" looked different every time it was
+        /// copied, with no one stable URL the way a Google Meet personal room link works. Also
+        /// confirms a genuinely different target, or a different creator, still gets its own row.
+        /// </summary>
+        [Fact]
+        public async Task ShortLink_SameTargetAndCreator_ReusesTheSameSlug()
+        {
+            var service = new ShortLinkService(_db.UnitOfWork);
+            var userId = Guid.NewGuid();
+            var farFuture = DateTime.UtcNow.AddYears(10);
+
+            var first = await service.CreateAsync("https://app.test/room-a", farFuture, userId);
+            var second = await service.CreateAsync("https://app.test/room-a", farFuture, userId);
+            Assert.Equal(first, second);
+
+            var differentTarget = await service.CreateAsync("https://app.test/room-b", farFuture, userId);
+            Assert.NotEqual(first, differentTarget);
+
+            var differentCreator = await service.CreateAsync("https://app.test/room-a", farFuture, Guid.NewGuid());
+            Assert.NotEqual(first, differentCreator);
         }
 
         /// <summary>
@@ -7418,6 +8393,33 @@ namespace iucs.readernest.tests
             }
         }
 
+        /// <summary>
+        /// "Bulk Email History"'s other view: every individual email, none of a Bulk Email's own
+        /// per-recipient copies (those stay covered by GetBulkEmailHistoryAsync/BlastDetail,
+        /// grouped by the send event), and the type filter actually narrows the list.
+        /// </summary>
+        [Fact]
+        public async Task GetEmailHistory_ExcludesBulkEmailCopies_AndFiltersByType()
+        {
+            var reports = new ReportsService(_db.UnitOfWork, _notifications);
+            var recipient = await _db.SeedUserAsync($"eh-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+
+            await _notifications.SendEmailAsync(recipient.Id, recipient.Email, NotificationType.PaymentReminder, "Fee due", "<p>Please pay.</p>");
+            await _notifications.SendEmailAsync(recipient.Id, recipient.Email, NotificationType.SessionReminder, "Class soon", "<p>See you soon.</p>");
+
+            var sender = await _db.SeedUserAsync($"eh-sender-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            await reports.SendBulkEmailAsync(sender.Id, new BulkEmailRequest { Subject = "Newsletter", Body = "<p>Hi</p>" });
+
+            var all = await reports.GetEmailHistoryAsync(null, 500);
+            Assert.DoesNotContain(all, e => e.Subject == "Newsletter");
+            Assert.Contains(all, e => e.Subject == "Fee due" && e.Type == NotificationType.PaymentReminder);
+            Assert.Contains(all, e => e.Subject == "Class soon" && e.Type == NotificationType.SessionReminder);
+
+            var onlyReminders = await reports.GetEmailHistoryAsync(NotificationType.SessionReminder, 500);
+            Assert.Single(onlyReminders, e => e.Subject == "Class soon");
+            Assert.DoesNotContain(onlyReminders, e => e.Subject == "Fee due");
+        }
+
         [Fact]
         public async Task TeacherPerformance_IncludesLatestPayoutSummary_StatusAndTotalOnly()
         {
@@ -7670,6 +8672,675 @@ namespace iucs.readernest.tests
                 Permissions = [new PermissionDto { Module = "DoesNotExist", CanView = true }],
             }));
             Assert.Contains("Unknown permission module", ex.Message);
+        }
+
+        // ---- Teacher-calendar cross-account leak (reported via screen recording, 2026-09-13) ----
+
+        /// <summary>
+        /// BUG-005. Reassigning a batch to a different teacher (UpdateAsync's own Teacher field —
+        /// not a single-session reschedule) only ever wrote the new TeacherProfileId onto the
+        /// Batch row. Every ClassSession already generated for it keeps whatever TeacherProfileId
+        /// GenerateScheduleAsync gave it at creation time, and /api/sessions/mine filters on the
+        /// session's own TeacherProfileId — so the PREVIOUS teacher kept seeing (and could still
+        /// open/start) every one of that batch's not-yet-delivered classes on their own calendar,
+        /// under the batch's current name, after it had been handed to someone else entirely.
+        /// A real cross-account data leak, confirmed via a client screen recording of exactly
+        /// this: a teacher's calendar showing another teacher's sessions.
+        /// </summary>
+        [Fact]
+        public async Task UpdateBatch_ReassigningTeacher_MovesFutureSessions_ButKeepsDeliveredOnesWithWhoeverActuallyTaughtThem()
+        {
+            var (batch, course, _) = await SeedBatchWithSessionAsync(totalSessions: 2, includeSession: false);
+            var originalTeacherId = batch.TeacherProfileId;
+
+            var future = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = originalTeacherId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(3).AddMinutes(45),
+            };
+            var alreadyDelivered = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = originalTeacherId,
+                Status = SessionStatus.Completed,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-3).AddMinutes(45),
+            };
+            _db.Context.AddRange(future, alreadyDelivered);
+            await _db.Context.SaveChangesAsync();
+
+            var newTeacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var newTeacher = new TeacherProfile { UserId = newTeacherUser.Id };
+            _db.Context.Add(newTeacher);
+            await _db.Context.SaveChangesAsync();
+
+            await CreateBatchService().UpdateAsync(batch.Id, new SaveBatchRequest
+            {
+                CourseId = course.Id,
+                TeacherProfileId = newTeacher.Id,
+                Name = batch.Name,
+                Capacity = batch.Capacity,
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            Assert.Equal(newTeacher.Id, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == future.Id)).TeacherProfileId);
+            Assert.Equal(originalTeacherId, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == alreadyDelivered.Id)).TeacherProfileId);
+        }
+
+        [Fact]
+        public async Task UpdateBatch_ReassigningTeacher_BlocksWhenTheNewTeacherAlreadyHasASessionAtThatTime()
+        {
+            var (batch, course, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var slotStart = DateTime.UtcNow.AddDays(5);
+            var moving = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = slotStart,
+                ScheduledEndAtUtc = slotStart.AddMinutes(45),
+            };
+            _db.Context.Add(moving);
+            await _db.Context.SaveChangesAsync();
+
+            // A second, unrelated batch whose own teacher is already booked at the exact same time.
+            var (otherBatch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var busyTeacherId = otherBatch.TeacherProfileId;
+            _db.Context.Add(new ClassSession
+            {
+                BatchId = otherBatch.Id,
+                TeacherProfileId = busyTeacherId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = slotStart,
+                ScheduledEndAtUtc = slotStart.AddMinutes(45),
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var ex = await Assert.ThrowsAsync<DomainValidationException>(() => CreateBatchService().UpdateAsync(batch.Id, new SaveBatchRequest
+            {
+                CourseId = course.Id,
+                TeacherProfileId = busyTeacherId,
+                Name = batch.Name,
+                Capacity = batch.Capacity,
+            }));
+            Assert.Contains("already has a session", ex.Message);
+
+            // Blocked, not half-applied — the session that would have moved stays with its
+            // original teacher rather than silently double-booking the new one.
+            _db.Context.ChangeTracker.Clear();
+            Assert.Equal(batch.TeacherProfileId, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == moving.Id)).TeacherProfileId);
+        }
+
+        /// <summary>
+        /// BUG-005 (data repair). The cascade in UpdateAsync only protects reassignments made
+        /// AFTER it shipped — a batch reassigned earlier still has ClassSession rows stuck on the
+        /// old teacher, bypassing UpdateAsync entirely (writing straight to the tracked Batch,
+        /// the way the pre-fix bug's own corruption would have been produced) to simulate exactly
+        /// that pre-existing bad state. ReconcileStaleSessionTeachersAsync must find and fix it.
+        /// </summary>
+        [Fact]
+        public async Task ReconcileStaleSessionTeachers_MovesOrphanedFutureSessionsOntoTheBatchsCurrentTeacher()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var staleTeacherId = batch.TeacherProfileId;
+
+            var newTeacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var newTeacher = new TeacherProfile { UserId = newTeacherUser.Id };
+            _db.Context.Add(newTeacher);
+
+            var future = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = staleTeacherId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(3).AddMinutes(45),
+            };
+            var alreadyDelivered = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = staleTeacherId,
+                Status = SessionStatus.Completed,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-3),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-3).AddMinutes(45),
+            };
+            _db.Context.AddRange(future, alreadyDelivered);
+            await _db.Context.SaveChangesAsync();
+
+            // Bypasses UpdateAsync on purpose — reproduces a batch whose Batch row moved on to a
+            // new teacher while its already-generated sessions were left behind, the exact state
+            // a pre-fix reassignment (or any other path that ever wrote Batch.TeacherProfileId
+            // directly) would leave.
+            batch.TeacherProfileId = newTeacher.Id;
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            var result = await CreateBatchService().ReconcileStaleSessionTeachersAsync();
+
+            Assert.Equal(1, result.BatchesFixed);
+            Assert.Equal(1, result.SessionsMoved);
+            Assert.Empty(result.Conflicts);
+
+            _db.Context.ChangeTracker.Clear();
+            Assert.Equal(newTeacher.Id, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == future.Id)).TeacherProfileId);
+            Assert.Equal(staleTeacherId, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == alreadyDelivered.Id)).TeacherProfileId);
+        }
+
+        [Fact]
+        public async Task ReconcileStaleSessionTeachers_SkipsAndReportsABatchThatWouldDoubleBookTheNewTeacher()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var slotStart = DateTime.UtcNow.AddDays(5);
+            var stale = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = slotStart,
+                ScheduledEndAtUtc = slotStart.AddMinutes(45),
+            };
+            _db.Context.Add(stale);
+            await _db.Context.SaveChangesAsync();
+
+            // The batch's CURRENT teacher (what it was reassigned to) is already busy elsewhere
+            // at that exact slot.
+            var (otherBatch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var busyTeacherId = otherBatch.TeacherProfileId;
+            _db.Context.Add(new ClassSession
+            {
+                BatchId = otherBatch.Id,
+                TeacherProfileId = busyTeacherId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = slotStart,
+                ScheduledEndAtUtc = slotStart.AddMinutes(45),
+            });
+            batch.TeacherProfileId = busyTeacherId;
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            var result = await CreateBatchService().ReconcileStaleSessionTeachersAsync();
+
+            Assert.Equal(0, result.BatchesFixed);
+            Assert.Equal(0, result.SessionsMoved);
+            var conflict = Assert.Single(result.Conflicts);
+            Assert.Equal(batch.Id, conflict.BatchId);
+            Assert.Contains("already has a session", conflict.Reason);
+
+            _db.Context.ChangeTracker.Clear();
+            Assert.Equal(stale.TeacherProfileId,
+                (await _db.Context.ClassSessions.FirstAsync(s => s.Id == stale.Id)).TeacherProfileId);
+        }
+
+        // ---- Demo room mismatch (reported via screen recording, 2026-09-13) ----
+
+        /// <summary>
+        /// BUG-006. A Demo scheduled from the generic admin/RM Sessions dialog (SessionsController
+        /// -> SessionService.ScheduleAsync) got a brand-new random MeetingRoomId, unrelated to the
+        /// teacher's own fixed personal meeting room -- unlike a Demo booked through Admission's
+        /// dedicated Demo Booking flow, which already used the teacher's personal room
+        /// (DemoBookingService.EnsureTeacherMeetingRoomAsync). The client has been trained to
+        /// always share that one stable personal link for a demo, so when a demo was instead
+        /// scheduled from here, the teacher joined the (correct) session room while the parent --
+        /// handed the teacher's personal link, since this dialog gives nobody any other link to
+        /// share -- landed in a completely different, empty room and sat on Jitsi's own "waiting
+        /// for a moderator" screen forever, with no knock ever reaching the teacher.
+        /// </summary>
+        [Fact]
+        public async Task ScheduleSession_ADemo_UsesTheTeachersFixedPersonalRoom_NotARandomOne()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+            Assert.Null(teacherUser.PersonalMeetingRoomId); // not minted yet
+
+            var start = DateTime.UtcNow.AddDays(2);
+            var dto = await CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+            {
+                TeacherProfileId = teacher.Id,
+                Type = SessionType.Demo,
+                ScheduledStartAtUtc = start,
+                ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            var mintedRoom = (await _db.Context.Users.FirstAsync(u => u.Id == teacherUser.Id)).PersonalMeetingRoomId;
+            Assert.False(string.IsNullOrEmpty(mintedRoom));
+            Assert.Equal(mintedRoom, dto.MeetingRoomId);
+
+            // Scheduling a second demo for the same teacher reuses the exact same room rather
+            // than minting another one -- the whole point is one stable link per teacher.
+            var second = await CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+            {
+                TeacherProfileId = teacher.Id,
+                Type = SessionType.Demo,
+                ScheduledStartAtUtc = start.AddDays(1),
+                ScheduledEndAtUtc = start.AddDays(1).AddMinutes(30),
+            });
+            Assert.Equal(mintedRoom, second.MeetingRoomId);
+        }
+
+        [Fact]
+        public async Task ScheduleSession_ARegularSession_StillGetsItsOwnFreshRoom_NotThePersonalOne()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+
+            var start = DateTime.UtcNow.AddDays(2);
+            var dto = await CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+            {
+                TeacherProfileId = batch.TeacherProfileId,
+                BatchId = batch.Id,
+                Type = SessionType.Regular,
+                ScheduledStartAtUtc = start,
+                ScheduledEndAtUtc = start.AddMinutes(45),
+            });
+
+            Assert.StartsWith("trn-", dto.MeetingRoomId);
+            Assert.DoesNotContain("personal", dto.MeetingRoomId);
+        }
+
+        [Fact]
+        public async Task RescheduleSession_ADemoMovedToADifferentTeacher_FollowsThatTeachersPersonalRoom()
+        {
+            var teacherAUser = await _db.SeedUserAsync($"a-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacherA = new TeacherProfile { UserId = teacherAUser.Id };
+            var teacherBUser = await _db.SeedUserAsync($"b-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacherB = new TeacherProfile { UserId = teacherBUser.Id };
+            _db.Context.AddRange(teacherA, teacherB);
+            await _db.Context.SaveChangesAsync();
+
+            var start = DateTime.UtcNow.AddDays(2);
+            var demo = await CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+            {
+                TeacherProfileId = teacherA.Id,
+                Type = SessionType.Demo,
+                ScheduledStartAtUtc = start,
+                ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+            var originalRoom = demo.MeetingRoomId;
+
+            var reassignedStart = start.AddHours(2);
+            var replacement = await CreateSessionService().RescheduleAsync(demo.Id, new RescheduleSessionRequest
+            {
+                TeacherProfileId = teacherB.Id,
+                ScheduledStartAtUtc = reassignedStart,
+                ScheduledEndAtUtc = reassignedStart.AddMinutes(30),
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            var teacherBsRoom = (await _db.Context.Users.FirstAsync(u => u.Id == teacherBUser.Id)).PersonalMeetingRoomId;
+            Assert.False(string.IsNullOrEmpty(teacherBsRoom));
+            Assert.NotEqual(originalRoom, teacherBsRoom); // actually moved, not left pointing at teacher A's room
+            Assert.Equal(teacherBsRoom, replacement.MeetingRoomId);
+        }
+
+        [Fact]
+        public async Task RescheduleSession_ADemoWithTheSameTeacher_KeepsTheSamePersonalRoom()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var start = DateTime.UtcNow.AddDays(2);
+            var demo = await CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+            {
+                TeacherProfileId = teacher.Id,
+                Type = SessionType.Demo,
+                ScheduledStartAtUtc = start,
+                ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+
+            var newStart = start.AddHours(3);
+            var replacement = await CreateSessionService().RescheduleAsync(demo.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = newStart,
+                ScheduledEndAtUtc = newStart.AddMinutes(30),
+            });
+
+            Assert.Equal(demo.MeetingRoomId, replacement.MeetingRoomId);
+        }
+
+        /// <summary>
+        /// BUG-007. Rescheduling a Demo from this generic Sessions-page dialog left its
+        /// DemoBooking.ClassSessionId pointing at `original` -- a row that's now terminal
+        /// (Status.Rescheduled) and never shown as joinable again. IsSessionParticipantAsync's
+        /// parent branch (and ParentPortalService.GetScheduleAsync's own demo-session filter)
+        /// both key off exactly that field, not the session's RescheduledFromSessionId chain --
+        /// so the parent could only ever be authorized against the stale original, while the
+        /// teacher (matched directly via TeacherProfileId) correctly joined the new replacement.
+        /// Both landed in the same Jitsi room (MeetingRoomId carries over) so the call itself
+        /// looked fine, but two different session ids meant two different ClassroomHub groups --
+        /// confirmed live as neither side's People roster nor whiteboard ever syncing with the
+        /// other. Reported directly (not screen-recorded) as: after editing a session, teacher
+        /// and student joined "fine" but couldn't see each other in People, and the whiteboard
+        /// didn't sync in either direction.
+        /// </summary>
+        [Fact]
+        public async Task RescheduleSession_ADemoWithABooking_MovesTheBookingsSessionLink_SoTheParentStaysAuthorized()
+        {
+            var parentEmail = $"lead-{Guid.NewGuid():N}@test.com";
+            var (session, booking) = await SeedDemoSessionAsync(parentEmail);
+            var parentUser = await _db.SeedUserAsync(parentEmail, "x", UserRole.Parent);
+            _db.Context.ParentProfiles.Add(new ParentProfile { UserId = parentUser.Id });
+            await _db.Context.SaveChangesAsync();
+
+            // Sanity: parent is authorized against the original session before any edit.
+            Assert.True(await CreateSessionService().IsSessionParticipantAsync(session.Id, parentUser.Id));
+
+            var newStart = session.ScheduledStartAtUtc.AddHours(2);
+            var replacement = await CreateSessionService().RescheduleAsync(session.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = newStart,
+                ScheduledEndAtUtc = newStart.AddMinutes(30),
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            Assert.Equal(replacement.Id, (await _db.Context.DemoBookings.FirstAsync(b => b.Id == booking.Id)).ClassSessionId);
+
+            // The actual bug: without the fix, this is the one session id both the teacher's
+            // and the parent's own portal now need to agree on -- the parent must be authorized
+            // against it too, not just the stale original.
+            Assert.True(await CreateSessionService().IsSessionParticipantAsync(replacement.Id, parentUser.Id));
+
+            // And the parent's own schedule listing has to actually surface the new session --
+            // authorization alone doesn't help if their portal never shows them a link to it.
+            var schedule = await new ParentPortalService(_db.UnitOfWork).GetScheduleAsync(
+                parentUser.Id, DateTime.UtcNow, DateTime.UtcNow.AddDays(30));
+            Assert.Contains(schedule, s => s.Id == replacement.Id);
+        }
+
+        // ---- Session-id resolution across a reschedule (still reported after the DemoBooking
+        // fix above -- a stale id can arrive for reasons besides a stale DemoBooking link, e.g.
+        // a portal tab that was simply already open when the edit happened) ----
+
+        [Fact]
+        public async Task ResolveCurrentSessionId_ANonRescheduledSession_ReturnsItself()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+
+            Assert.Equal(session.Id, await CreateSessionService().ResolveCurrentSessionIdAsync(session.Id));
+        }
+
+        [Fact]
+        public async Task ResolveCurrentSessionId_AMissingSession_ReturnsTheIdUnchanged()
+        {
+            // Lets the caller's own not-found handling fire against the id it actually asked
+            // for, rather than this silently swallowing "that session doesn't exist at all".
+            var bogusId = Guid.NewGuid();
+
+            Assert.Equal(bogusId, await CreateSessionService().ResolveCurrentSessionIdAsync(bogusId));
+        }
+
+        [Fact]
+        public async Task ResolveCurrentSessionId_ARescheduledChain_WalksToTheFinalReplacement_FromAnyLinkInIt()
+        {
+            var (_, _, original) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var service = CreateSessionService();
+
+            var start = original.ScheduledStartAtUtc.AddDays(1);
+            var firstEdit = await service.RescheduleAsync(original.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = start,
+                ScheduledEndAtUtc = start.AddMinutes(45),
+            });
+            var secondStart = start.AddDays(1);
+            var secondEdit = await service.RescheduleAsync(firstEdit.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = secondStart,
+                ScheduledEndAtUtc = secondStart.AddMinutes(45),
+            });
+
+            // Two edits ago, one edit ago, and the current one itself all resolve to the same,
+            // final, still-live session.
+            Assert.Equal(secondEdit.Id, await service.ResolveCurrentSessionIdAsync(original.Id));
+            Assert.Equal(secondEdit.Id, await service.ResolveCurrentSessionIdAsync(firstEdit.Id));
+            Assert.Equal(secondEdit.Id, await service.ResolveCurrentSessionIdAsync(secondEdit.Id));
+        }
+
+        /// <summary>
+        /// BUG-008. Reported again after BUG-007's DemoBooking-link fix above, this time for the
+        /// far more common cause: a parent's (or teacher's) own portal tab was simply already
+        /// open, showing the class's pre-edit session id, when an admin edited/rescheduled it --
+        /// nothing about that requires a demo or a stale DemoBooking row at all. GetJitsiJoinAsync
+        /// used to look the given id up literally, so this stale id either 403'd outright (once a
+        /// batch/teacher change moved eligibility) or, worse, quietly succeeded against a Regular
+        /// session's still-valid BatchEnrollment match while the *other* side of the call joined
+        /// under the NEW id -- same underlying symptom either way: two different ClassroomHub
+        /// groups for what both people think is the one class, so neither's People roster or
+        /// whiteboard ever reaches the other, even though both land in the same Jitsi room.
+        /// </summary>
+        [Fact]
+        public async Task GetJitsiJoin_WithAStaleRescheduledSessionId_ResolvesAndAuthorizesAgainstTheCurrentSession()
+        {
+            var (batch, _, original) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            // SeedBatchWithSessionAsync's own session starts tomorrow (outside the 10-minute
+            // join window) and has no room yet -- move it to "already started" with a room, so
+            // GetJitsiJoinAsync's own window/room checks don't get in the way of what this test
+            // is actually checking.
+            original.ScheduledStartAtUtc = DateTime.UtcNow.AddMinutes(-5);
+            original.ScheduledEndAtUtc = DateTime.UtcNow.AddMinutes(40);
+            original.MeetingRoomId = "room-original";
+            await _db.Context.SaveChangesAsync();
+
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var child = new Child { ParentProfile = parentProfile, FirstName = "Kid", LastName = "Stale" };
+            _db.Context.AddRange(parentProfile, child);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.Add(new BatchEnrollment { BatchId = batch.Id, ChildId = child.Id, Status = EnrollmentStatus.Active });
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateSessionService();
+            var newStart = DateTime.UtcNow.AddMinutes(5);
+            var replacement = await service.RescheduleAsync(original.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = newStart,
+                ScheduledEndAtUtc = newStart.AddMinutes(45),
+            });
+
+            // The parent's own portal tab still only knows the ORIGINAL id -- it was open
+            // before the edit and never reloaded. That's the whole scenario.
+            var join = await CreateSessionService().GetJitsiJoinAsync(original.Id, parentUser.Id);
+
+            Assert.Equal(replacement.Id, join.SessionId);
+            Assert.Equal(replacement.MeetingRoomId, join.Room);
+        }
+
+        private ResourceFolderService CreateFolderService() => new(_db.UnitOfWork, _auditLog);
+
+        private async Task<(ParentProfile Profile, User User)> SeedFolderParentAsync()
+        {
+            var user = await _db.SeedUserAsync($"fp-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var profile = new ParentProfile { UserId = user.Id };
+            _db.Context.ParentProfiles.Add(profile);
+            await _db.Context.SaveChangesAsync();
+            return (profile, user);
+        }
+
+        private async Task<Resource> SeedFolderFileAsync(Guid? folderId, bool downloadable = true)
+        {
+            var file = new Resource { Title = "Worksheets 1-12", Type = ResourceType.Worksheet, FileUrl = "x.pdf", IsDownloadable = downloadable, FolderId = folderId };
+            _db.Context.Resources.Add(file);
+            await _db.Context.SaveChangesAsync();
+            return file;
+        }
+
+        [Fact]
+        public async Task ResourceFolders_ShareOneFolderWithManyParents_FilesAppearForEachAndSubfoldersInherit()
+        {
+            var folders = CreateFolderService();
+            var level1 = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Phonics Level 1" });
+            var worksheets = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Worksheets 1-12", ParentFolderId = level1.Id });
+            var file = await SeedFolderFileAsync(worksheets.Id);
+            var unshared = await SeedFolderFileAsync(null);
+
+            var parents = new List<(ParentProfile Profile, User User)>();
+            for (var i = 0; i < 5; i++) parents.Add(await SeedFolderParentAsync());
+            var outsider = await SeedFolderParentAsync();
+
+            // Sharing the PARENT folder reaches the file in its subfolder, for all five parents at once.
+            await folders.SetAccessAsync(level1.Id, Guid.NewGuid(), new SetResourceFolderAccessRequest
+            {
+                AddParentProfileIds = parents.Select(p => p.Profile.Id).ToList(),
+            });
+
+            var portal = new ParentPortalService(_db.UnitOfWork);
+            foreach (var p in parents)
+            {
+                var visible = await portal.GetResourcesAsync(p.User.Id);
+                Assert.Contains(visible, r => r.Id == file.Id);
+                Assert.DoesNotContain(visible, r => r.Id == unshared.Id);
+                Assert.Equal(file.Id, (await portal.GetResourceForDownloadAsync(p.User.Id, file.Id)).Id);
+            }
+            Assert.Empty(await portal.GetResourcesAsync(outsider.User.Id));
+            await Assert.ThrowsAsync<NotFoundException>(() => portal.GetResourceForDownloadAsync(outsider.User.Id, file.Id));
+
+            // Unsharing one parent removes just theirs.
+            var removed = parents[0];
+            await folders.SetAccessAsync(level1.Id, Guid.NewGuid(), new SetResourceFolderAccessRequest { RemoveParentProfileIds = [removed.Profile.Id] });
+            Assert.Empty(await portal.GetResourcesAsync(removed.User.Id));
+            Assert.Contains(await portal.GetResourcesAsync(parents[1].User.Id), r => r.Id == file.Id);
+            Assert.Equal(4, (await folders.ListAccessAsync(level1.Id)).Count);
+        }
+
+        [Fact]
+        public async Task ResourceFolders_RejectDuplicateNames_MoveIntoOwnSubfolder_AndDeletingANonEmptyFolder()
+        {
+            var folders = CreateFolderService();
+            var a = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Level 1" });
+            var b = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Sub", ParentFolderId = a.Id });
+            await SeedFolderFileAsync(b.Id);
+
+            await Assert.ThrowsAsync<ConflictException>(() => folders.CreateAsync(new CreateResourceFolderRequest { Name = "level 1" }));
+            await Assert.ThrowsAsync<DomainValidationException>(() => folders.UpdateAsync(a.Id, new UpdateResourceFolderRequest { Name = "Level 1", ParentFolderId = b.Id }));
+            await Assert.ThrowsAsync<DomainValidationException>(() => folders.DeleteAsync(b.Id)); // has a file
+            await Assert.ThrowsAsync<DomainValidationException>(() => folders.DeleteAsync(a.Id)); // has a subfolder
+        }
+
+        [Fact]
+        public async Task ResourceFolders_MoveFile_ChangesFolder_AndEmptyFolderCanBeDeleted()
+        {
+            var folders = CreateFolderService();
+            var one = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "One" });
+            var two = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Two" });
+            var file = await SeedFolderFileAsync(one.Id);
+
+            var moved = await folders.MoveResourceAsync(file.Id, new MoveResourceRequest { FolderId = two.Id });
+            Assert.Equal(two.Id, moved.FolderId);
+
+            var listed = await folders.ListAsync();
+            Assert.Equal(0, listed.Single(f => f.Id == one.Id).FileCount);
+            Assert.Equal(1, listed.Single(f => f.Id == two.Id).FileCount);
+
+            await folders.DeleteAsync(one.Id);
+            Assert.DoesNotContain(await folders.ListAsync(), f => f.Id == one.Id);
+        }
+
+        [Fact]
+        public async Task SharedRecording_ParentCanViewButNotDownload_AndOutsiderCanDoNeither()
+        {
+            var folders = CreateFolderService();
+            var folder = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Sold recordings" });
+            var recording = await SeedFolderFileAsync(folder.Id, downloadable: false); // recordings are view-only
+            var buyer = await SeedFolderParentAsync();
+            var outsider = await SeedFolderParentAsync();
+            await folders.SetAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderAccessRequest { AddParentProfileIds = [buyer.Profile.Id] });
+            var portal = new ParentPortalService(_db.UnitOfWork);
+
+            Assert.Equal(recording.Id, (await portal.GetResourceForViewAsync(buyer.User.Id, recording.Id)).Id);
+            await Assert.ThrowsAsync<DomainValidationException>(() => portal.GetResourceForDownloadAsync(buyer.User.Id, recording.Id));
+            await Assert.ThrowsAsync<NotFoundException>(() => portal.GetResourceForViewAsync(outsider.User.Id, recording.Id));
+
+            // Unsharing takes the recording away again without touching the file.
+            await folders.SetAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderAccessRequest { RemoveParentProfileIds = [buyer.Profile.Id] });
+            await Assert.ThrowsAsync<NotFoundException>(() => portal.GetResourceForViewAsync(buyer.User.Id, recording.Id));
+        }
+
+        private ParentFeedbackService CreateParentFeedbackService() =>
+            new(_db.UnitOfWork, _notifications, NullLogger<ParentFeedbackService>.Instance);
+
+        [Fact]
+        public async Task ParentFeedback_DemoOnlyPromptsOnceItIsCompleted_AndOnlyForThatParent()
+        {
+            var parentEmail = $"pf-{Guid.NewGuid():N}@test.com";
+            var (session, booking) = await SeedDemoSessionAsync(parentEmail);
+            var parent = await _db.SeedUserAsync(parentEmail, "x", UserRole.Parent);
+            var stranger = await _db.SeedUserAsync($"pf-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var service = CreateParentFeedbackService();
+
+            Assert.Empty(await service.GetPendingAsync(parent.Id)); // demo hasn't happened yet
+
+            session.Status = SessionStatus.Completed;
+            session.ActualEndAtUtc = DateTime.UtcNow;
+            await _db.Context.SaveChangesAsync();
+
+            var pending = Assert.Single(await service.GetPendingAsync(parent.Id));
+            Assert.Equal(ParentFeedbackKind.Demo, pending.Kind);
+            Assert.Equal(booking.Id, pending.DemoBookingId);
+            Assert.Empty(await service.GetPendingAsync(stranger.Id)); // someone else's demo
+        }
+
+        [Fact]
+        public async Task ParentFeedback_Submit_SavesOnce_ClearsThePrompt_AndAppearsInTheReport()
+        {
+            var parentEmail = $"pf-{Guid.NewGuid():N}@test.com";
+            var (session, booking) = await SeedDemoSessionAsync(parentEmail);
+            var parent = await _db.SeedUserAsync(parentEmail, "x", UserRole.Parent);
+            session.Status = SessionStatus.Completed;
+            session.ActualEndAtUtc = DateTime.UtcNow;
+            await _db.Context.SaveChangesAsync();
+            var service = CreateParentFeedbackService();
+
+            await service.SubmitAsync(parent.Id, new SubmitParentFeedbackRequest
+            {
+                Kind = ParentFeedbackKind.Demo, DemoBookingId = booking.Id, Rating = 5, Comment = "  Loved it  ",
+            });
+
+            Assert.Empty(await service.GetPendingAsync(parent.Id));
+            var row = Assert.Single(await service.ListAsync(ParentFeedbackKind.Demo));
+            Assert.Equal(5, row.Rating);
+            Assert.Equal("Loved it", row.Comment);
+            Assert.Empty(await service.ListAsync(ParentFeedbackKind.CourseCompletion));
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.SubmitAsync(parent.Id, new SubmitParentFeedbackRequest
+            {
+                Kind = ParentFeedbackKind.Demo, DemoBookingId = booking.Id, Rating = 1,
+            })); // no second rating for the same demo
+        }
+
+        [Fact]
+        public async Task ParentFeedback_CourseCompletion_PromptsWhenBatchCompletes_ForEnrolledParentOnly()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var parent = await _db.SeedUserAsync($"pf-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var other = await _db.SeedUserAsync($"pf-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var profile = new ParentProfile { UserId = parent.Id };
+            var child = new Child { ParentProfile = profile, FirstName = "Kid", LastName = "Y" };
+            _db.Context.AddRange(profile, child, new ParentProfile { UserId = other.Id });
+            _db.Context.Add(new BatchEnrollment { BatchId = batch.Id, Child = child, Status = EnrollmentStatus.Active });
+            await _db.Context.SaveChangesAsync();
+            var service = CreateParentFeedbackService();
+
+            Assert.Empty(await service.GetPendingAsync(parent.Id)); // batch still running
+
+            var tracked = await _db.Context.Batches.FirstAsync(b => b.Id == batch.Id);
+            tracked.CompletedAtUtc = DateTime.UtcNow;
+            await _db.Context.SaveChangesAsync();
+
+            var pending = Assert.Single(await service.GetPendingAsync(parent.Id));
+            Assert.Equal(ParentFeedbackKind.CourseCompletion, pending.Kind);
+            Assert.Equal(child.Id, pending.ChildId);
+            Assert.Empty(await service.GetPendingAsync(other.Id));
+
+            await service.SubmitAsync(parent.Id, new SubmitParentFeedbackRequest
+            {
+                Kind = ParentFeedbackKind.CourseCompletion, BatchId = batch.Id, ChildId = child.Id, Rating = 4,
+            });
+            Assert.Empty(await service.GetPendingAsync(parent.Id));
         }
 
         public void Dispose() => _db.Dispose();

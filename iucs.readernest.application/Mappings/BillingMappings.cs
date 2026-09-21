@@ -64,6 +64,7 @@ namespace iucs.readernest.application.Mappings
                 CourseId = resource.CourseId,
                 BatchId = resource.BatchId,
                 BatchName = resource.Batch?.Name,
+                FolderId = resource.FolderId,
                 IsDownloadable = resource.IsDownloadable,
                 Description = resource.Description,
                 CreatedAtUtc = resource.CreatedAtUtc,

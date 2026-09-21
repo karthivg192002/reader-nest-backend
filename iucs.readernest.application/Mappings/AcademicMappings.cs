@@ -57,6 +57,9 @@ namespace iucs.readernest.application.Mappings
                 Status = batch.Status,
                 StartDate = batch.StartDate,
                 EndDate = batch.EndDate,
+                PaymentPlanType = batch.PaymentPlanType,
+                PaymentAfterSessionsCount = batch.PaymentAfterSessionsCount,
+                PaymentDueDate = batch.PaymentDueDate,
             };
         }
 

@@ -5,13 +5,16 @@ using Renci.SshNet;
 
 namespace iucs.readernest.application.Services
 {
-    /// <summary>See IServerControlService. Same SSH.NET / whitelist pattern as ServerLogService.</summary>
+    /// <summary>
+    /// See IServerControlService. Same SSH.NET / whitelist pattern as ServerLogService.
+    /// Each server runs its own, different Jibri autoscaler script (main: worker-first/main-fallback
+    /// overflow watcher; worker: busy+1 autoscaler) -- see <see cref="MonitoredServerOptions.JibriAutoscaleScript"/>.
+    /// There's no separate autoscale.conf/log on either server, so "Rescale now"/"Min warm" run the
+    /// script directly over SSH and return its own real stdout as the log tail, rather than assuming
+    /// an external conf/log file path that may not exist.
+    /// </summary>
     public class ServerControlService : IServerControlService
     {
-        private const string AutoscaleScriptPath = "/opt/rn-monitoring/jibri-autoscale.sh";
-        private const string AutoscaleConfPath = "/opt/rn-monitoring/jibri-autoscale.conf";
-        private const string AutoscaleLogPath = "/var/log/jibri-autoscale.log";
-
         private readonly MonitoringOptions _options;
 
         public ServerControlService(IOptions<MonitoringOptions> options)
@@ -25,13 +28,12 @@ namespace iucs.readernest.application.Services
             using var client = Connect(server);
             try
             {
-                await RunAsync(client, $"bash {AutoscaleScriptPath}", TimeSpan.FromSeconds(30), cancellationToken);
-                var logTail = await TailLogAsync(client, cancellationToken);
+                var output = await RunAsync(client, $"bash {server.JibriAutoscaleScript}", TimeSpan.FromSeconds(30), cancellationToken);
                 return new JibriControlResultDto
                 {
                     Server = serverName,
                     Action = "rescale-now",
-                    LogTail = logTail,
+                    LogTail = TailLines(output),
                     PerformedAtUtc = DateTime.UtcNow,
                 };
             }
@@ -44,21 +46,30 @@ namespace iucs.readernest.application.Services
         public async Task<JibriControlResultDto> SetJibriMinReplicasAsync(string serverName, int minReplicas, CancellationToken cancellationToken = default)
         {
             var server = GetJibriCapableServer(serverName);
-            var clamped = Math.Clamp(minReplicas, 1, 10);
+            if (string.IsNullOrWhiteSpace(server.JibriMinReplicasVar))
+            {
+                throw new InvalidOperationException($"'{serverName}' has no Jibri min-replicas variable configured.");
+            }
+
+            var clamped = Math.Clamp(minReplicas, 0, 10);
 
             using var client = Connect(server);
             try
             {
-                // Overwrite rather than edit-in-place -- the file has exactly one line and this
-                // avoids any sed-quoting risk with a value that's already an int (Clamp above).
-                await RunAsync(client, $"echo 'MIN_REPLICAS={clamped}' > {AutoscaleConfPath}", TimeSpan.FromSeconds(10), cancellationToken);
-                await RunAsync(client, $"bash {AutoscaleScriptPath}", TimeSpan.FromSeconds(30), cancellationToken);
-                var logTail = await TailLogAsync(client, cancellationToken);
+                // Edit the script's own MIN_* line in place, rather than an external conf file --
+                // neither autoscaler script reads one. `clamped` is an int from Math.Clamp above,
+                // so it's safe to splice into the sed replacement.
+                await RunAsync(
+                    client,
+                    $"sed -i 's/^{server.JibriMinReplicasVar}=.*/{server.JibriMinReplicasVar}={clamped}/' {server.JibriAutoscaleScript}",
+                    TimeSpan.FromSeconds(10),
+                    cancellationToken);
+                var output = await RunAsync(client, $"bash {server.JibriAutoscaleScript}", TimeSpan.FromSeconds(30), cancellationToken);
                 return new JibriControlResultDto
                 {
                     Server = serverName,
                     Action = $"set-min-replicas={clamped}",
-                    LogTail = logTail,
+                    LogTail = TailLines(output),
                     PerformedAtUtc = DateTime.UtcNow,
                 };
             }
@@ -103,7 +114,7 @@ namespace iucs.readernest.application.Services
             var server = _options.Servers.FirstOrDefault(s => s.Name == serverName)
                 ?? throw new ArgumentException($"Unknown server '{serverName}'.", nameof(serverName));
 
-            if (!server.TracksLiveCalls)
+            if (string.IsNullOrWhiteSpace(server.JibriAutoscaleScript))
             {
                 throw new ArgumentException($"'{serverName}' does not run a Jibri autoscaler.", nameof(serverName));
             }
@@ -136,20 +147,19 @@ namespace iucs.readernest.application.Services
             client.Dispose();
         }
 
-        private static async Task RunAsync(SshClient client, string commandText, TimeSpan timeout, CancellationToken cancellationToken)
+        private static async Task<string> RunAsync(SshClient client, string commandText, TimeSpan timeout, CancellationToken cancellationToken)
         {
             var command = client.CreateCommand(commandText);
             command.CommandTimeout = timeout;
-            await Task.Run(command.Execute, cancellationToken);
+            var result = await Task.Run(command.Execute, cancellationToken);
+            return result + command.Error;
         }
 
-        private static async Task<List<string>> TailLogAsync(SshClient client, CancellationToken cancellationToken)
+        private static List<string> TailLines(string output)
         {
-            var command = client.CreateCommand($"tail -n 10 {AutoscaleLogPath} 2>/dev/null");
-            command.CommandTimeout = TimeSpan.FromSeconds(10);
-            var result = await Task.Run(command.Execute, cancellationToken);
-            return result
+            return output
                 .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .TakeLast(10)
                 .ToList();
         }
     }

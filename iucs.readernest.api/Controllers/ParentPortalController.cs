@@ -154,6 +154,39 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _parentPortal.GetRecordingsAsync(UserId(), sessionId, cancellationToken));
         }
 
+        /// <summary>Every non-expired recording across every one of the caller's children's
+        /// batches in one call — replaces having to fetch the schedule then call the
+        /// per-session endpoint above once for every completed session (the N+1 shape already
+        /// found and fixed on the admin and teacher Recordings pages).</summary>
+        [HttpGet("recordings")]
+        public async Task<ActionResult<IReadOnlyList<ParentRecordingDto>>> MyRecordings(CancellationToken cancellationToken)
+        {
+            return Ok(await _parentPortal.GetMyRecordingsAsync(UserId(), cancellationToken));
+        }
+
+        /// <summary>
+        /// A short-lived link to watch a shared resource (e.g. a sold recording) in the browser. Grant-
+        /// and suspension-checked like a download, but view-only: the link is inline and the portal
+        /// player has no download button. Video bytes come straight from object storage.
+        /// </summary>
+        [HttpGet("resources/{id:guid}/play")]
+        public async Task<ActionResult<ResourcePlaybackDto>> PlayResource(
+            Guid id,
+            [FromServices] IResourceService resourceService,
+            [FromServices] application.Common.Interfaces.IDirectUploadStorage directUploads,
+            CancellationToken cancellationToken)
+        {
+            await _parentPortal.GetResourceForViewAsync(UserId(), id, cancellationToken);
+            var resource = await resourceService.GetForDownloadAsync(id, cancellationToken); // also audits the access
+            var validFor = TimeSpan.FromMinutes(30);
+            return Ok(new ResourcePlaybackDto
+            {
+                Url = directUploads.GetReadUrl(resource.FileUrl, validFor, resource.MimeType),
+                MimeType = resource.MimeType,
+                ExpiresAtUtc = DateTime.UtcNow.Add(validFor),
+            });
+        }
+
         /// <summary>Grant-checked worksheet download (books stay view-only).</summary>
         [HttpGet("resources/{id:guid}/download")]
         public async Task<IActionResult> DownloadResource(

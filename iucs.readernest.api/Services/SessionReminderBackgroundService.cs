@@ -58,7 +58,8 @@ namespace iucs.readernest.api.Services
             var notifications = scope.ServiceProvider.GetRequiredService<INotificationService>();
             var emailTemplates = scope.ServiceProvider.GetRequiredService<IEmailTemplateService>();
             var emailSender = scope.ServiceProvider.GetRequiredService<IEmailSender>();
-            var jitsiTokens = scope.ServiceProvider.GetRequiredService<IJitsiTokenService>();
+            var sessionService = scope.ServiceProvider.GetRequiredService<ISessionService>();
+            var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
 
             var now = DateTime.UtcNow;
 
@@ -72,16 +73,10 @@ namespace iucs.readernest.api.Services
                             && s.ScheduledStartAtUtc < windowEnd)
                 .ToListAsync(cancellationToken);
 
-            string? jitsiConfigJson = null;
             var demoBookingsBySessionId = new Dictionary<Guid, DemoBooking>();
             var parentUsersByBatchId = new Dictionary<Guid, List<User>>();
             if (upcoming.Count > 0)
             {
-                jitsiConfigJson = await unitOfWork.Repository<Integration>().Query()
-                    .Where(i => i.Key == "jitsi")
-                    .Select(i => i.ConfigJson)
-                    .FirstOrDefaultAsync(cancellationToken);
-
                 // Both recipient lookups are resolved for the whole window up front. Done
                 // inside the loop they cost one query per session, so a busy hour's reminder
                 // fan-out scaled its round trips with the number of classes starting at once.
@@ -120,8 +115,8 @@ namespace iucs.readernest.api.Services
                 try
                 {
                     await SendRemindersForSessionAsync(
-                        session, jitsiConfigJson, demoBookingsBySessionId, parentUsersByBatchId,
-                        notifications, emailTemplates, emailSender, jitsiTokens, cancellationToken);
+                        session, demoBookingsBySessionId, parentUsersByBatchId,
+                        notifications, emailTemplates, emailSender, sessionService, configuration, cancellationToken);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -182,13 +177,13 @@ namespace iucs.readernest.api.Services
 
         private static async Task SendRemindersForSessionAsync(
             ClassSession session,
-            string? jitsiConfigJson,
             Dictionary<Guid, DemoBooking> demoBookingsBySessionId,
             Dictionary<Guid, List<User>> parentUsersByBatchId,
             INotificationService notifications,
             IEmailTemplateService emailTemplates,
             IEmailSender emailSender,
-            IJitsiTokenService jitsiTokens,
+            ISessionService sessionService,
+            IConfiguration configuration,
             CancellationToken cancellationToken)
         {
             var teacherUser = session.TeacherProfile.User;
@@ -203,18 +198,16 @@ namespace iucs.readernest.api.Services
                 },
                 cancellationToken);
 
-            var domain = JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
-            // Each recipient gets their own token, scoped to this room and expiring a
-            // couple of hours past the class — never a bare, forever-reusable room name.
-            string JoinUrlFor(string participantName, string? participantEmail) =>
-                JitsiLinkBuilder.BuildJoinUrl(
-                    session.MeetingRoomId,
-                    jitsiConfigJson,
-                    jitsiTokens.CreateToken(
-                        domain, jitsiConfigJson, session.MeetingRoomId!, participantName, participantEmail,
-                        moderator: false, session.ScheduledEndAtUtc.AddHours(2)),
-                    participantName)
-                ?? "#";
+            // 2026-09-15 fix: this used to build a bare Jitsi link (JitsiLinkBuilder.BuildJoinUrl)
+            // for every parent recipient — same "no Whiteboard/Slides, the interactive layer only
+            // ever renders over an authenticated ClassroomHub connection" gap already fixed for
+            // the demo confirmation email and the RM/Admin/Coordinator "Copy Guest Link" feature
+            // (see DemoBookingService.ResolveLiveJoinUrlAsync's own doc comment). A batch parent
+            // already has a real login, so their reminder link goes straight at the authenticated
+            // in-app classroom (mirrors BuildTeacherDemoAppJoinUrl's own reasoning) rather than
+            // needing a token-carrying bridge at all; a demo lead still has no account, so theirs
+            // routes through the same Guest Link bridge the confirmation email now uses.
+            var frontendBaseUrl = (configuration["Frontend:BaseUrl"] ?? "http://localhost:5173").TrimEnd('/');
 
             if (session.BatchId is null)
             {
@@ -224,12 +217,14 @@ namespace iucs.readernest.api.Services
                 demoBookingsBySessionId.TryGetValue(session.Id, out var demoBooking);
                 if (demoBooking is not null)
                 {
+                    var guestLink = await sessionService.CreateGuestLinkForParticipantAsync(
+                        session.Id, demoBooking.ParentName, demoBooking.ParentEmail, cancellationToken);
                     var (subject, body) = await emailTemplates.RenderAsync(
                         "session-reminder-parent",
                         new Dictionary<string, string>
                         {
                             ["StartLocal"] = FormatLocal(session.ScheduledStartAtUtc, "Asia/Kolkata"),
-                            ["JoinUrl"] = JoinUrlFor(demoBooking.ParentName, demoBooking.ParentEmail),
+                            ["JoinUrl"] = $"{frontendBaseUrl}/guest-join?token={Uri.EscapeDataString(guestLink.Token)}",
                         },
                         cancellationToken);
                     await emailSender.SendAsync(demoBooking.ParentEmail, subject, body, cancellationToken);
@@ -243,6 +238,7 @@ namespace iucs.readernest.api.Services
                 return;
             }
 
+            var appJoinUrl = $"{frontendBaseUrl}/parent/live/{session.Id}";
             foreach (var parent in parentUsers)
             {
                 await notifications.SendTemplatedEmailAsync(
@@ -251,7 +247,7 @@ namespace iucs.readernest.api.Services
                     new Dictionary<string, string>
                     {
                         ["StartLocal"] = FormatLocal(session.ScheduledStartAtUtc, parent.TimeZoneId),
-                        ["JoinUrl"] = JoinUrlFor($"{parent.FirstName} {parent.LastName}".Trim(), parent.Email),
+                        ["JoinUrl"] = appJoinUrl,
                     },
                     cancellationToken);
             }

@@ -7,6 +7,7 @@ using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
 namespace iucs.readernest.api.Controllers
@@ -18,6 +19,24 @@ namespace iucs.readernest.api.Controllers
         private readonly IUserService _userService;
         private readonly IRoleService _roleService;
         private readonly IEnrollmentService _enrollmentService;
+
+        // A personal meeting room is meant to be copied once (MyMeetingRoomShortLink's own doc
+        // comment: "Never expires... reused indefinitely") and reused for weeks -- shared over
+        // WhatsApp/email hours or days before it's actually opened, exactly like a Google Meet
+        // personal room link. The JWT minted for it must not become a silent expiry of its own
+        // regardless of the gap between sharing and joining: MeetingRoomJoin (the anonymous
+        // redirect target every shared link ultimately lands on) re-mints on every hit, so this
+        // is meant to be scoped to "now" at actual join time, not share time -- but a messaging
+        // app's own link-preview prefetch (or an in-app browser that resolves a link once and
+        // reuses that resolution) can make the *effective* mint moment earlier than the real
+        // click, so a short window here silently becomes a "link expired" report hours later.
+        // Confirmed live (2026-09-14): shared at 12pm for a 6pm join -- the exact AddHours(6)
+        // this replaces -- reported as "expired" on arrival. Mirrors the same "still bounded,
+        // not literally forever" 5-year outer expiry SessionService.
+        // CreateGuestLinkForParticipantAsync uses for demo join links (its own GetGuestJoinAsync
+        // skips the usual per-session expiry check for that link shape entirely) -- the identical
+        // fix for the identical bug class.
+        private static readonly TimeSpan PersonalRoomTokenLifetime = TimeSpan.FromDays(365 * 5);
 
         public UsersController(IUserService userService, IRoleService roleService, IEnrollmentService enrollmentService)
         {
@@ -86,6 +105,44 @@ namespace iucs.readernest.api.Controllers
             return NoContent();
         }
 
+        /// <summary>
+        /// Everything a hard delete of this Student would permanently remove (enrollments,
+        /// invoices/payments/refunds, attendance, engagement, progress reports, awards, fee
+        /// suspensions) — read-only, powers the "are you sure" confirmation popup before
+        /// <see cref="HardDeleteStudent"/> actually runs. Unlike <see cref="RemoveStudent"/> above,
+        /// this ignores the unpaid-invoice/active-enrolment guards entirely — it's a different,
+        /// deliberately more permissive action.
+        /// </summary>
+        [HttpGet("students/{childId:guid}/hard-delete-preview")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.Delete)]
+        public async Task<ActionResult<application.Dto.Users.DataDeletionPreviewDto>> PreviewHardDeleteStudent(
+            Guid childId,
+            [FromServices] IUserDeletionService deletionService,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await deletionService.PreviewStudentDeletionAsync(childId, cancellationToken));
+        }
+
+        /// <summary>
+        /// Permanently deletes this Student and every row that's actually theirs — see
+        /// <see cref="IUserDeletionService.DeleteStudentAsync"/>. Every removed row is snapshotted
+        /// to DataDeletionLog first (deleted-by/deleted-at + a full JSON copy), so the data still
+        /// exists there for future reference even though it's gone from its live table. Frontend
+        /// must call <see cref="PreviewHardDeleteStudent"/> first and get explicit confirmation —
+        /// there is no undo once this returns.
+        /// </summary>
+        [HttpDelete("students/{childId:guid}/hard-delete")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.Delete)]
+        public async Task<IActionResult> HardDeleteStudent(
+            Guid childId,
+            [FromServices] IUserDeletionService deletionService,
+            CancellationToken cancellationToken)
+        {
+            var deletedByUserId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value);
+            await deletionService.DeleteStudentAsync(childId, deletedByUserId, cancellationToken);
+            return NoContent();
+        }
+
         /// <summary>The signed-in user's own account (any role) — for the Profile screen.</summary>
         [HttpGet("me")]
         [Microsoft.AspNetCore.Authorization.Authorize]
@@ -143,22 +200,29 @@ namespace iucs.readernest.api.Controllers
             // Always moderator: this is the member's own permanent room, nobody else's.
             var token = jitsiTokenService.CreateToken(
                 domain, jitsiConfigJson, user.PersonalMeetingRoomId, $"{user.FirstName} {user.LastName}".Trim(),
-                user.Email, moderator: true, DateTime.UtcNow.AddHours(6));
+                user.Email, moderator: true, DateTime.UtcNow.Add(PersonalRoomTokenLifetime));
 
-            return Ok(new { roomId = user.PersonalMeetingRoomId, domain, token });
+            return Ok(new { roomId = user.PersonalMeetingRoomId, domain, token, ownerId = user.Id });
         }
 
         /// <summary>
         /// A short, shareable link to the same room MyMeetingRoom builds -- the long form
         /// (domain/room#jwt=&lt;huge signed token&gt;) reads as broken/suspicious pasted into
-        /// WhatsApp or email. Expires with the token it wraps (6h), same as the direct link.
+        /// WhatsApp or email. Points at the in-app <c>/join/personal/{id}</c> guest page (backed
+        /// by <see cref="MeetingRoomGuestJoin"/>) rather than straight at Jitsi, so a guest who
+        /// opens it lands in the same branded, interactive classroom (whiteboard/quiz/roster) the
+        /// owner gets, not a bare Jitsi tab -- see MeetingRoomGuestJoin's own doc comment for why.
+        /// This mints a real /m/{slug} row (the same short-link mechanism
+        /// DemoBookingsController.GetJoinLink uses); whatever resolves the slug lands on that SPA
+        /// route, which itself re-resolves a fresh join fresh on every open. Never expires,
+        /// matching the room's own "reused indefinitely" design.
         /// </summary>
         [HttpGet("me/meeting-room/short-link")]
         [Microsoft.AspNetCore.Authorization.Authorize]
         public async Task<ActionResult<object>> MyMeetingRoomShortLink(
             [FromServices] iucs.readernest.domain.Repository.IUnitOfWork unitOfWork,
-            [FromServices] application.Common.Interfaces.IJitsiTokenService jitsiTokenService,
             [FromServices] IShortLinkService shortLinks,
+            [FromServices] Microsoft.Extensions.Configuration.IConfiguration configuration,
             CancellationToken cancellationToken)
         {
             var userId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value);
@@ -176,20 +240,118 @@ namespace iucs.readernest.api.Controllers
                 await unitOfWork.SaveChangesAsync(cancellationToken);
             }
 
+            var apiBaseUrl = $"{Request.Scheme}://{Request.Host}";
+            // The site this request came from (when it is an origin CORS already trusts) rather than the
+            // one fixed Frontend:BaseUrl -- on UAT that setting still names production, so the invite
+            // link used to open the wrong site.
+            var frontendBaseUrl = iucs.readernest.application.Helper.FrontendUrl.Resolve(
+                configuration["Frontend:BaseUrl"],
+                Request.Headers.Origin.ToString(),
+                configuration.GetSection("Cors:AllowedOrigins").Get<string[]>());
+            var stableUrl = $"{frontendBaseUrl}/join/personal/{userId}";
+            var slug = await shortLinks.CreateAsync(stableUrl, DateTime.UtcNow.AddYears(10), userId, cancellationToken);
+            return Ok(new { url = $"{apiBaseUrl}/m/{slug}" });
+        }
+
+        /// <summary>
+        /// Public, anonymous lookup backing the in-app guest-join page (<c>/join/personal/{id}</c>,
+        /// PersonalRoomGuestJoin.tsx) that a fresh <see cref="MyMeetingRoomShortLink"/> now points
+        /// at -- returns everything that page needs to render the SAME embedded, interactive
+        /// classroom (whiteboard/quiz/roster/chat) the owner gets via JitsiLive, instead of the
+        /// old behaviour of 302-redirecting straight to a bare Jitsi tab with none of that (see
+        /// MeetingRoomJoin below, kept as-is for any already-shared link of the old shape).
+        /// Deliberately non-moderator on the Jitsi side (moderator: false) -- this is the invite
+        /// handed to whoever the owner shares the link with, not the owner's own access. The
+        /// ClassroomHub token is the SAME CreateGuestClassroomHubToken shape a class Guest Link
+        /// already uses (see SessionService.GetGuestJoinAsync), just scoped to the owner's own
+        /// account id instead of a real ClassSession id -- ClassroomHub.JoinSession's "guest-
+        /// classroom" branch only ever compares that claim against the room being joined, so it
+        /// works identically here with no hub changes needed beyond the owner's own bypass.
+        /// </summary>
+        [HttpGet("{id:guid}/meeting-room/guest-join")]
+        [AllowAnonymous]
+        [EnableRateLimiting("demo-join")]
+        public async Task<ActionResult<object>> MeetingRoomGuestJoin(
+            Guid id,
+            [FromServices] iucs.readernest.domain.Repository.IUnitOfWork unitOfWork,
+            [FromServices] application.Common.Interfaces.IJitsiTokenService jitsiTokenService,
+            [FromServices] application.Common.Interfaces.ITokenService tokenService,
+            CancellationToken cancellationToken)
+        {
+            var user = await unitOfWork.Repository<domain.Entities.Users.User>()
+                .FirstOrDefaultAsync(u => u.Id == id, cancellationToken);
+            if (user is null || string.IsNullOrEmpty(user.PersonalMeetingRoomId))
+            {
+                return NotFound("This room no longer exists.");
+            }
+
             var jitsiConfigJson = await unitOfWork.Repository<domain.Entities.Integrations.Integration>().Query()
                 .Where(i => i.Key == "jitsi")
                 .Select(i => i.ConfigJson)
                 .FirstOrDefaultAsync(cancellationToken);
             var domain = application.Helper.JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
-            var expiresAtUtc = DateTime.UtcNow.AddHours(6);
+            var expiresAtUtc = DateTime.UtcNow.Add(PersonalRoomTokenLifetime);
             var token = jitsiTokenService.CreateToken(
-                domain, jitsiConfigJson, user.PersonalMeetingRoomId, $"{user.FirstName} {user.LastName}".Trim(),
-                user.Email, moderator: true, expiresAtUtc);
+                domain, jitsiConfigJson, user.PersonalMeetingRoomId, "Guest",
+                participantEmail: null, moderator: false, expiresAtUtc);
+            // Room-owner id doubles as this room's ClassroomHub "sessionId" -- see
+            // PersonalMeetingRoom.tsx and ClassroomHub.JoinSession's isPersonalRoomOwner check.
+            var hubToken = tokenService.CreateGuestClassroomHubToken(user.Id, childId: null, "Guest", expiresAtUtc);
+
+            return Ok(new
+            {
+                room = user.PersonalMeetingRoomId,
+                domain,
+                token,
+                hubToken = hubToken.AccessToken,
+                ownerId = user.Id,
+                ownerName = $"{user.FirstName} {user.LastName}".Trim(),
+            });
+        }
+
+        /// <summary>
+        /// Public, anonymous redirect an OLD (pre-in-app-guest-page) guest invite link points at
+        /// -- resolves this room's live Jitsi URL fresh on every click (a brand new
+        /// PersonalRoomTokenLifetime-lived token; never a stale baked-in one) and 302s straight
+        /// there, exactly like DemoBookingsController.Join does for a parent's demo link. Kept
+        /// only for backward compatibility with a link minted before MyMeetingRoomShortLink
+        /// started pointing at MeetingRoomGuestJoin's in-app page instead -- any link minted from
+        /// here on gets the richer in-app join. Deliberately non-moderator, same reasoning as
+        /// MeetingRoomGuestJoin above. Never expires by design -- see the remarks on
+        /// MyMeetingRoomShortLink above and on PersonalRoomTokenLifetime itself.
+        /// </summary>
+        [HttpGet("{id:guid}/meeting-room/join")]
+        [AllowAnonymous]
+        [EnableRateLimiting("demo-join")]
+        public async Task<IActionResult> MeetingRoomJoin(
+            Guid id,
+            [FromServices] iucs.readernest.domain.Repository.IUnitOfWork unitOfWork,
+            [FromServices] application.Common.Interfaces.IJitsiTokenService jitsiTokenService,
+            CancellationToken cancellationToken)
+        {
+            // A share channel's own link-preview bot, or an intermediary proxy, has no business
+            // caching this redirect -- see the matching comment on GET /m/{slug} in Program.cs.
+            Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+            Response.Headers.Pragma = "no-cache";
+
+            var user = await unitOfWork.Repository<domain.Entities.Users.User>()
+                .FirstOrDefaultAsync(u => u.Id == id, cancellationToken);
+            if (user is null || string.IsNullOrEmpty(user.PersonalMeetingRoomId))
+            {
+                return NotFound("This room no longer exists.");
+            }
+
+            var jitsiConfigJson = await unitOfWork.Repository<domain.Entities.Integrations.Integration>().Query()
+                .Where(i => i.Key == "jitsi")
+                .Select(i => i.ConfigJson)
+                .FirstOrDefaultAsync(cancellationToken);
+            var domain = application.Helper.JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
+            var token = jitsiTokenService.CreateToken(
+                domain, jitsiConfigJson, user.PersonalMeetingRoomId, "Guest",
+                participantEmail: null, moderator: false, DateTime.UtcNow.Add(PersonalRoomTokenLifetime));
             var targetUrl = application.Helper.JitsiLinkBuilder.BuildJoinUrl(user.PersonalMeetingRoomId, jitsiConfigJson, token)!;
 
-            var slug = await shortLinks.CreateAsync(targetUrl, expiresAtUtc, userId, cancellationToken);
-            var apiBaseUrl = $"{Request.Scheme}://{Request.Host}";
-            return Ok(new { url = $"{apiBaseUrl}/m/{slug}", expiresAtUtc });
+            return Redirect(targetUrl);
         }
 
         [HttpGet("{id:guid}")]
@@ -236,6 +398,45 @@ namespace iucs.readernest.api.Controllers
             return NoContent();
         }
 
+        /// <summary>
+        /// Everything a hard delete of this Parent (and every one of their children) would
+        /// permanently remove — read-only, powers the "are you sure" confirmation popup before
+        /// <see cref="HardDeleteParent"/> actually runs. Only ever meaningful for a Parent-role
+        /// account; see <see cref="IUserDeletionService"/>'s own doc comment for why Teacher/
+        /// Admin/Sub Admin accounts don't get this option at all.
+        /// </summary>
+        [HttpGet("{id:guid}/hard-delete-preview")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.Delete)]
+        public async Task<ActionResult<application.Dto.Users.DataDeletionPreviewDto>> PreviewHardDeleteParent(
+            Guid id,
+            [FromServices] IUserDeletionService deletionService,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await deletionService.PreviewParentDeletionAsync(id, cancellationToken));
+        }
+
+        /// <summary>
+        /// Permanently deletes this Parent account, every one of their children, and every row
+        /// that's actually theirs — see <see cref="IUserDeletionService.DeleteParentAsync"/>.
+        /// Financial records (Invoice/PaymentTransaction/Refund) ARE included, deliberately —
+        /// this is a stricter action than <see cref="Delete"/>'s soft delete above, not a
+        /// variant of it. Every removed row is snapshotted to DataDeletionLog first (deleted-by/
+        /// deleted-at + a full JSON copy). Frontend must call
+        /// <see cref="PreviewHardDeleteParent"/> first and get explicit confirmation — there is
+        /// no undo once this returns.
+        /// </summary>
+        [HttpDelete("{id:guid}/hard-delete")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.Delete)]
+        public async Task<IActionResult> HardDeleteParent(
+            Guid id,
+            [FromServices] IUserDeletionService deletionService,
+            CancellationToken cancellationToken)
+        {
+            var deletedByUserId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value);
+            await deletionService.DeleteParentAsync(id, deletedByUserId, cancellationToken);
+            return NoContent();
+        }
+
         [HttpPut("{id:guid}/status")]
         [HasPermission(PermissionModule.UserManagement, PermissionAction.Edit)]
         public async Task<ActionResult<UserDto>> SetStatus(
@@ -273,6 +474,20 @@ namespace iucs.readernest.api.Controllers
         {
             var temporaryPin = await _userService.ResetPinAsync(id, cancellationToken);
             return Ok(new ResetPinResultDto { TemporaryPin = temporaryPin });
+        }
+
+        /// <summary>
+        /// Shows the PIN the system last issued to this user (decrypted from the PIN vault) without
+        /// changing it. Admin role only -- deliberately stricter than Reset PIN, since this reveals a
+        /// credential rather than replacing one -- and every call is audit-logged.
+        /// </summary>
+        [HttpGet("{id:guid}/pin")]
+        [Authorize(Roles = nameof(UserRole.Admin))]
+        public async Task<ActionResult<RevealedPinDto>> RevealPin(Guid id, CancellationToken cancellationToken)
+        {
+            var pin = await _userService.RevealPinAsync(id, cancellationToken);
+            Response.Headers.CacheControl = "no-store";
+            return Ok(new RevealedPinDto { Pin = pin });
         }
 
         /// <summary>Which credential-delivery channels are enabled (Settings → Integrations), so the UI shows only usable Send buttons.</summary>

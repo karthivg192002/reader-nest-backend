@@ -67,6 +67,20 @@ namespace iucs.readernest.application.Common
             // 403's and silently renders "No records found, ₹0 total" instead of the real
             // figures shown by the chart above it.
             new("management", PermissionModule.CourseBatchManagement, View: true),
+            // ClassSessionLogs is a net-new module (added alongside the Class Session Logs
+            // screen) — SeedRolesAsync's existing-role branch never re-derives a role's
+            // Permissions from AllModulesFull() once the row already exists, so an already-
+            // seeded "admin" RoleDefinition (every real install) never picked up this module
+            // the way a brand-new database's admin role automatically would. Functionally a
+            // real Admin *account* was never blocked by this — HasPermissionAttribute passes
+            // Admin implicitly, independent of any RolePermission row — but the Roles &
+            // Permissions screen's own matrix showed "Class Session Logs" unchecked for the
+            // Admin system role while every other module showed fully checked, which read as
+            // a real inconsistency/bug. Admin-only; no other system role gets this module by
+            // default (Class Session Logs is an IT/ops-monitoring capability, granted per-role
+            // like any other custom module — e.g. to a custom "IT Admin" preset — not baseline
+            // access for Coordinator/Management/etc.).
+            new("admin", PermissionModule.ClassSessionLogs, View: true, Create: true, Edit: true, Delete: true, Approve: true),
         ];
 
         public sealed record RequiredGrant(

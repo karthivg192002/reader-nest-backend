@@ -186,6 +186,8 @@ namespace iucs.readernest.application.Services
                 ?? throw new NotFoundException(nameof(User), resetToken.UserId);
 
             user.PinHash = _passwordHasher.Hash(request.NewPin);
+            // A PIN the user chose themselves is never kept in readable form; drop the older system-issued one.
+            user.PinEncrypted = null;
             resetToken.UsedAtUtc = DateTime.UtcNow;
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(User), user.Id.ToString(), cancellationToken: cancellationToken);

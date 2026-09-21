@@ -62,6 +62,13 @@ namespace iucs.readernest.application.Services
         /// </summary>
         Task<string> ResetPinAsync(Guid userId, CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// Decrypts and returns the PIN the system last issued to this account (temporary PIN from
+        /// create / resend / reset), without changing anything. Fails when none is stored -- the user
+        /// chose their own PIN, or the account predates the feature.
+        /// </summary>
+        Task<string> RevealPinAsync(Guid userId, CancellationToken cancellationToken = default);
+
         /// <summary>Which credential-delivery channels are enabled in Settings → Integrations, so the UI shows only usable buttons.</summary>
         Task<CredentialChannelsDto> GetCredentialChannelsAsync(CancellationToken cancellationToken = default);
 

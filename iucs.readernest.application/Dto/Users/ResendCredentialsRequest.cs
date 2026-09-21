@@ -29,6 +29,12 @@ namespace iucs.readernest.application.Dto.Users
     /// delivery channel being configured and works even when the account has no phone/email
     /// the parent can currently reach.
     /// </summary>
+    /// <summary>The system-issued PIN an admin asked to view again (see IPinVault).</summary>
+    public class RevealedPinDto
+    {
+        public string Pin { get; set; } = null!;
+    }
+
     public class ResetPinResultDto
     {
         public string TemporaryPin { get; set; } = null!;

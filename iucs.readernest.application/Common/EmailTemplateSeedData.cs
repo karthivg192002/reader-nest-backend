@@ -78,6 +78,16 @@ namespace iucs.readernest.application.Common
                     """,
                     "FirstName", "Email", "ResetUrl", "ExpiryMinutes"),
 
+                New("parent-feedback-received", "Parent Feedback Received (Admin / Admission)",
+                    "Sent to Admins and the Admission team when a parent rates the demo class or a completed course.",
+                    NotificationType.General, "{{Stars}} from {{ParentName}} about {{Occasion}}",
+                    """
+                    <p><strong>{{ParentName}}</strong> rated {{Occasion}} for <strong>{{ChildName}}</strong>: <strong>{{Stars}}</strong>.</p>
+                    <p>&ldquo;{{Comment}}&rdquo;</p>
+                    <p style="font-size:12px;color:#6b7280;">Every parent rating is listed under Parent Feedback in your portal.</p>
+                    """,
+                    "Occasion", "ParentName", "ChildName", "Stars", "Comment"),
+
                 New("class-scheduled", "Class Scheduled (Teacher)",
                     "Sent to the teacher when a new session is scheduled for them.",
                     NotificationType.BookingConfirmation, "New class scheduled: {{SessionType}}",
@@ -173,6 +183,41 @@ namespace iucs.readernest.application.Common
                     <p>A deduction was applied and the session was carried forward.</p>
                     """,
                     "StartAtLocal"),
+
+                New("noshow-chain-stalled-alert", "No-Show Chain Stalled (Admin)",
+                    "Sent to Admins once an unresolved no-show has auto-rescheduled itself the maximum number of times — the chain has stopped and needs a manual decision.",
+                    NotificationType.NoShowAlert, "A class has been rescheduling itself for weeks — needs a decision",
+                    """
+                    <p>The class originally scheduled at <strong>{{StartAtLocal}}</strong> has now been marked a no-show
+                    <strong>{{CarryForwardCount}}</strong> times in a row, each time auto-rescheduling one week later.</p>
+                    <p>To stop it silently repeating indefinitely, it has <strong>not</strong> been rescheduled again this time.
+                    Please check whether this is a genuine lead/class that needs to be manually re-booked, or a stale
+                    booking that should be cancelled.</p>
+                    """,
+                    "StartAtLocal", "CarryForwardCount"),
+
+                New("demo-orphaned-noshow-alert", "Demo Session Has No Student Booked (Admin)",
+                    "Sent to Admins when a Demo session's grace period elapses with no DemoBooking linked to it at all — nobody was ever going to attend, so it is left as-is rather than being auto-flagged a no-show.",
+                    NotificationType.NoShowAlert, "A demo class has no student booked into it",
+                    """
+                    <p>The demo session scheduled at <strong>{{StartAtLocal}}</strong> has no lead/booking linked to it,
+                    so no student was ever going to attend.</p>
+                    <p>It has <strong>not</strong> been marked a no-show or carried forward, since nobody was expected to
+                    show up. Please check the calendar and Close, Mark Holiday, or Reschedule it as appropriate.</p>
+                    """,
+                    "StartAtLocal"),
+
+                New("recording-missing-alert", "Recording Missing After Class (Admin)",
+                    "Sent to Admins when a completed class never received a recording — auto-record can start with no error yet still fail later in the pipeline (upload, finalize), which nothing else catches.",
+                    NotificationType.NoShowAlert, "No recording ever arrived for a completed class",
+                    """
+                    <p>The class with <strong>{{TeacherName}}</strong> scheduled at <strong>{{StartAtLocal}}</strong>
+                    completed, but no recording was ever registered for it.</p>
+                    <p>This usually means recording started but failed somewhere in the pipeline (upload,
+                    processing) rather than never starting at all — worth checking with the teacher whether they
+                    have a local copy, and letting the parent know it isn't available if not.</p>
+                    """,
+                    "TeacherName", "StartAtLocal"),
 
                 New("class-summary", "Class Summary (Parent)",
                     "Sent to the parent after the teacher writes a class summary for a completed session.",
@@ -304,6 +349,24 @@ namespace iucs.readernest.application.Common
                     <p>Use Pay Now on your dashboard to settle it and keep classes uninterrupted.</p>
                     """,
                     "InvoiceNumber", "DueDate", "Outstanding", "Currency"),
+
+                New("payment-plan-reminder-sessions", "Payment Reminder (Batch Session Plan)",
+                    "Sent to the parent once a batch's \"payment after N sessions\" plan reaches its session count.",
+                    NotificationType.PaymentReminder, "Payment due — {{BatchName}} has completed {{SessionCount}} session(s)",
+                    """
+                    <p>{{BatchName}} has now completed <strong>{{SessionCount}}</strong> session(s), the point at which payment for this batch is due.</p>
+                    <p>Please arrange payment at your earliest convenience to keep classes uninterrupted.</p>
+                    """,
+                    "BatchName", "SessionCount"),
+
+                New("payment-plan-reminder-date", "Payment Reminder (Batch Due Date Plan)",
+                    "Sent to the parent once a batch's \"payment due on a specific date\" plan reaches its due date.",
+                    NotificationType.PaymentReminder, "Payment due — {{BatchName}}",
+                    """
+                    <p>Payment for {{BatchName}} was due on <strong>{{DueDate}}</strong>.</p>
+                    <p>Please arrange payment at your earliest convenience to keep classes uninterrupted.</p>
+                    """,
+                    "BatchName", "DueDate"),
 
                 New("payment-received-admin", "Payment Received (Admin Alert)",
                     "Sent to Admins whenever a payment settles against an invoice (manual or gateway).",

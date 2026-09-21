@@ -28,6 +28,19 @@ namespace iucs.readernest.application.Services
         /// <summary>Teacher withdraws their own still-Pending leave request.</summary>
         Task CancelLeaveAsync(Guid teacherUserId, Guid leaveId, CancellationToken cancellationToken = default);
 
+        // Class-wise cancellation allowance
+        /// <summary>Admin (or a role granted LeaveManagement) view of the configured
+        /// allowances — the default card plus any per-teacher overrides.</summary>
+        Task<IReadOnlyList<LeaveAllowanceDto>> ListLeaveAllowancesAsync(CancellationToken cancellationToken = default);
+
+        /// <summary>Admin-only: sets the centre default (omit TeacherProfileId) or one
+        /// teacher's override.</summary>
+        Task<LeaveAllowanceDto> SetLeaveAllowanceAsync(SaveLeaveAllowanceRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>The signed-in teacher's own remaining class-wise-cancellation quota for
+        /// the current calendar month.</summary>
+        Task<LeaveAllowanceStatusDto> GetMyLeaveAllowanceStatusAsync(Guid teacherUserId, CancellationToken cancellationToken = default);
+
         // Attendance capture
         Task<IReadOnlyList<SessionAttendanceDto>> CaptureAttendanceAsync(
             Guid sessionId,
@@ -46,5 +59,14 @@ namespace iucs.readernest.application.Services
         /// who taught the full class apart from one who joined and left after a few minutes.
         /// </summary>
         Task CaptureLeaveAttendanceAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Guest-link counterpart of <see cref="CaptureJoinAttendanceAsync"/> — called by
+        /// SessionsController.GuestJoin when a student-bound Guest Link is opened. There is no
+        /// authenticated userId behind that join (the caretaker never logs in), so this takes
+        /// the child directly instead of deriving it from whoever is signed in. Same
+        /// best-effort, never-throw contract as the join capture above.
+        /// </summary>
+        Task CaptureGuestJoinAttendanceAsync(Guid sessionId, Guid childId, CancellationToken cancellationToken = default);
     }
 }

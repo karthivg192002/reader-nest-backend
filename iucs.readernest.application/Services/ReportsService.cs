@@ -539,6 +539,42 @@ namespace iucs.readernest.application.Services
             };
         }
 
+        public async Task<IReadOnlyList<EmailHistoryItemDto>> GetEmailHistoryAsync(
+            NotificationType? type, int take, CancellationToken cancellationToken = default)
+        {
+            // BulkEmailRecipientId != null is exactly a Bulk Email's own per-recipient copy
+            // (SendBulkEmailAsync sets it on every SendEmailAsync call it makes) -- excluded here
+            // since BulkEmailHistoryItemDto/BulkEmailBlastDetailDto already cover those, grouped
+            // by the send event rather than one flat row per recipient.
+            var query = _unitOfWork.Repository<Notification>().Query()
+                .Include(n => n.RecipientUser)
+                .Where(n => n.Channel == NotificationChannel.Email && n.BulkEmailRecipientId == null);
+
+            if (type.HasValue)
+            {
+                query = query.Where(n => n.Type == type.Value);
+            }
+
+            return await query
+                // Sent/Failed both leave SentAtUtc null on failure -- CreatedAtUtc is what every
+                // row actually has, so it's the reliable newest-first key regardless of outcome.
+                .OrderByDescending(n => n.CreatedAtUtc)
+                .Take(take)
+                .Select(n => new EmailHistoryItemDto
+                {
+                    Id = n.Id,
+                    RecipientName = (n.RecipientUser.FirstName + " " + n.RecipientUser.LastName).Trim(),
+                    RecipientEmail = n.RecipientUser.Email,
+                    Subject = n.Subject,
+                    Type = n.Type,
+                    TemplateKey = n.TemplateKey,
+                    Status = n.Status,
+                    SentAtUtc = n.SentAtUtc,
+                    CreatedAtUtc = n.CreatedAtUtc,
+                })
+                .ToListAsync(cancellationToken);
+        }
+
         public async Task ReplyToBulkEmailAsync(
             Guid parentUserId, Guid bulkEmailRecipientId, ReplyToBulkEmailRequest request, CancellationToken cancellationToken = default)
         {

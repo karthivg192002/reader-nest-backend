@@ -11,7 +11,7 @@ namespace iucs.readernest.application.Services
     {
         /// <summary>Portal keys matching the frontend role shells.</summary>
         public static readonly IReadOnlyList<string> Portals =
-            ["admin", "teacher", "parent", "subadmin", "admission", "coordinator", "management", "student"];
+            ["admin", "teacher", "parent", "subadmin", "admission", "coordinator", "management", "student", "itadmin"];
 
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;

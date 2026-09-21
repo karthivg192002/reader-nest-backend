@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
 using iucs.readernest.domain.Entities.Common;
 using iucs.readernest.domain.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -22,7 +23,22 @@ namespace iucs.readernest.domain.Entities.Users
 
         /// <summary>Bcrypt hash of the account's numeric login PIN.</summary>
         [MaxLength(512)]
+        // Never serialized to JSON — nothing in the app round-trips a User entity through JSON
+        // for auth (login compares hashes directly in C#), and UserDeletionService's snapshot-
+        // before-hard-delete would otherwise persist this hash into DataDeletionLog forever with
+        // no legitimate future use for it, just needless exposure if that table is ever read
+        // more broadly than the primary Users table is.
+        [JsonIgnore]
         public string PinHash { get; set; } = null!;
+
+        /// <summary>
+        /// The PIN the SYSTEM last issued (temporary PIN on create / resend / admin reset), encrypted
+        /// (see IPinVault) so an admin can view it again. Null when the user has since chosen their
+        /// own PIN (never stored) or for accounts that predate this column -- reset to populate it.
+        /// </summary>
+        [MaxLength(256)]
+        [JsonIgnore]
+        public string? PinEncrypted { get; set; }
 
         [MaxLength(100)]
         public string FirstName { get; set; } = null!;

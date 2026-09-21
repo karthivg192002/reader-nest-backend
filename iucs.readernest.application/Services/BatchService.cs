@@ -1,5 +1,6 @@
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Batches;
+using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Billing;
@@ -62,6 +63,9 @@ namespace iucs.readernest.application.Services
                 StartDate = request.StartDate,
                 EndDate = request.EndDate,
                 DurationMinutesOverride = request.DurationMinutesOverride,
+                PaymentPlanType = request.PaymentPlanType,
+                PaymentAfterSessionsCount = request.PaymentAfterSessionsCount,
+                PaymentDueDate = request.PaymentDueDate,
             };
             await _unitOfWork.Repository<Batch>().AddAsync(batch, cancellationToken);
             await _auditLog.StageAsync(AuditAction.Create, nameof(Batch), batch.Id.ToString(), cancellationToken: cancellationToken);
@@ -87,6 +91,145 @@ namespace iucs.readernest.application.Services
                     $"blocked the same way once more than one student is enrolled.");
             }
 
+            var previousTeacherProfileId = batch.TeacherProfileId;
+            var teacherChanged = request.TeacherProfileId != previousTeacherProfileId;
+            var previousDurationOverride = batch.DurationMinutesOverride;
+
+            // Confirmed live: reassigning a batch's teacher here only ever updated the Batch row
+            // itself — every ClassSession already generated for it (GenerateScheduleAsync sets
+            // TeacherProfileId once, from the batch, at creation time and never revisits it) kept
+            // pointing at whoever the teacher was when each session was created. The previous
+            // teacher's own "My Classes" calendar kept showing every one of this batch's
+            // not-yet-delivered sessions — under the batch's current (possibly since renamed)
+            // name — because /api/sessions/mine filters on ClassSession.TeacherProfileId, not
+            // Batch.TeacherProfileId. A real cross-account leak, not just a stale display: the
+            // old teacher could still open and start a class that's no longer theirs.
+            // Only sessions that haven't happened yet move — same scoping SetStatusAsync already
+            // uses for its own dangling-sessions cleanup below — so a session someone already
+            // taught keeps its original teacher for accurate attendance/payout history.
+            // Validated (and the move applied to the tracked ClassSession rows) BEFORE any field
+            // on `batch` itself is mutated below, so a blocked reassignment leaves this whole
+            // update's tracked entities untouched rather than half-applied in memory.
+            List<ClassSession> movingSessions = [];
+            if (teacherChanged)
+            {
+                var now = DateTime.UtcNow;
+                movingSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                    .Where(s => s.BatchId == id
+                        && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                        && s.ScheduledStartAtUtc > now)
+                    .ToListAsync(cancellationToken);
+
+                if (movingSessions.Count > 0)
+                {
+                    // Don't silently double-book the incoming teacher — check their own calendar
+                    // and approved leave against every slot this batch is about to hand them,
+                    // the same two checks SessionService.EnsureTeacherIsFreeAsync runs for a single
+                    // session, just against all of this batch's remaining slots at once. The
+                    // candidate set (this one teacher's own other live sessions) is small, so the
+                    // actual per-slot overlap check runs in memory rather than as a SQL join
+                    // against an already-materialized list.
+                    var moveWindowStart = movingSessions.Min(s => s.ScheduledStartAtUtc);
+                    var moveWindowEnd = movingSessions.Max(s => s.ScheduledEndAtUtc);
+                    var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
+                        .Where(s => s.TeacherProfileId == request.TeacherProfileId
+                            && s.BatchId != id
+                            && (s.Status == SessionStatus.Scheduled
+                                || s.Status == SessionStatus.InProgress
+                                || s.Status == SessionStatus.CarriedForward)
+                            && s.ScheduledStartAtUtc < moveWindowEnd
+                            && s.ScheduledEndAtUtc > moveWindowStart)
+                        .ToListAsync(cancellationToken);
+                    var conflict = otherTeacherSessions
+                        .Where(other => movingSessions.Any(moving =>
+                            other.ScheduledStartAtUtc < moving.ScheduledEndAtUtc && other.ScheduledEndAtUtc > moving.ScheduledStartAtUtc))
+                        .OrderBy(s => s.ScheduledStartAtUtc)
+                        .FirstOrDefault();
+                    if (conflict is not null)
+                    {
+                        throw new DomainValidationException(
+                            $"Can't reassign this batch — the new teacher already has a session from " +
+                            $"{DateTimeDisplay.ToLocal(conflict.ScheduledStartAtUtc)} to {DateTimeDisplay.ToLocal(conflict.ScheduledEndAtUtc)}.");
+                    }
+
+                    var onLeave = await _unitOfWork.Repository<LeaveRequest>().ExistsAsync(
+                        l => l.TeacherProfileId == request.TeacherProfileId
+                            && l.Status == LeaveStatus.Approved
+                            && l.StartAtUtc < moveWindowEnd
+                            && l.EndAtUtc > moveWindowStart,
+                        cancellationToken);
+                    if (onLeave)
+                    {
+                        throw new DomainValidationException("Can't reassign this batch — the new teacher has approved leave overlapping one or more of its remaining sessions.");
+                    }
+                }
+            }
+
+            // Same staleness bug as the teacher cascade above, for duration: GenerateScheduleAsync
+            // bakes DurationMinutesOverride (or the course default) into each ClassSession's
+            // ScheduledEndAtUtc once, at generation time, and refuses to run again once sessions
+            // exist. Editing the batch's duration afterward — e.g. correcting a batch created
+            // with the course's 45-minute default down to its real 35 minutes — used to only ever
+            // update this Batch row; every already-generated session kept its original end time
+            // forever, so the teacher's calendar (which computes duration from the real
+            // start/end timestamps, not from the batch) kept showing the stale figure. Push the
+            // new duration onto every still-undelivered session, same as the teacher move does.
+            var effectivePreviousDuration = previousDurationOverride ?? course.DurationMinutes;
+            var effectiveNewDuration = request.DurationMinutesOverride ?? course.DurationMinutes;
+            var durationChanged = effectiveNewDuration != effectivePreviousDuration;
+
+            // The teacher-reassignment query above already fetched exactly this session set
+            // (same batch, same Scheduled/CarriedForward-and-still-future filter) — reuse it
+            // instead of querying twice when both changed in the same request.
+            List<ClassSession> durationSessions = teacherChanged ? movingSessions : [];
+            if (durationChanged && !teacherChanged)
+            {
+                var durationNow = DateTime.UtcNow;
+                durationSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                    .Where(s => s.BatchId == id
+                        && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                        && s.ScheduledStartAtUtc > durationNow)
+                    .ToListAsync(cancellationToken);
+            }
+
+            if (durationChanged && durationSessions.Count > 0)
+            {
+                // Extending duration can push a session into whatever the (possibly
+                // just-reassigned) teacher already has booked right after it — same
+                // double-booking guard as the teacher move, checked against the NEW end times
+                // before anything is mutated.
+                var finalTeacherId = request.TeacherProfileId;
+                var moveWindowStart = durationSessions.Min(s => s.ScheduledStartAtUtc);
+                var moveWindowEnd = durationSessions.Max(s => s.ScheduledStartAtUtc.AddMinutes(effectiveNewDuration));
+                var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.TeacherProfileId == finalTeacherId
+                        && s.BatchId != id
+                        && (s.Status == SessionStatus.Scheduled
+                            || s.Status == SessionStatus.InProgress
+                            || s.Status == SessionStatus.CarriedForward)
+                        && s.ScheduledStartAtUtc < moveWindowEnd
+                        && s.ScheduledEndAtUtc > moveWindowStart)
+                    .ToListAsync(cancellationToken);
+                var durationConflict = otherTeacherSessions
+                    .Where(other => durationSessions.Any(moving =>
+                        other.ScheduledStartAtUtc < moving.ScheduledStartAtUtc.AddMinutes(effectiveNewDuration) && other.ScheduledEndAtUtc > moving.ScheduledStartAtUtc))
+                    .OrderBy(s => s.ScheduledStartAtUtc)
+                    .FirstOrDefault();
+                if (durationConflict is not null)
+                {
+                    throw new DomainValidationException(
+                        $"Can't change this batch's duration — extending it would overlap the teacher's session from " +
+                        $"{DateTimeDisplay.ToLocal(durationConflict.ScheduledStartAtUtc)} to {DateTimeDisplay.ToLocal(durationConflict.ScheduledEndAtUtc)}.");
+                }
+            }
+
+            // Re-arm the reminder whenever the plan itself changes — a corrected session count,
+            // a pushed-out due date, or switching plan type entirely all mean whatever reminder
+            // already fired (if any) was for a since-superseded plan.
+            var paymentPlanChanged = batch.PaymentPlanType != request.PaymentPlanType
+                || batch.PaymentAfterSessionsCount != request.PaymentAfterSessionsCount
+                || batch.PaymentDueDate != request.PaymentDueDate;
+
             batch.CourseId = request.CourseId;
             batch.TeacherProfileId = request.TeacherProfileId;
             batch.Name = request.Name.Trim();
@@ -94,6 +237,35 @@ namespace iucs.readernest.application.Services
             batch.StartDate = request.StartDate;
             batch.EndDate = request.EndDate;
             batch.DurationMinutesOverride = request.DurationMinutesOverride;
+            batch.PaymentPlanType = request.PaymentPlanType;
+            batch.PaymentAfterSessionsCount = request.PaymentAfterSessionsCount;
+            batch.PaymentDueDate = request.PaymentDueDate;
+            if (paymentPlanChanged)
+            {
+                batch.PaymentReminderSentAtUtc = null;
+            }
+
+            if (movingSessions.Count > 0)
+            {
+                foreach (var session in movingSessions)
+                {
+                    session.TeacherProfileId = request.TeacherProfileId;
+                }
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
+                    changesJson: $"{{\"batchId\":\"{batch.Id}\",\"teacherReassigned\":true,\"from\":\"{previousTeacherProfileId}\",\"to\":\"{request.TeacherProfileId}\",\"sessionCount\":{movingSessions.Count}}}",
+                    cancellationToken: cancellationToken);
+            }
+
+            if (durationChanged && durationSessions.Count > 0)
+            {
+                foreach (var session in durationSessions)
+                {
+                    session.ScheduledEndAtUtc = session.ScheduledStartAtUtc.AddMinutes(effectiveNewDuration);
+                }
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
+                    changesJson: $"{{\"batchId\":\"{batch.Id}\",\"durationReconciled\":true,\"from\":{effectivePreviousDuration},\"to\":{effectiveNewDuration},\"sessionCount\":{durationSessions.Count}}}",
+                    cancellationToken: cancellationToken);
+            }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(Batch), batch.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
@@ -122,19 +294,7 @@ namespace iucs.readernest.application.Services
             // future sessions left to cancel; this only bites the manual/early transition.
             if (status is BatchStatus.Dormant or BatchStatus.Archived)
             {
-                var now = DateTime.UtcNow;
-                var danglingSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
-                    .Where(s => s.BatchId == id
-                        && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
-                        && s.ScheduledStartAtUtc > now)
-                    .ToListAsync(cancellationToken);
-
-                foreach (var session in danglingSessions)
-                {
-                    session.Status = SessionStatus.Cancelled;
-                    session.CancellationReason = $"Batch marked {status}.";
-                }
-
+                await CancelDanglingFutureSessionsAsync(id, $"Batch marked {status}.", cancellationToken);
                 await ExpireSubscriptionsForCompletedBatchAsync(batch, cancellationToken);
             }
 
@@ -142,6 +302,237 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return await GetAsync(batch.Id, cancellationToken);
+        }
+
+        /// <summary>
+        /// Soft-deletes the batch (BaseEntity.IsDeleted — the global query filter in
+        /// ReaderNestDbContext.OnModelCreating then excludes it from every future query). Refused
+        /// while it still has an active student: unlike Archive, which just changes Status and
+        /// leaves the batch fully visible, a deleted batch disappears from every list, and that
+        /// student would be left enrolled in a batch nobody can see or manage anymore — withdraw
+        /// them (or move them to another batch) first. Any still-undelivered session left over
+        /// (e.g. a batch whose last student was withdrawn without RemoveStudentAsync cancelling
+        /// their future sessions) is cancelled the same way SetStatusAsync does for
+        /// Dormant/Archived, so nothing stays on a teacher's or parent's calendar for a batch
+        /// that no longer exists.
+        /// </summary>
+        public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            var batch = await _unitOfWork.Repository<Batch>().GetByIdAsync(id, cancellationToken)
+                ?? throw new NotFoundException(nameof(Batch), id);
+
+            var activeCount = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .CountAsync(e => e.BatchId == id && e.Status == EnrollmentStatus.Active, cancellationToken);
+            if (activeCount > 0)
+            {
+                throw new DomainValidationException(
+                    $"Batch '{batch.Name}' has {activeCount} active student(s); withdraw them (or move them to another batch) before deleting it.");
+            }
+
+            var cancelledSessionCount = await CancelDanglingFutureSessionsAsync(id, "Batch deleted.", cancellationToken);
+
+            _unitOfWork.Repository<Batch>().Remove(batch);
+            // Who deleted it and when are already captured without any extra work here — this
+            // row's own UpdatedBy/DeletedAtUtc (AuditableEntityInterceptor, on every AuditEntity)
+            // and this AuditLog row's own ActorUserId/CreatedAtUtc (AuditLogService.StageAsync)
+            // both record it. changesJson adds the one thing neither of those captures on its
+            // own: what this batch was actually staffed with and how many sessions the deletion
+            // just cancelled, for anyone reviewing the trail later.
+            await _auditLog.StageAsync(AuditAction.Delete, nameof(Batch), batch.Id.ToString(),
+                changesJson: $"{{\"teacherProfileId\":\"{batch.TeacherProfileId}\",\"cancelledSessionCount\":{cancelledSessionCount}}}",
+                cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
+        /// <summary>
+        /// Cancels every still-undelivered (Scheduled/CarriedForward, not yet started) session
+        /// for a batch that's stopped running — shared by SetStatusAsync's Dormant/Archived
+        /// transition and DeleteAsync, so neither leaves a session dangling on a calendar for a
+        /// batch nobody's tracking anymore. Returns how many were cancelled.
+        /// </summary>
+        private async Task<int> CancelDanglingFutureSessionsAsync(Guid batchId, string cancellationReason, CancellationToken cancellationToken)
+        {
+            var now = DateTime.UtcNow;
+            var danglingSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .Where(s => s.BatchId == batchId
+                    && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                    && s.ScheduledStartAtUtc > now)
+                .ToListAsync(cancellationToken);
+
+            foreach (var session in danglingSessions)
+            {
+                session.Status = SessionStatus.Cancelled;
+                session.CancellationReason = cancellationReason;
+            }
+
+            return danglingSessions.Count;
+        }
+
+        public async Task<ReconcileStaleSessionTeachersResultDto> ReconcileStaleSessionTeachersAsync(
+            CancellationToken cancellationToken = default)
+        {
+            var now = DateTime.UtcNow;
+
+            // The cascade in UpdateAsync only started running once that fix shipped — anything
+            // reassigned before then still has ClassSession rows stamped with whoever the
+            // teacher was at generation time, even though the Batch row itself has long since
+            // moved on. Find every such orphaned, still-undelivered session in one query.
+            var staleSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .Include(s => s.Batch)
+                .Where(s => (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                    && s.ScheduledStartAtUtc > now
+                    && s.Batch != null
+                    && s.TeacherProfileId != s.Batch.TeacherProfileId)
+                .ToListAsync(cancellationToken);
+
+            var conflicts = new List<ReconcileStaleSessionTeacherConflictDto>();
+            var sessionsMoved = 0;
+            var batchesFixed = 0;
+
+            foreach (var group in staleSessions.GroupBy(s => s.BatchId))
+            {
+                var movingSessions = group.ToList();
+                var batch = movingSessions[0].Batch!;
+                var newTeacherId = batch.TeacherProfileId;
+
+                // Same double-booking + approved-leave guard UpdateAsync's own reassignment
+                // cascade runs, so this repair can't silently hand the new teacher a conflicting
+                // slot just because the corruption predates them.
+                var moveWindowStart = movingSessions.Min(s => s.ScheduledStartAtUtc);
+                var moveWindowEnd = movingSessions.Max(s => s.ScheduledEndAtUtc);
+                var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.TeacherProfileId == newTeacherId
+                        && s.BatchId != batch.Id
+                        && (s.Status == SessionStatus.Scheduled
+                            || s.Status == SessionStatus.InProgress
+                            || s.Status == SessionStatus.CarriedForward)
+                        && s.ScheduledStartAtUtc < moveWindowEnd
+                        && s.ScheduledEndAtUtc > moveWindowStart)
+                    .ToListAsync(cancellationToken);
+                var conflict = otherTeacherSessions
+                    .Where(other => movingSessions.Any(moving =>
+                        other.ScheduledStartAtUtc < moving.ScheduledEndAtUtc && other.ScheduledEndAtUtc > moving.ScheduledStartAtUtc))
+                    .OrderBy(s => s.ScheduledStartAtUtc)
+                    .FirstOrDefault();
+                if (conflict is not null)
+                {
+                    conflicts.Add(new ReconcileStaleSessionTeacherConflictDto(batch.Id, batch.Name, newTeacherId,
+                        $"New teacher already has a session from {DateTimeDisplay.ToLocal(conflict.ScheduledStartAtUtc)} to {DateTimeDisplay.ToLocal(conflict.ScheduledEndAtUtc)}."));
+                    continue;
+                }
+
+                var onLeave = await _unitOfWork.Repository<LeaveRequest>().ExistsAsync(
+                    l => l.TeacherProfileId == newTeacherId
+                        && l.Status == LeaveStatus.Approved
+                        && l.StartAtUtc < moveWindowEnd
+                        && l.EndAtUtc > moveWindowStart,
+                    cancellationToken);
+                if (onLeave)
+                {
+                    conflicts.Add(new ReconcileStaleSessionTeacherConflictDto(batch.Id, batch.Name, newTeacherId,
+                        "New teacher has approved leave overlapping one or more of this batch's remaining sessions."));
+                    continue;
+                }
+
+                var movedFrom = movingSessions.Select(s => s.TeacherProfileId).Distinct().ToList();
+                foreach (var session in movingSessions)
+                {
+                    session.TeacherProfileId = newTeacherId;
+                }
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
+                    changesJson: $"{{\"batchId\":\"{batch.Id}\",\"staleTeacherReconciled\":true,\"from\":[{string.Join(",", movedFrom.Select(t => $"\"{t}\""))}],\"to\":\"{newTeacherId}\",\"sessionCount\":{movingSessions.Count}}}",
+                    cancellationToken: cancellationToken);
+
+                batchesFixed++;
+                sessionsMoved += movingSessions.Count;
+            }
+
+            if (sessionsMoved > 0)
+            {
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+
+            return new ReconcileStaleSessionTeachersResultDto(batchesFixed, sessionsMoved, conflicts);
+        }
+
+        public async Task<ReconcileStaleSessionDurationsResultDto> ReconcileStaleSessionDurationsAsync(
+            CancellationToken cancellationToken = default)
+        {
+            var now = DateTime.UtcNow;
+
+            // Same shape of staleness as ReconcileStaleSessionTeachersAsync, for duration: a
+            // batch whose DurationMinutesOverride was edited (or whose course's DurationMinutes
+            // it fell back to has changed) after its schedule was generated left every
+            // already-generated, still-undelivered ClassSession stamped with the old end time —
+            // UpdateAsync's cascade only applies to edits made after that fix shipped. Compare
+            // each session's real (start, end) gap against what the batch says it should be
+            // today and collect anything that no longer matches.
+            var candidateSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .Include(s => s.Batch).ThenInclude(b => b!.Course)
+                .Where(s => (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                    && s.ScheduledStartAtUtc > now
+                    && s.Batch != null)
+                .ToListAsync(cancellationToken);
+
+            var staleSessions = candidateSessions
+                .Where(s => s.ScheduledEndAtUtc != s.ScheduledStartAtUtc.AddMinutes(
+                    s.Batch!.DurationMinutesOverride ?? s.Batch.Course.DurationMinutes))
+                .ToList();
+
+            var conflicts = new List<ReconcileStaleSessionDurationConflictDto>();
+            var sessionsFixed = 0;
+            var batchesFixed = 0;
+
+            foreach (var group in staleSessions.GroupBy(s => s.BatchId))
+            {
+                var sessions = group.ToList();
+                var batch = sessions[0].Batch!;
+                var effectiveDuration = batch.DurationMinutesOverride ?? batch.Course.DurationMinutes;
+
+                // Same double-booking guard as the teacher-move repair: don't silently push a
+                // session into whatever this batch's teacher already has booked right after it
+                // just because the corruption predates this fix.
+                var moveWindowStart = sessions.Min(s => s.ScheduledStartAtUtc);
+                var moveWindowEnd = sessions.Max(s => s.ScheduledStartAtUtc.AddMinutes(effectiveDuration));
+                var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.TeacherProfileId == batch.TeacherProfileId
+                        && s.BatchId != batch.Id
+                        && (s.Status == SessionStatus.Scheduled
+                            || s.Status == SessionStatus.InProgress
+                            || s.Status == SessionStatus.CarriedForward)
+                        && s.ScheduledStartAtUtc < moveWindowEnd
+                        && s.ScheduledEndAtUtc > moveWindowStart)
+                    .ToListAsync(cancellationToken);
+                var conflict = otherTeacherSessions
+                    .Where(other => sessions.Any(moving =>
+                        other.ScheduledStartAtUtc < moving.ScheduledStartAtUtc.AddMinutes(effectiveDuration) && other.ScheduledEndAtUtc > moving.ScheduledStartAtUtc))
+                    .OrderBy(s => s.ScheduledStartAtUtc)
+                    .FirstOrDefault();
+                if (conflict is not null)
+                {
+                    conflicts.Add(new ReconcileStaleSessionDurationConflictDto(batch.Id, batch.Name, effectiveDuration,
+                        $"Correcting the duration would overlap the teacher's session from {DateTimeDisplay.ToLocal(conflict.ScheduledStartAtUtc)} to {DateTimeDisplay.ToLocal(conflict.ScheduledEndAtUtc)}."));
+                    continue;
+                }
+
+                foreach (var session in sessions)
+                {
+                    session.ScheduledEndAtUtc = session.ScheduledStartAtUtc.AddMinutes(effectiveDuration);
+                }
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
+                    changesJson: $"{{\"batchId\":\"{batch.Id}\",\"staleDurationReconciled\":true,\"to\":{effectiveDuration},\"sessionCount\":{sessions.Count}}}",
+                    cancellationToken: cancellationToken);
+
+                batchesFixed++;
+                sessionsFixed += sessions.Count;
+            }
+
+            if (sessionsFixed > 0)
+            {
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+
+            return new ReconcileStaleSessionDurationsResultDto(batchesFixed, sessionsFixed, conflicts);
         }
 
         /// <summary>
@@ -189,6 +580,102 @@ namespace iucs.readernest.application.Services
             return enrollments.Select(e => e.ToDto()).ToList();
         }
 
+        /// <summary>Teacher's own "My Students" page — see TeacherStudentDto's own doc comment
+        /// for the feedback this answers. One row per active enrollment across every batch
+        /// this teacher is assigned to, with per-batch progress and per-child attendance
+        /// computed via grouped queries rather than one lookup per child (the exact N+1 shape
+        /// already found and fixed elsewhere this session).</summary>
+        public async Task<IReadOnlyList<TeacherStudentDto>> ListMyStudentsAsync(Guid teacherUserId, CancellationToken cancellationToken = default)
+        {
+            var teacherProfileId = await _unitOfWork.Repository<TeacherProfile>().Query()
+                .Where(t => t.UserId == teacherUserId)
+                .Select(t => (Guid?)t.Id)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (teacherProfileId is null)
+            {
+                return [];
+            }
+
+            var enrollments = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.Status == EnrollmentStatus.Active
+                    && e.Batch.TeacherProfileId == teacherProfileId
+                    && !e.Batch.IsDeleted)
+                .Include(e => e.Child).ThenInclude(c => c.ParentProfile).ThenInclude(p => p.User)
+                .Include(e => e.Batch).ThenInclude(b => b.Course)
+                .OrderBy(e => e.Child.FirstName).ThenBy(e => e.Child.LastName)
+                .ToListAsync(cancellationToken);
+
+            if (enrollments.Count == 0)
+            {
+                return [];
+            }
+
+            var batchIds = enrollments.Select(e => e.BatchId).Distinct().ToList();
+
+            // Course-progress side: every completed session's own start time, per batch --
+            // needed as the real "how many classes actually ran" denominator below, not just a
+            // count, since a child who enrolled partway through must only be judged against
+            // sessions that ran after they joined. Every child in the same batch shares this
+            // list, so it's one grouped query instead of one per enrollment.
+            var completedSessionsByBatch = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.BatchId.HasValue && batchIds.Contains(s.BatchId.Value) && s.Status == SessionStatus.Completed)
+                .Select(s => new { BatchId = s.BatchId!.Value, s.ScheduledStartAtUtc })
+                .ToListAsync(cancellationToken);
+            var completedByBatch = completedSessionsByBatch
+                .GroupBy(s => s.BatchId)
+                .ToDictionary(g => g.Key, g => g.Select(s => s.ScheduledStartAtUtc).ToList());
+
+            // Attendance side: Present rows only, per (child, batch) pair -- a child who never
+            // joined and was never manually marked Absent has NO row at all (auto-capture only
+            // ever writes Present; Absent is a manual teacher entry — see
+            // AcademicOpsService.CaptureAttendanceCoreAsync), so the "how many classes ran"
+            // denominator above must come from actual completed sessions, never from counting
+            // attendance rows -- that would silently undercount a chronically absent child down
+            // to "no sessions yet" instead of flagging them, the exact opposite of what this
+            // page exists for.
+            var childIds = enrollments.Select(e => e.ChildId).Distinct().ToList();
+            var presentRows = await _unitOfWork.Repository<SessionAttendance>().Query()
+                .Where(a => a.ParticipantType == ParticipantType.Student
+                    && a.Status == AttendanceStatus.Present
+                    && a.ChildId.HasValue && childIds.Contains(a.ChildId.Value)
+                    && a.ClassSession.BatchId.HasValue && batchIds.Contains(a.ClassSession.BatchId.Value))
+                .Select(a => new
+                {
+                    a.ChildId,
+                    BatchId = a.ClassSession.BatchId!.Value,
+                    a.ClassSession.ScheduledStartAtUtc,
+                    a.JoinedAtUtc,
+                })
+                .ToListAsync(cancellationToken);
+
+            return enrollments.Select(e =>
+            {
+                var completedDates = completedByBatch.GetValueOrDefault(e.BatchId, []);
+                var completed = completedDates.Count;
+                var totalSessions = e.Batch.Course.TotalSessions;
+                var sinceEnrollment = completedDates.Count(d => d >= e.CreatedAtUtc);
+                var present = presentRows.Where(a => a.ChildId == e.ChildId && a.BatchId == e.BatchId && a.ScheduledStartAtUtc >= e.CreatedAtUtc).ToList();
+
+                return new TeacherStudentDto
+                {
+                    ChildId = e.ChildId,
+                    ChildName = $"{e.Child.FirstName} {e.Child.LastName}".Trim(),
+                    ParentName = $"{e.Child.ParentProfile.User.FirstName} {e.Child.ParentProfile.User.LastName}".Trim(),
+                    AcademicLevel = e.Child.AcademicLevel,
+                    BatchId = e.BatchId,
+                    BatchName = e.Batch.Name,
+                    CourseName = e.Batch.Course.Name,
+                    EnrolledAtUtc = e.CreatedAtUtc,
+                    TotalSessions = totalSessions,
+                    CompletedSessions = completed,
+                    RemainingSessions = Math.Max(0, totalSessions - completed),
+                    SessionsSinceEnrollment = sinceEnrollment,
+                    AttendedCount = present.Count,
+                    LastAttendedAtUtc = present.Count > 0 ? present.Max(a => a.JoinedAtUtc) : null,
+                };
+            }).ToList();
+        }
+
         public async Task<IReadOnlyList<UnassignedChildDto>> ListUnassignedStudentsAsync(Guid batchId, CancellationToken cancellationToken = default)
         {
             var alreadyEnrolledChildIds = await _unitOfWork.Repository<BatchEnrollment>().Query()
@@ -202,12 +689,26 @@ namespace iucs.readernest.application.Services
                 .OrderBy(c => c.FirstName).ThenBy(c => c.LastName)
                 .ToListAsync(cancellationToken);
 
+            // Course(s) each candidate is already enrolled in elsewhere -- the client-reported
+            // "can't tell which profile belongs to which course" case: a same-named child can
+            // legitimately have two Child rows (one per course they're enrolled in), and this is
+            // the only signal the picker has to tell them apart besides parent name/email.
+            var candidateIds = candidates.Select(c => c.Id).ToList();
+            var coursesByChild = (await _unitOfWork.Repository<BatchEnrollment>().Query()
+                    .Where(e => candidateIds.Contains(e.ChildId) && e.Status == EnrollmentStatus.Active)
+                    .Select(e => new { e.ChildId, CourseName = e.Batch.Course.Name })
+                    .ToListAsync(cancellationToken))
+                .GroupBy(e => e.ChildId)
+                .ToDictionary(g => g.Key, g => string.Join(", ", g.Select(x => x.CourseName).Distinct()));
+
             return candidates.Select(c => new UnassignedChildDto
             {
                 ChildId = c.Id,
                 ChildName = $"{c.FirstName} {c.LastName}".Trim(),
                 ParentName = c.ParentProfile?.User is { } u ? $"{u.FirstName} {u.LastName}".Trim() : "—",
+                ParentEmail = c.ParentProfile?.User?.Email,
                 AcademicLevel = c.AcademicLevel,
+                CurrentCourses = coursesByChild.TryGetValue(c.Id, out var names) && names.Length > 0 ? names : null,
             }).ToList();
         }
 

@@ -32,6 +32,36 @@ namespace iucs.readernest.application.Dto.Portal
         public Guid? SuspendedInvoiceId { get; set; }
     }
 
+    /// <summary>
+    /// One recording watchable by the signed-in parent, across every one of their children's
+    /// batches in a single call -- parent/Recordings.tsx used to fetch the parent's whole
+    /// schedule then call GET /api/parent-portal/sessions/{id}/recordings once per completed
+    /// session, the identical N+1 shape already found and fixed on the admin and teacher
+    /// Recordings pages (see RecordingListItemDto). ChildIds carries every one of this parent's
+    /// own children placed in the recording's batch, so the page can still filter to whichever
+    /// child is currently selected without a second round trip per session.
+    /// </summary>
+    public class ParentRecordingDto
+    {
+        public Guid Id { get; set; }
+
+        public Guid ClassSessionId { get; set; }
+
+        public string StorageUrl { get; set; } = null!;
+
+        public int? DurationSeconds { get; set; }
+
+        public DateTime? ExpiresAtUtc { get; set; }
+
+        public DateTime CreatedAtUtc { get; set; }
+
+        public string? BatchName { get; set; }
+
+        public DateTime ScheduledStartAtUtc { get; set; }
+
+        public IReadOnlyList<Guid> ChildIds { get; set; } = [];
+    }
+
     public class ParentDashboardDto
     {
         public Guid ParentProfileId { get; set; }
@@ -277,6 +307,39 @@ namespace iucs.readernest.application.Dto.Reports
         public int SuccessCount { get; set; }
 
         public int FailureCount { get; set; }
+    }
+
+    /// <summary>
+    /// One individual email actually sent to one user -- reminders, booking confirmations,
+    /// payment notices and every other system email, but never a Bulk Email's own per-recipient
+    /// copy (that's what BulkEmailHistoryItemDto/BulkEmailBlastDetailDto already cover, grouped
+    /// by the send event rather than one row per recipient). Backs "Bulk Email History"'s
+    /// non-default filter view: "every other email sent to users," itself filterable by type.
+    /// </summary>
+    public class EmailHistoryItemDto
+    {
+        public Guid Id { get; set; }
+
+        public string RecipientName { get; set; } = null!;
+
+        public string RecipientEmail { get; set; } = null!;
+
+        public string? Subject { get; set; }
+
+        public NotificationType Type { get; set; }
+
+        /// <summary>The template this was rendered from (e.g. "session-reminder-parent"), null
+        /// for a hand-built email -- more specific than Type, which several unrelated templates
+        /// can share (see Notification's own doc comment).</summary>
+        public string? TemplateKey { get; set; }
+
+        public NotificationStatus Status { get; set; }
+
+        /// <summary>Null when delivery never completed (Failed, or still Pending) -- CreatedAtUtc
+        /// is what this list sorts and displays by in that case.</summary>
+        public DateTime? SentAtUtc { get; set; }
+
+        public DateTime CreatedAtUtc { get; set; }
     }
 
     /// <summary>One blast's full recipient list with delivery status and any reply, for the

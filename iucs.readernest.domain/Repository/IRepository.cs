@@ -71,5 +71,34 @@ namespace iucs.readernest.domain.Repository
             Expression<Func<TEntity, bool>> predicate,
             Expression<Func<SetPropertyCalls<TEntity>, SetPropertyCalls<TEntity>>> setters,
             CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Single-statement, TRUE <c>DELETE FROM ... WHERE &lt;predicate&gt;</c> — issued straight
+        /// to the database, bypassing the change tracker entirely (so <see cref="Remove"/>'s
+        /// soft-delete conversion, which only runs inside <c>SaveChangesAsync</c>'s audit
+        /// interceptor, never applies here) and returning the number of rows actually removed.
+        /// <para>
+        /// Exists only for the Parent/Student hard-delete flow (<c>UserDeletionService</c>) — every
+        /// other removal in the app goes through <see cref="Remove"/> and must stay a soft
+        /// delete. Deliberately <c>.IgnoreQueryFilters()</c>, unlike <see cref="ExecuteUpdateAsync"/>:
+        /// a genuine hard-delete purge is supposed to also remove a row that was already
+        /// soft-deleted earlier (e.g. a previously-withdrawn BatchEnrollment for the same child),
+        /// not leave it behind invisible-but-present. Callers MUST snapshot every row this will
+        /// match (e.g. into <c>DataDeletionLog</c>) before calling it — once this returns, that
+        /// data exists nowhere else.
+        /// </para>
+        /// </summary>
+        Task<int> ExecuteHardDeleteAsync(
+            Expression<Func<TEntity, bool>> predicate,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Paired read for <see cref="ExecuteHardDeleteAsync"/>: the same <c>.IgnoreQueryFilters()</c>
+        /// scope, so a caller that snapshots-then-deletes (e.g. into <c>DataDeletionLog</c>) never
+        /// snapshots a different row set than the delete actually removes.
+        /// </summary>
+        Task<IReadOnlyList<TEntity>> ListForHardDeleteAsync(
+            Expression<Func<TEntity, bool>> predicate,
+            CancellationToken cancellationToken = default);
     }
 }

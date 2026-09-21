@@ -49,13 +49,18 @@ namespace iucs.readernest.domain.Data
         public DbSet<EnrollmentForm> EnrollmentForms => Set<EnrollmentForm>();
         public DbSet<Holiday> Holidays => Set<Holiday>();
         public DbSet<LeaveRequest> LeaveRequests => Set<LeaveRequest>();
+        public DbSet<LeaveRequestSession> LeaveRequestSessions => Set<LeaveRequestSession>();
+        public DbSet<LeaveAllowance> LeaveAllowances => Set<LeaveAllowance>();
 
         // Sessions
         public DbSet<ClassSession> ClassSessions => Set<ClassSession>();
         public DbSet<SessionAttendance> SessionAttendances => Set<SessionAttendance>();
         public DbSet<SessionRecording> SessionRecordings => Set<SessionRecording>();
+
+        public DbSet<SessionPresentation> SessionPresentations => Set<SessionPresentation>();
         public DbSet<EngagementEvent> EngagementEvents => Set<EngagementEvent>();
         public DbSet<StudentAward> StudentAwards => Set<StudentAward>();
+        public DbSet<ClassSessionEventLog> ClassSessionEventLogs => Set<ClassSessionEventLog>();
 
         // Quizzes
         public DbSet<QuizQuestion> QuizQuestions => Set<QuizQuestion>();
@@ -69,6 +74,7 @@ namespace iucs.readernest.domain.Data
         public DbSet<DemoBooking> DemoBookings => Set<DemoBooking>();
         public DbSet<DemoParticipant> DemoParticipants => Set<DemoParticipant>();
         public DbSet<DemoFeedback> DemoFeedbacks => Set<DemoFeedback>();
+        public DbSet<ParentFeedback> ParentFeedbacks => Set<ParentFeedback>();
         public DbSet<StoreInquiry> StoreInquiries => Set<StoreInquiry>();
 
         // Billing
@@ -89,6 +95,8 @@ namespace iucs.readernest.domain.Data
         public DbSet<Resource> Resources => Set<Resource>();
         public DbSet<ResourceAccess> ResourceAccesses => Set<ResourceAccess>();
         public DbSet<ResourceBatchVisibility> ResourceBatchVisibilities => Set<ResourceBatchVisibility>();
+        public DbSet<ResourceFolder> ResourceFolders => Set<ResourceFolder>();
+        public DbSet<ResourceFolderAccess> ResourceFolderAccesses => Set<ResourceFolderAccess>();
 
         // Communication & auditing
         public DbSet<Notification> Notifications => Set<Notification>();
@@ -98,6 +106,7 @@ namespace iucs.readernest.domain.Data
         public DbSet<EmailTemplate> EmailTemplates => Set<EmailTemplate>();
         public DbSet<ProgressReport> ProgressReports => Set<ProgressReport>();
         public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
+        public DbSet<DataDeletionLog> DataDeletionLogs => Set<DataDeletionLog>();
 
         // "Ask a Doubt" chatbot
         public DbSet<ChatFaq> ChatFaqs => Set<ChatFaq>();

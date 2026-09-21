@@ -23,9 +23,12 @@ namespace iucs.readernest.api.Controllers
             _progressReportService = progressReportService;
         }
 
-        /// <summary>Visibility rule: admin (or granted sub-admin) sees every child's reports.</summary>
+        /// <summary>Visibility rule: admin (or granted sub-admin/admission) sees every child's
+        /// reports. AdmissionTeam is included deliberately alongside SubAdmin (not Parent, who
+        /// uses the separate /mine route below) — same gap already fixed on EmailTemplatesController
+        /// and ChatbotController for the same Communication-gated menu items.</summary>
         [HttpGet]
-        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)}")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
         [HasPermission(PermissionModule.Communication, PermissionAction.View)]
         public async Task<ActionResult<IReadOnlyList<ProgressReportDto>>> List(
             [FromQuery] int? year,
@@ -46,7 +49,7 @@ namespace iucs.readernest.api.Controllers
         }
 
         [HttpPut("{id:guid}")]
-        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)}")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
         [HasPermission(PermissionModule.Communication, PermissionAction.Edit)]
         public async Task<ActionResult<ProgressReportDto>> SaveContent(
             Guid id,
@@ -58,7 +61,7 @@ namespace iucs.readernest.api.Controllers
 
         /// <summary>Emails the report to the parent and locks it against further edits.</summary>
         [HttpPost("{id:guid}/send")]
-        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)}")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
         [HasPermission(PermissionModule.Communication, PermissionAction.Create)]
         public async Task<ActionResult<ProgressReportDto>> Send(Guid id, CancellationToken cancellationToken)
         {

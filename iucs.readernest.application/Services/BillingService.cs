@@ -2031,17 +2031,13 @@ namespace iucs.readernest.application.Services
             // still-unsettled invoices were otherwise left Pending/Overdue forever — nothing
             // else ever revisits them once the subscription they belong to is gone, so the
             // parent kept seeing a payable balance for a plan they'd already cancelled.
-            var openInvoiceIds = await _unitOfWork.Repository<Invoice>().Query()
+            var openInvoices = await _unitOfWork.Repository<Invoice>().TrackedQuery()
                 .Where(i => i.SubscriptionId == subscription.Id
                     && i.Status != InvoiceStatus.Paid
                     && i.Status != InvoiceStatus.Cancelled)
-                .Select(i => i.Id)
                 .ToListAsync(cancellationToken);
-            foreach (var openInvoiceId in openInvoiceIds)
+            foreach (var openInvoice in openInvoices)
             {
-                // Load each one tracked (Query() above is AsNoTracking) so the mutation persists.
-                var openInvoice = await _unitOfWork.Repository<Invoice>().GetByIdAsync(openInvoiceId, cancellationToken)
-                    ?? throw new NotFoundException(nameof(Invoice), openInvoiceId);
                 openInvoice.Status = InvoiceStatus.Cancelled;
                 _unitOfWork.Repository<Invoice>().Update(openInvoice);
                 await _auditLog.StageAsync(AuditAction.Update, nameof(Invoice), openInvoice.Id.ToString(),

@@ -29,6 +29,7 @@ namespace iucs.readernest.application.Services
         private readonly IWhatsAppSender _whatsAppSender;
         private readonly ISmsSender _smsSender;
         private readonly IBulkFileReader _bulkFileReader;
+        private readonly IPinVault _pinVault;
         private readonly ILogger<UserService> _logger;
 
         public UserService(
@@ -41,6 +42,7 @@ namespace iucs.readernest.application.Services
             IWhatsAppSender whatsAppSender,
             ISmsSender smsSender,
             IBulkFileReader bulkFileReader,
+            IPinVault pinVault,
             ILogger<UserService> logger)
         {
             _unitOfWork = unitOfWork;
@@ -52,6 +54,7 @@ namespace iucs.readernest.application.Services
             _whatsAppSender = whatsAppSender;
             _smsSender = smsSender;
             _bulkFileReader = bulkFileReader;
+            _pinVault = pinVault;
             _logger = logger;
         }
 
@@ -231,6 +234,7 @@ namespace iucs.readernest.application.Services
             {
                 Email = email,
                 PinHash = _passwordHasher.Hash(temporaryPin),
+                PinEncrypted = _pinVault.Protect(temporaryPin),
                 FirstName = request.FirstName.Trim(),
                 LastName = request.LastName?.Trim() ?? string.Empty,
                 Phone = request.Phone,
@@ -306,6 +310,20 @@ namespace iucs.readernest.application.Services
             if (!string.IsNullOrWhiteSpace(request.TimeZoneId))
             {
                 user.TimeZoneId = request.TimeZoneId;
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.Email))
+            {
+                var newEmail = request.Email.Trim().ToLowerInvariant();
+                if (newEmail != user.Email)
+                {
+                    if (await _unitOfWork.Repository<User>().ExistsAsync(u => u.Email == newEmail && u.Id != id, cancellationToken))
+                    {
+                        throw new ConflictException($"A user with email '{newEmail}' already exists.");
+                    }
+
+                    user.Email = newEmail;
+                }
             }
 
             if (request.DepartmentId.HasValue && user.TeacherProfile is not null)
@@ -682,6 +700,7 @@ namespace iucs.readernest.application.Services
             }
 
             user.PinHash = _passwordHasher.Hash(temporaryPin);
+            user.PinEncrypted = _pinVault.Protect(temporaryPin);
             _unitOfWork.Repository<User>().Update(user);
 
             // The original welcome notification (and any earlier resend) still shows the
@@ -711,6 +730,37 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
+        public async Task<string> RevealPinAsync(Guid userId, CancellationToken cancellationToken = default)
+        {
+            var user = await _unitOfWork.Repository<User>().GetByIdAsync(userId, cancellationToken)
+                ?? throw new NotFoundException(nameof(User), userId);
+
+            // Same rule as ResetPinAsync: a PIN is the whole credential (email + PIN), so an Admin
+            // account's is never shown through this action.
+            if (user.Role == UserRole.Admin)
+            {
+                throw new DomainValidationException("Admin accounts' PINs can't be viewed through this action.");
+            }
+
+            var pin = string.IsNullOrEmpty(user.PinEncrypted) ? null : _pinVault.TryReveal(user.PinEncrypted);
+            if (pin is null)
+            {
+                throw new DomainValidationException(
+                    "No PIN is stored for this account to view -- the user chose their own PIN, or it was set before PIN viewing existed. Use Reset PIN to issue a new one.");
+            }
+
+            // Reading a credential is itself a sensitive action: recorded with who did it.
+            await _auditLog.StageAsync(
+                AuditAction.Update,
+                nameof(User),
+                user.Id.ToString(),
+                "System-issued PIN viewed by admin",
+                cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return pin;
+        }
+
         public async Task<string> ResetPinAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             var user = await _unitOfWork.Repository<User>().GetByIdAsync(userId, cancellationToken)
@@ -730,6 +780,7 @@ namespace iucs.readernest.application.Services
 
             var temporaryPin = TemporaryPinGenerator.Generate();
             user.PinHash = _passwordHasher.Hash(temporaryPin);
+            user.PinEncrypted = _pinVault.Protect(temporaryPin);
             _unitOfWork.Repository<User>().Update(user);
 
             // Same staleness problem as ResendCredentialsAsync: the original welcome

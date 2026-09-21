@@ -14,6 +14,7 @@ namespace iucs.readernest.domain.Entities.Sessions
     /// </summary>
     [Index(nameof(ScheduledStartAtUtc))]
     [Index(nameof(Status))]
+    [Index(nameof(TeacherProfileId), nameof(Status))]
     public class ClassSession : AuditEntity
     {
         public Guid? BatchId { get; set; }
@@ -48,10 +49,31 @@ namespace iucs.readernest.domain.Entities.Sessions
 
         public ClassSession? CarriedForwardFromSession { get; set; }
 
+        /// <summary>How many times this same class has already auto-carried-forward from an
+        /// unresolved no-show (0 for an original, never-carried session). Caps the chain —
+        /// see SessionService.MarkNoShowCoreAsync's own comment — instead of an abandoned
+        /// booking silently rescheduling itself one week later forever.</summary>
+        public int CarryForwardCount { get; set; }
+
         [MaxLength(500)]
         public string? CancellationReason { get; set; }
 
         [MaxLength(2000)]
         public string? Summary { get; set; }
+
+        /// <summary>Set once RecordingReconciliationBackgroundService has alerted admins that this
+        /// completed session never got a recording — auto-record can succeed at *starting* with
+        /// no error yet still fail later in the pipeline (Jibri crashing mid-capture, an upload
+        /// failure, the finalize webhook never reaching this app), which nothing else catches;
+        /// this both de-duplicates the alert and marks the gap as already investigated.</summary>
+        public DateTime? RecordingMissingAlertSentAtUtc { get; set; }
+
+        /// <summary>Set once NoShowDetectionBackgroundService has alerted admins that this Demo
+        /// session has no DemoBooking linked to it at all (as opposed to one that exists but
+        /// nobody joined) — nobody was ever going to attend, so it is left running rather than
+        /// being auto-flagged a no-show. Same de-duplication role as
+        /// <see cref="RecordingMissingAlertSentAtUtc"/>: without it, an unresolved orphaned slot
+        /// would re-alert admins every 10-minute cycle forever instead of once.</summary>
+        public DateTime? OrphanedDemoAlertSentAtUtc { get; set; }
     }
 }
