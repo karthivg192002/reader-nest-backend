@@ -9078,7 +9078,7 @@ namespace iucs.readernest.tests
         [Fact]
         public async Task ResolveCurrentSessionId_ARescheduledChain_WalksToTheFinalReplacement_FromAnyLinkInIt()
         {
-            var (batch, _, original) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var (_, _, original) = await SeedBatchWithSessionAsync(totalSessions: 1);
             var service = CreateSessionService();
 
             var start = original.ScheduledStartAtUtc.AddDays(1);
