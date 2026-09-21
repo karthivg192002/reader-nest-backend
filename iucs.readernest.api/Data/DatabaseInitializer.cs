@@ -75,6 +75,7 @@ namespace iucs.readernest.api.Data
             await EnsureAdminLeaveAndAvailabilityMenuAsync(context);
             await EnsureTeacherRecordingsMenuAsync(context);
             await EnsureAdminRecordingsMenuAsync(context);
+            await EnsureCoordinatorRecordingsMenuAsync(context);
             await EnsureAdmissionPaymentTrackingMenuAsync(context);
             await EnsureTeacherAssignmentMenuAsync(context);
             await EnsureParentRecordingsMenuAsync(context);
@@ -603,6 +604,7 @@ namespace iucs.readernest.api.Data
             ("coordinator", "Monitoring", "Academic Calendar", "/coordinator/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement.ToString()),
             ("coordinator", "Monitoring", "Teacher Availability", "/coordinator/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
             ("coordinator", "Monitoring", "Sessions", "/coordinator/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+            ("coordinator", "Monitoring", "Recordings", "/coordinator/recordings", "Video", PermissionModule.SessionCalendarManagement.ToString()),
             ("management", null, "Executive Overview", "/management", "LayoutDashboard", null),
             ("management", "Performance", "Revenue & Courses", "/management/revenue", "TrendingUp", PermissionModule.ReportsAnalytics.ToString()),
             ("management", "Performance", "Teacher & Batch Performance", "/management/performance", "Gauge", PermissionModule.ReportsAnalytics.ToString()),
@@ -1786,6 +1788,51 @@ namespace iucs.readernest.api.Data
             {
                 Portal = "admin",
                 Section = "Academics",
+                SectionOrder = sessions.SectionOrder,
+                Label = "Recordings",
+                Path = path,
+                Icon = "Video",
+                SortOrder = sessions.SortOrder + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.SessionCalendarManagement.ToString(),
+            });
+        }
+
+        /// <summary>
+        /// Retrofits the Coordinator "Recordings" menu item (/coordinator/recordings, the same
+        /// AdminRecordings.tsx page every Sub Admin-type portal mounts) into a database seeded
+        /// before it existed. The coordinator's only path to a recording used to be opening a
+        /// completed session on the Calendar one at a time. Anchored right after the portal's
+        /// own "Sessions" item; fresh databases get it from MenuSeedItems().
+        /// </summary>
+        private static async Task EnsureCoordinatorRecordingsMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/coordinator/recordings";
+            if (context.MenuItems.Local.Any(m => m.Portal == "coordinator" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "coordinator" && m.Path == path))
+            {
+                return;
+            }
+
+            var sessions = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "coordinator" && m.Path == "/coordinator/sessions");
+            if (sessions is null)
+            {
+                return; // no Sessions item to anchor after (unexpected) — nothing sensible to append after
+            }
+
+            var toShift = await context.MenuItems
+                .Where(m => m.Portal == "coordinator" && m.Section == sessions.Section && m.SortOrder > sessions.SortOrder)
+                .ToListAsync();
+            foreach (var item in toShift)
+            {
+                item.SortOrder += 1;
+            }
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "coordinator",
+                Section = sessions.Section,
                 SectionOrder = sessions.SectionOrder,
                 Label = "Recordings",
                 Path = path,

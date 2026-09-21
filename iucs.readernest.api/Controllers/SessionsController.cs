@@ -353,17 +353,24 @@ namespace iucs.readernest.api.Controllers
 
         /// <summary>Admin-wide Recordings page: every registered recording across every class, one
         /// paged query instead of a completed-session list plus a per-session lookup for each one
-        /// (confirmed live as that page's actual "Loading recordings..." bottleneck). Admin-only,
-        /// same as delete -- this is the institution-wide management view, not the scoped
-        /// per-session list above.</summary>
+        /// (confirmed live as that page's actual "Loading recordings..." bottleneck). Admin, plus
+        /// a Sub Admin (Coordinator, IT Admin, ...) holding SessionCalendarManagement:View -- the
+        /// same grant the per-session list above requires, and the same one the "Recordings" menu
+        /// item is gated on. View only: delete stays Admin-only.</summary>
         [HttpGet("recordings")]
-        [Authorize(Roles = nameof(UserRole.Admin))]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)}")]
         public async Task<ActionResult<iucs.readernest.application.Dto.Common.PagedResult<RecordingListItemDto>>> ListAllRecordings(
             [FromQuery] int page,
             [FromQuery] int pageSize,
             [FromQuery] DateOnly? date,
             CancellationToken cancellationToken)
         {
+            if (User.IsInRole(nameof(UserRole.SubAdmin)) &&
+                !User.HasClaim(JwtTokenService.PermissionClaimType, $"{PermissionModule.SessionCalendarManagement}:{PermissionAction.View}"))
+            {
+                return Forbid();
+            }
+
             return Ok(await _sessionService.ListAllRecordingsAsync(page <= 0 ? 1 : page, pageSize <= 0 ? 20 : pageSize, date, null, cancellationToken));
         }
 
