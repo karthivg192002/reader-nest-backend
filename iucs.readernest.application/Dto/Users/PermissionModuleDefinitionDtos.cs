@@ -15,6 +15,13 @@ namespace iucs.readernest.application.Dto.Users
         public bool IsSystem { get; set; }
 
         public int SortOrder { get; set; }
+
+        public bool IsEnabled { get; set; }
+    }
+
+    public class SetPermissionModuleEnabledRequest
+    {
+        public bool IsEnabled { get; set; }
     }
 
     public class SavePermissionModuleDefinitionRequest

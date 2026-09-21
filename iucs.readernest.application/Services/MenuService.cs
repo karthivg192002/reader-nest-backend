@@ -15,11 +15,13 @@ namespace iucs.readernest.application.Services
 
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
+        private readonly IPermissionModuleService _permissionModules;
 
-        public MenuService(IUnitOfWork unitOfWork, IAuditLogService auditLog)
+        public MenuService(IUnitOfWork unitOfWork, IAuditLogService auditLog, IPermissionModuleService permissionModules)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
+            _permissionModules = permissionModules;
         }
 
         public async Task<IReadOnlyList<MenuItemDto>> GetForUserAsync(
@@ -38,10 +40,11 @@ namespace iucs.readernest.application.Services
 
             // A menu item with no RequiredModule is always visible; a gated item shows
             // only when the user's assigned role grants View on that module (Admin bypasses).
+            var disabledModules = await _permissionModules.GetDisabledKeysAsync(cancellationToken);
             var visible = items.Where(m =>
                 m.RequiredModule is null
-                || isAdmin
-                || viewableModules.Contains(m.RequiredModule));
+                || (!disabledModules.Contains(m.RequiredModule)
+                    && (isAdmin || viewableModules.Contains(m.RequiredModule))));
 
             return visible.Select(ToDto).ToList();
         }

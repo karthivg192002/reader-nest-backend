@@ -13,6 +13,11 @@ namespace iucs.readernest.application.Services
 
         Task<PermissionModuleDefinitionDto> CreateAsync(SavePermissionModuleDefinitionRequest request, CancellationToken cancellationToken = default);
 
+        Task<PermissionModuleDefinitionDto> SetEnabledAsync(Guid id, bool isEnabled, CancellationToken cancellationToken = default);
+
+        /// <summary>Keys of modules an Admin has switched off (cached briefly; invalidated on toggle).</summary>
+        Task<IReadOnlySet<string>> GetDisabledKeysAsync(CancellationToken cancellationToken = default);
+
         Task DeleteAsync(Guid id, CancellationToken cancellationToken = default);
     }
 }

@@ -5,6 +5,7 @@ using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using iucs.readernest.domain.Repository;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace iucs.readernest.application.Services
 {
@@ -12,11 +13,49 @@ namespace iucs.readernest.application.Services
     {
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
+        private readonly IMemoryCache _cache;
 
-        public PermissionModuleService(IUnitOfWork unitOfWork, IAuditLogService auditLog)
+        public const string DisabledKeysCacheKey = "permission-modules:disabled";
+
+        public PermissionModuleService(IUnitOfWork unitOfWork, IAuditLogService auditLog, IMemoryCache cache)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
+            _cache = cache;
+        }
+
+        public async Task<IReadOnlySet<string>> GetDisabledKeysAsync(CancellationToken cancellationToken = default)
+        {
+            if (_cache.TryGetValue(DisabledKeysCacheKey, out IReadOnlySet<string>? cached) && cached is not null)
+            {
+                return cached;
+            }
+
+            var keys = await _unitOfWork.Repository<PermissionModuleDefinition>().Query()
+                .Where(m => !m.IsEnabled)
+                .Select(m => m.Key)
+                .ToListAsync(cancellationToken);
+            IReadOnlySet<string> set = new HashSet<string>(keys, StringComparer.Ordinal);
+            _cache.Set(DisabledKeysCacheKey, set, TimeSpan.FromSeconds(30));
+            return set;
+        }
+
+        public async Task<PermissionModuleDefinitionDto> SetEnabledAsync(Guid id, bool isEnabled, CancellationToken cancellationToken = default)
+        {
+            var repository = _unitOfWork.Repository<PermissionModuleDefinition>();
+            var module = await repository.GetByIdAsync(id, cancellationToken)
+                ?? throw new NotFoundException(nameof(PermissionModuleDefinition), id);
+
+            if (!isEnabled && module.Key == nameof(PermissionModule.Settings))
+            {
+                throw new DomainValidationException("The Settings module can't be disabled - it's how modules are turned back on.");
+            }
+
+            module.IsEnabled = isEnabled;
+            await _auditLog.StageAsync(AuditAction.Update, nameof(PermissionModuleDefinition), module.Key, cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            _cache.Remove(DisabledKeysCacheKey);
+            return ToDto(module);
         }
 
         public async Task<IReadOnlyList<PermissionModuleDefinitionDto>> ListAsync(CancellationToken cancellationToken = default)
@@ -97,6 +136,7 @@ namespace iucs.readernest.application.Services
             Description = module.Description,
             IsSystem = module.IsSystem,
             SortOrder = module.SortOrder,
+            IsEnabled = module.IsEnabled,
         };
     }
 }

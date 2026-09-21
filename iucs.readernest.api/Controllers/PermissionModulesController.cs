@@ -44,6 +44,14 @@ namespace iucs.readernest.api.Controllers
             return CreatedAtAction(nameof(List), null, module);
         }
 
+        [HttpPut("{id:guid}/enabled")]
+        [HasPermission(PermissionModule.Settings, PermissionAction.Edit)]
+        public async Task<ActionResult<PermissionModuleDefinitionDto>> SetEnabled(
+            Guid id, SetPermissionModuleEnabledRequest request, CancellationToken cancellationToken)
+        {
+            return Ok(await _permissionModuleService.SetEnabledAsync(id, request.IsEnabled, cancellationToken));
+        }
+
         [HttpDelete("{id:guid}")]
         [HasPermission(PermissionModule.Settings, PermissionAction.Edit)]
         public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)

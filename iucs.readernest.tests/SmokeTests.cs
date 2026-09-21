@@ -97,9 +97,9 @@ namespace iucs.readernest.tests
 
         private EnrollmentService CreateEnrollmentService() => new(_db.UnitOfWork, _auditLog, CreateBillingService(), CreateBatchService(), _bulkFileReader);
 
-        private MenuService CreateMenuService() => new(_db.UnitOfWork, _auditLog);
+        private MenuService CreateMenuService() => new(_db.UnitOfWork, _auditLog, CreatePermissionModuleService());
 
-        private PermissionModuleService CreatePermissionModuleService() => new(_db.UnitOfWork, _auditLog);
+        private PermissionModuleService CreatePermissionModuleService() => new(_db.UnitOfWork, _auditLog, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
 
         private AcademicOpsService CreateAcademicOpsService() =>
             new(_db.UnitOfWork, _auditLog, _notifications, _db.CurrentUser, CreateSessionService(), CreateEventLogService());
@@ -8635,6 +8635,46 @@ namespace iucs.readernest.tests
 
             var all = await modules.ListAsync();
             Assert.DoesNotContain(all, m => m.Key == "UnusedModule");
+        }
+
+        [Fact]
+        public async Task DisablingAModule_HidesItsMenuItems_EvenFromAdmin_UntilReEnabled()
+        {
+            var admin = await _db.SeedUserAsync($"modoff-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            _db.Context.MenuItems.AddRange(
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "admin", Label = "Home", Path = "/admin/home-x", Icon = "LayoutDashboard",
+                    SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = null,
+                },
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "admin", Label = "Payouts", Path = "/admin/payouts-x", Icon = "Banknote",
+                    SectionOrder = 1, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.Payouts.ToString(),
+                });
+            await _db.Context.SaveChangesAsync();
+
+            var payouts = (await CreatePermissionModuleService().ListAsync()).Single(m => m.Key == nameof(PermissionModule.Payouts));
+            Assert.True(payouts.IsEnabled);
+
+            await CreatePermissionModuleService().SetEnabledAsync(payouts.Id, false);
+            var off = await CreateMenuService().GetForUserAsync(admin.Id, UserRole.Admin, []);
+            Assert.Contains(off, m => m.Path == "/admin/home-x");
+            Assert.DoesNotContain(off, m => m.Path == "/admin/payouts-x");
+
+            await CreatePermissionModuleService().SetEnabledAsync(payouts.Id, true);
+            var on = await CreateMenuService().GetForUserAsync(admin.Id, UserRole.Admin, []);
+            Assert.Contains(on, m => m.Path == "/admin/payouts-x");
+        }
+
+        [Fact]
+        public async Task DisablingTheSettingsModule_IsRejected()
+        {
+            var modules = CreatePermissionModuleService();
+            var settings = (await modules.ListAsync()).Single(m => m.Key == nameof(PermissionModule.Settings));
+
+            var ex = await Assert.ThrowsAsync<DomainValidationException>(() => modules.SetEnabledAsync(settings.Id, false));
+            Assert.Contains("Settings", ex.Message);
         }
 
         [Fact]

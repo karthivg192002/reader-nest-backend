@@ -1,3 +1,4 @@
+using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Options;
@@ -17,10 +18,30 @@ namespace iucs.readernest.api.Auth
 
     public class PermissionAuthorizationHandler : AuthorizationHandler<PermissionRequirement>
     {
-        protected override Task HandleRequirementAsync(
+        private readonly IServiceScopeFactory _scopeFactory;
+
+        public PermissionAuthorizationHandler(IServiceScopeFactory scopeFactory)
+        {
+            _scopeFactory = scopeFactory;
+        }
+
+        protected override async Task HandleRequirementAsync(
             AuthorizationHandlerContext context,
             PermissionRequirement requirement)
         {
+            // A module an Admin has switched off refuses every action on it, Admin included.
+            var module = requirement.Permission.Split(':')[0];
+            using (var scope = _scopeFactory.CreateScope())
+            {
+                var modules = scope.ServiceProvider.GetRequiredService<IPermissionModuleService>();
+                var disabled = await modules.GetDisabledKeysAsync();
+                if (disabled.Contains(module))
+                {
+                    context.Fail();
+                    return;
+                }
+            }
+
             if (context.User.IsInRole(nameof(UserRole.Admin)))
             {
                 context.Succeed(requirement);
@@ -29,8 +50,6 @@ namespace iucs.readernest.api.Auth
             {
                 context.Succeed(requirement);
             }
-
-            return Task.CompletedTask;
         }
     }
 

@@ -25,5 +25,10 @@ namespace iucs.readernest.domain.Entities.Users
         public bool IsSystem { get; set; }
 
         public int SortOrder { get; set; }
+
+        /// <summary>Deployment-wide on/off switch. A disabled module is hidden from every menu and
+        /// every [HasPermission] action on it is refused, even for Admin. The Settings module can't
+        /// be disabled (it's how an Admin turns modules back on).</summary>
+        public bool IsEnabled { get; set; } = true;
     }
 }
