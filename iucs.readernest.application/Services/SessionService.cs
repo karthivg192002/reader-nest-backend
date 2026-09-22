@@ -1178,7 +1178,21 @@ namespace iucs.readernest.application.Services
                     cancellationToken: cancellationToken);
             }
 
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            try
+            {
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains(
+                "ix_class_sessions_batch_id_scheduled_start_at_utc", StringComparison.Ordinal) == true)
+            {
+                // Same backstop GenerateScheduleAsync uses: the slot search above already avoids
+                // this batch's own active sessions, so a violation here means something else (a
+                // concurrent edit to this same batch, most likely) landed on the identical slot
+                // between that check and this save. Surface it as a message the caller can act
+                // on — refresh and retry — instead of an unhandled 500.
+                throw new DomainValidationException(
+                    "This schedule change conflicts with another change just made to this batch; refresh and try again.");
+            }
 
             return await ListAsync(DateTime.MinValue, DateTime.MaxValue, null, batch.Id, cancellationToken);
         }
