@@ -53,6 +53,7 @@ namespace iucs.readernest.api.Data
             await EnsureClassSessionLogsMenuAsync(context);
             await EnsureItAdminMenuAsync(context);
             await EnsureExecutiveMenuAsync(context);
+            await RelabelExecutiveDashboardMenuAsync(context);
             await EnsureBulkEmailHistoryMenuAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
@@ -507,12 +508,13 @@ namespace iucs.readernest.api.Data
                     // ₹0 total" instead of the real figures shown by the chart above it.
                     Grant(PermissionModule.CourseBatchManagement, view: true),
                 ]),
-                // Admin-portal breadth plus the Management executive pages, under one login. Not a
-                // merge of the two portals — a separate persona whose menu (the "executive"
-                // portal, see EnsureExecutiveMenuAsync) shows exactly the items whose module the
-                // role is granted, so what it sees is edited on the Roles & Permissions screen,
-                // not in code. Seeded with every module; trim it there for a narrower persona.
-                ("admin-management", "Admin & Management", "Admin and Management menus together under one login; what shows is driven by this role's permissions.", "/executive", AllModulesFull()),
+                // Founder Dashboard = Management Dashboard + Admin Dashboard on one login (renamed
+                // from "Admin & Management" 2026-09-22; the role Name/route are unchanged so no one
+                // already assigned it is disturbed). Its menu (the "executive" portal, see
+                // EnsureExecutiveMenuAsync) shows exactly the items whose module the role is
+                // granted, so what it sees is edited on the Roles & Permissions screen, not in
+                // code. Seeded with every module; trim it there for a narrower persona.
+                ("admin-management", "Founder Dashboard", "Complete visibility and control — every Admin permission plus Management's business view, in one dashboard.", "/executive", AllModulesFull()),
                 ("student", "Student", "Learner experience surfaced through the parent account.", "/student", []),
             ];
         }
@@ -527,11 +529,32 @@ namespace iucs.readernest.api.Data
         /// </summary>
         private static async Task RemoveRetiredMenusAsync(ReaderNestDbContext context)
         {
-            var retiredPaths = new[] { "/coordinator/scheduling", "/teacher/live/s-1" };
+            // "/executive/overview" (ManagementDashboard) was merged into the "/executive" index
+            // page (FounderDashboard) 2026-09-22 — the sidebar item is retired the same way as any
+            // other dropped screen; the route itself still redirects (see App.tsx) for anyone with
+            // the old link bookmarked.
+            var retiredPaths = new[] { "/coordinator/scheduling", "/teacher/live/s-1", "/executive/overview" };
             var stale = await context.MenuItems.Where(m => retiredPaths.Contains(m.Path)).ToListAsync();
             if (stale.Count > 0)
             {
                 context.MenuItems.RemoveRange(stale);
+            }
+        }
+
+        /// <summary>
+        /// One-time relabel: the "/executive" dashboard menu item was seeded as "Overall
+        /// Dashboard" before this persona was renamed "Founder Dashboard" (see SystemRoleSeeds'
+        /// "admin-management" entry and EnsureExecutiveMenuAsync). SeedRolesAsync's own
+        /// DisplayName sync doesn't reach MenuItem rows, so this exists purely to carry that
+        /// rename onto an already-seeded database. Only touches a row still carrying the old
+        /// default label, so a title an admin already customised via Menu Manager is left alone.
+        /// </summary>
+        private static async Task RelabelExecutiveDashboardMenuAsync(ReaderNestDbContext context)
+        {
+            var item = await context.MenuItems.FirstOrDefaultAsync(m => m.Portal == "executive" && m.Path == "/executive");
+            if (item is not null && item.Label == "Overall Dashboard")
+            {
+                item.Label = "Founder Dashboard";
             }
         }
 
@@ -1161,14 +1184,16 @@ namespace iucs.readernest.api.Data
 
         /// <summary>
         /// Seeds the "executive" portal menu — the landing console for the "admin-management"
-        /// Sub Admin persona (see SystemRoleSeeds): every Admin-portal item plus the Management
-        /// executive pages (Overview, Revenue &amp; Courses, Teacher &amp; Batch Performance,
-        /// Management Reports), each gated by the same RequiredModule as its Admin/Management
-        /// original. Nothing about who sees what is decided in code — MenuService only shows an
-        /// item when the user's role grants View on its module, so narrowing this persona is a
-        /// Roles &amp; Permissions edit, and any row can be reordered/hidden in Menu Manager. The
-        /// Admin and Management portals themselves are untouched. Same idiom as
-        /// EnsureItAdminMenuAsync: runs once, a no-op if the portal already has rows.
+        /// Sub Admin persona (see SystemRoleSeeds), branded "Founder Dashboard": every Admin-portal
+        /// item plus the Management executive pages (Revenue &amp; Courses, Teacher &amp; Batch
+        /// Performance, Management Reports — the old standalone "Executive Overview" item now
+        /// merges into the Founder Dashboard landing page itself), each gated by the same
+        /// RequiredModule as its Admin/Management original. Nothing about who sees what is decided
+        /// in code — MenuService only shows an item when the user's role grants View on its
+        /// module, so narrowing this persona is a Roles &amp; Permissions edit, and any row can be
+        /// reordered/hidden in Menu Manager. The Admin and Management portals themselves are
+        /// untouched. Same idiom as EnsureItAdminMenuAsync: runs once, a no-op if the portal
+        /// already has rows.
         /// </summary>
         private static async Task EnsureExecutiveMenuAsync(ReaderNestDbContext context)
         {
@@ -1180,8 +1205,7 @@ namespace iucs.readernest.api.Data
 
             (string? Section, string Label, string Path, string Icon, string? RequiredModule)[] items =
             [
-                (null, "Overall Dashboard", "/executive", "LayoutDashboard", null),
-                ("Management", "Executive Overview", "/executive/overview", "LineChart", PermissionModule.ReportsAnalytics.ToString()),
+                (null, "Founder Dashboard", "/executive", "LayoutDashboard", null),
                 ("Management", "Revenue & Courses", "/executive/revenue", "TrendingUp", PermissionModule.ReportsAnalytics.ToString()),
                 ("Management", "Teacher & Batch Performance", "/executive/performance", "Gauge", PermissionModule.ReportsAnalytics.ToString()),
                 ("Management", "Management Reports", "/executive/management-reports", "FileBarChart", PermissionModule.ReportsAnalytics.ToString()),

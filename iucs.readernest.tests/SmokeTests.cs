@@ -5045,6 +5045,61 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task UpdateFutureSchedule_NewPatternKeepsAnOldWeekday_DoesNotCollideWithTheJustCancelledSession()
+        {
+            // Reproduces a live crash: a batch already met on one weekday (say Friday). Adding
+            // extra weekdays alongside it (Tuesday/Friday/Saturday) plus a new remaining-session
+            // count takes the "regenerate" path, which cancels the old sessions (status change,
+            // not soft-deleted — same convention CancelAsync uses) and re-places fresh ones from
+            // today. Because the new pattern still includes Friday at the same time, the first
+            // newly-placed Friday session lands on the exact same (batch, start time) the
+            // just-cancelled Friday session still occupies. Before this fix the unique index on
+            // (batch_id, scheduled_start_at_utc) didn't exclude Cancelled rows, so that insert
+            // threw an unhandled DbUpdateException surfaced to the caller as a raw 500.
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 3, includeSession: false);
+
+            var day7 = DateTime.UtcNow.AddDays(7);
+            var oldDay = day7.DayOfWeek;
+            for (var i = 0; i < 3; i++)
+            {
+                var d = day7.AddDays(7 * i);
+                var start = new DateTime(d.Year, d.Month, d.Day, 11, 30, 0, DateTimeKind.Utc);
+                _db.Context.Add(new ClassSession
+                {
+                    BatchId = batch.Id,
+                    TeacherProfileId = batch.TeacherProfileId,
+                    Status = SessionStatus.Scheduled,
+                    ScheduledStartAtUtc = start,
+                    ScheduledEndAtUtc = start.AddMinutes(45),
+                });
+            }
+            await _db.Context.SaveChangesAsync();
+
+            var otherDay1 = oldDay == DayOfWeek.Sunday ? DayOfWeek.Monday : oldDay - 1;
+            var otherDay2 = oldDay == DayOfWeek.Saturday ? DayOfWeek.Sunday : oldDay + 1;
+
+            var sessions = await CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                Slots =
+                [
+                    new GenerateScheduleSlot { DayOfWeek = otherDay1, StartTimeUtc = new TimeOnly(11, 30) },
+                    new GenerateScheduleSlot { DayOfWeek = oldDay, StartTimeUtc = new TimeOnly(11, 30) },
+                    new GenerateScheduleSlot { DayOfWeek = otherDay2, StartTimeUtc = new TimeOnly(11, 30) },
+                ],
+                RemainingSessionCount = 6,
+            });
+
+            // ListAsync (what UpdateFutureScheduleAsync returns) includes the whole batch
+            // history, so the 3 just-cancelled originals are still in there alongside the 6
+            // freshly-placed ones -- same shape as UpdateFutureSchedule_WeekdayPatternChange_
+            // RegeneratesRemainingSessions_CancellingOldOnes above.
+            var scheduled = sessions.Where(s => s.Status == SessionStatus.Scheduled).ToList();
+            var cancelled = sessions.Where(s => s.Status == SessionStatus.Cancelled).ToList();
+            Assert.Equal(6, scheduled.Count);
+            Assert.Equal(3, cancelled.Count);
+        }
+
+        [Fact]
         public async Task UpdateFutureSchedule_ThrowsWhenTheBatchHasNoUpcomingSessions()
         {
             var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
