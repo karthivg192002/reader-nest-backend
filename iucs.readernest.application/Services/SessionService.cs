@@ -24,6 +24,12 @@ namespace iucs.readernest.application.Services
         /// itself one week later before the chain stops and a human gets asked to look at it
         /// instead — see MarkNoShowCoreAsync's own comment for the incident that motivated this.</summary>
         private const int MaxAutoCarryForwards = 3;
+        // A class marked Completed (e.g. the teacher's own End Class) hard-blocked every rejoin
+        // attempt from that instant on, even a teacher or student who disconnected seconds earlier
+        // and was simply trying to get back in -- confirmed live as "marks as completed and cannot
+        // rejoin." A short grace window after the real completion moment (ActualEndAtUtc) covers
+        // that without reopening an old, genuinely-over class to rejoining indefinitely.
+        private static readonly TimeSpan RejoinGraceAfterCompleted = TimeSpan.FromMinutes(10);
 
         private static readonly SessionStatus[] TerminalStatuses =
         [
@@ -1554,7 +1560,9 @@ namespace iucs.readernest.application.Services
             // with the class actively InProgress. Confirmed live gap, not a Jitsi limitation. InProgress
             // sessions get no time cutoff at all now; a still-Scheduled session (never actually started)
             // keeps the original cutoff so a stale/abandoned booking can't be joined indefinitely.
-            if (!isMonitor && session.Status != SessionStatus.InProgress && now > session.ScheduledEndAtUtc)
+            var withinCompletedGrace = session.Status == SessionStatus.Completed
+                && now <= (session.ActualEndAtUtc ?? session.ScheduledEndAtUtc) + RejoinGraceAfterCompleted;
+            if (!isMonitor && !withinCompletedGrace && session.Status != SessionStatus.InProgress && now > session.ScheduledEndAtUtc)
             {
                 throw new DomainValidationException("This class has already ended.");
             }
