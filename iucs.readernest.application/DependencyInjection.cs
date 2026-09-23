@@ -16,6 +16,7 @@ namespace iucs.readernest.application
             services.AddScoped<IServerLogService, ServerLogService>();
             services.AddScoped<IBurstWorkerUsageService, BurstWorkerUsageService>();
             services.AddScoped<IRecordingPipelineService, RecordingPipelineService>();
+            services.AddScoped<ICallQualityIncidentService, CallQualityIncidentService>();
             services.AddScoped<IBurstWorkerControlService, BurstWorkerControlService>();
             services.AddScoped<IServerControlService, ServerControlService>();
             services.AddSingleton<IClassroomPresenceTracker, ClassroomPresenceTracker>();

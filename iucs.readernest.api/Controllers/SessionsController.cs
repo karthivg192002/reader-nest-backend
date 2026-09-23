@@ -7,6 +7,7 @@ using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
 
 namespace iucs.readernest.api.Controllers
 {
@@ -108,18 +109,41 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>
-        /// Mints a shareable Guest Link token for this session — pass ChildId to bind it to one
+        /// Mints a shareable Guest Link for this session — pass ChildId to bind it to one
         /// specific enrolled student (auto attendance, skips prejoin), or omit it for a generic
         /// guest link. Same permission and role restriction as
         /// <see cref="ListGuestLinkStudents"/> above (see its own doc comment for why the role
         /// check matters here too, not just HasPermission).
+        ///
+        /// Confirmed live: the raw "/guest-join?token=&lt;JWT&gt;" URL this used to hand back
+        /// directly is 300+ characters of base64 with no spaces — reads as broken/suspicious
+        /// pasted into WhatsApp, and (per the incident that found this) a paste/send race in the
+        /// messaging app can truncate it mid-token, which then fails server-side with an opaque
+        /// error instead of a clean "invalid link". Wraps it in a genuinely short /m/{slug} link
+        /// instead, same fix DemoBookingsController.GetJoinLink already applies to demo join
+        /// links — the short link's own expiry matches the token's (GuestLinkDto.ExpiresAtUtc),
+        /// so it never outlives what it points to.
         /// </summary>
         [HttpPost("{id:guid}/guest-link")]
         [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
         [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.View)]
-        public async Task<ActionResult<GuestLinkDto>> CreateGuestLink(Guid id, CreateGuestLinkRequest request, CancellationToken cancellationToken)
+        public async Task<ActionResult<object>> CreateGuestLink(
+            Guid id,
+            CreateGuestLinkRequest request,
+            [FromServices] IShortLinkService shortLinks,
+            [FromServices] IConfiguration configuration,
+            CancellationToken cancellationToken)
         {
-            return Ok(await _sessionService.CreateGuestLinkAsync(id, request.ChildId, cancellationToken));
+            var guestLink = await _sessionService.CreateGuestLinkAsync(id, request.ChildId, cancellationToken);
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var frontendBaseUrl = iucs.readernest.application.Helper.FrontendUrl.Resolve(
+                configuration["Frontend:BaseUrl"],
+                Request.Headers.Origin.ToString(),
+                configuration.GetSection("Cors:AllowedOrigins").Get<string[]>());
+            var joinUrl = $"{frontendBaseUrl}/guest-join?token={Uri.EscapeDataString(guestLink.Token)}";
+            var slug = await shortLinks.CreateAsync(joinUrl, guestLink.ExpiresAtUtc, userId, cancellationToken);
+            var apiBaseUrl = $"{Request.Scheme}://{Request.Host}";
+            return Ok(new { url = $"{apiBaseUrl}/m/{slug}" });
         }
 
         /// <summary>

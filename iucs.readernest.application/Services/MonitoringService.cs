@@ -27,6 +27,7 @@ namespace iucs.readernest.application.Services
         private readonly IClassroomPresenceTracker _presenceTracker;
         private readonly IBurstWorkerUsageService _burstWorkerUsage;
         private readonly IRecordingPipelineService _recordingPipeline;
+        private readonly ICallQualityIncidentService _callQualityIncidents;
         private readonly MonitoringOptions _options;
 
         public MonitoringService(
@@ -35,6 +36,7 @@ namespace iucs.readernest.application.Services
             IClassroomPresenceTracker presenceTracker,
             IBurstWorkerUsageService burstWorkerUsage,
             IRecordingPipelineService recordingPipeline,
+            ICallQualityIncidentService callQualityIncidents,
             IOptions<MonitoringOptions> options)
         {
             _prometheus = prometheus;
@@ -42,6 +44,7 @@ namespace iucs.readernest.application.Services
             _presenceTracker = presenceTracker;
             _burstWorkerUsage = burstWorkerUsage;
             _recordingPipeline = recordingPipeline;
+            _callQualityIncidents = callQualityIncidents;
             _options = options.Value;
         }
 
@@ -55,9 +58,11 @@ namespace iucs.readernest.application.Services
             var alertsTask = _prometheus.GetActiveAlertsAsync(_options.PrometheusBaseUrl, cancellationToken);
             var burstUsageTask = _burstWorkerUsage.GetUsageSummaryAsync(cancellationToken);
             var pipelineTask = _recordingPipeline.GetAsync(cancellationToken);
+            var callQualityIncidentsTask = _callQualityIncidents.GetRecentAsync(cancellationToken);
 
-            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask).Append(burstUsageTask).Append(pipelineTask));
+            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask).Append(burstUsageTask).Append(pipelineTask).Append(callQualityIncidentsTask));
             var (dbHealthy, dbLatencyMs) = await databaseTask;
+            var callQualityIncidents = await callQualityIncidentsTask;
             // Sequential, not joined into the WhenAll above: this also queries via _unitOfWork,
             // and CheckDatabaseAsync already does too -- both use the same scoped DbContext,
             // which throws "a second operation was started on this context instance before a
@@ -76,6 +81,8 @@ namespace iucs.readernest.application.Services
                 DatabaseInsights = await insightsTask,
                 BurstWorkerUsage = await burstUsageTask,
                 RecordingPipeline = await pipelineTask,
+                CallQualityIncidents = callQualityIncidents,
+                CallQualityIncidentsLookSystemic = CallQualityIncidentParser.LooksSystemic(callQualityIncidents),
                 ConcurrentClassroomUsers = _presenceTracker.TotalConnectedUsers,
                 ActiveClassCount = _presenceTracker.ActiveClassCount,
                 ActiveAlerts = (await alertsTask)
