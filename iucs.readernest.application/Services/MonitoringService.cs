@@ -427,10 +427,10 @@ namespace iucs.readernest.application.Services
             // round trip once we know the server is even up, so these fire after the up check below
             // rather than joining the big WhenAll batch.
             var conferencesTask = server.TracksLiveCalls
-                ? _prometheus.QueryScalarAsync(baseUrl, $"jitsi_jvb_conferences{{instance=\"{instanceLabel}\"}}", cancellationToken)
+                ? _prometheus.QueryScalarAsync(baseUrl, $"sum(jitsi_jvb_conferences{{instance=\"{instanceLabel}\"}})", cancellationToken)
                 : Task.FromResult<double?>(null);
             var participantsTask = server.TracksLiveCalls
-                ? _prometheus.QueryScalarAsync(baseUrl, $"jitsi_jvb_current_endpoints{{instance=\"{instanceLabel}\"}}", cancellationToken)
+                ? _prometheus.QueryScalarAsync(baseUrl, $"sum(jitsi_jvb_current_endpoints{{instance=\"{instanceLabel}\"}})", cancellationToken)
                 : Task.FromResult<double?>(null);
 
             // rn_jibri_instances_total/busy come from each server's own textfile-collector
@@ -454,18 +454,21 @@ namespace iucs.readernest.application.Services
                 : Task.FromResult<double?>(null);
 
             // Same JVB endpoint as above -- call quality, not just up/down.
-            Task<double?> jvbMetric(string name) => server.TracksLiveCalls
-                ? _prometheus.QueryScalarAsync(baseUrl, $"{name}{{instance=\"{instanceLabel}\"}}", cancellationToken)
+            // There are two video bridges (jvb, jvb2) scraped under the same instance label, so every JVB
+            // reading is aggregated across them: totals add (counts, bitrates, ICE tallies), quality
+            // averages (RTT, loss), stress reports the busier bridge, and health is the weaker one.
+            Task<double?> jvbMetric(string name, string aggregate = "sum") => server.TracksLiveCalls
+                ? _prometheus.QueryScalarAsync(baseUrl, $"{aggregate}({name}{{instance=\"{instanceLabel}\"}})", cancellationToken)
                 : Task.FromResult<double?>(null);
-            var rttTask = jvbMetric("jitsi_jvb_average_rtt");
-            var lossInTask = jvbMetric("jitsi_jvb_incoming_loss_fraction");
-            var lossOutTask = jvbMetric("jitsi_jvb_outgoing_loss_fraction");
+            var rttTask = jvbMetric("jitsi_jvb_average_rtt", "avg");
+            var lossInTask = jvbMetric("jitsi_jvb_incoming_loss_fraction", "avg");
+            var lossOutTask = jvbMetric("jitsi_jvb_outgoing_loss_fraction", "avg");
             var bitrateInTask = jvbMetric("jitsi_jvb_incoming_bitrate");
             var bitrateOutTask = jvbMetric("jitsi_jvb_outgoing_bitrate");
             var sendingAudioTask = jvbMetric("jitsi_jvb_endpoints_sending_audio");
             var sendingVideoTask = jvbMetric("jitsi_jvb_endpoints_sending_video");
-            var stressTask = jvbMetric("jitsi_jvb_stress");
-            var jvbHealthyTask = jvbMetric("jitsi_jvb_healthy");
+            var stressTask = jvbMetric("jitsi_jvb_stress", "max");
+            var jvbHealthyTask = jvbMetric("jitsi_jvb_healthy", "min");
             // jitsi_jvb_ice_succeeded(_relayed)_total come from the same native JVB endpoint --
             // "relayed" means the winning ICE candidate pair used the Cloudflare TURN fallback
             // (see turn-credentials-refresh.sh) instead of a direct UDP path, i.e. this
