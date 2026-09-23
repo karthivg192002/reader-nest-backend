@@ -204,7 +204,17 @@ namespace iucs.readernest.api.Auth
                     ClockSkew = TimeSpan.FromSeconds(30),
                 }, out _);
             }
-            catch (SecurityTokenException)
+            // Confirmed live: a non-empty but malformed token (e.g. a guest link truncated in
+            // transit, missing one of its "."-separated segments) fails ValidateToken's own
+            // structural read of the JWT before it ever reaches a SecurityTokenException --
+            // IdentityModel raises that as SecurityTokenMalformedException, which is NOT a
+            // SecurityTokenException subtype, so it went straight past the catch below and
+            // surfaced as an unhandled 500 ("Something went wrong on our side") instead of this
+            // method's normal "invalid link" null return. Since every input here is untrusted
+            // (anyone can POST anything to this anonymous endpoint), any failure to parse/validate
+            // the token — whatever its exact exception type — means the same thing: not a usable
+            // guest link.
+            catch (Exception ex) when (ex is SecurityTokenException or ArgumentException)
             {
                 return null;
             }
