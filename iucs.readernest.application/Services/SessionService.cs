@@ -1078,7 +1078,7 @@ namespace iucs.readernest.application.Services
             Guid recordingId,
             CancellationToken cancellationToken = default)
         {
-            // Admin-only is enforced by the controller's [Authorize(Roles)] — this just has to
+            // The delete permission is enforced by the controller's [HasPermission] — this just has to
             // exist and belong to the session named in the route.
             var recording = await _unitOfWork.Repository<SessionRecording>().TrackedQuery()
                 .FirstOrDefaultAsync(r => r.Id == recordingId && r.ClassSessionId == sessionId, cancellationToken)
@@ -1797,6 +1797,36 @@ namespace iucs.readernest.application.Services
                 // token that's valid indefinitely — it dies with the class, not with the link.
                 session.ScheduledEndAtUtc.AddHours(2));
 
+            var staffNames = new List<string>();
+            if (moderator)
+            {
+                // Staff (Admin/RM/Coordinator/Counselor/Admission/Management) enter without
+                // knocking: the moderator's classroom screen auto-admits these names from the
+                // waiting room. Name-matched because Jitsi's knock event carries only a display
+                // name; the real fix is server-side lobby bypass (see JITSI_ARCHITECTURE.md).
+                var staff = (await _unitOfWork.Repository<User>().Query()
+                        .Where(u => u.Id != user.Id && u.Status == UserStatus.Active
+                            && (u.Role == UserRole.Admin || u.Role == UserRole.SubAdmin || u.Role == UserRole.AdmissionTeam))
+                        .Select(u => new { u.FirstName, u.LastName })
+                        .ToListAsync(cancellationToken))
+                    .Select(u => $"{u.FirstName} {u.LastName}".Trim())
+                    .Where(n => n.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                // A name is only usable as a "this is staff" signal if nobody outside staff
+                // (a parent or a teacher) carries the same one — otherwise that person would be
+                // waved in from the waiting room too. Such a name falls back to a manual admit.
+                var firstNames = staff.Select(n => n.Split(' ')[0].ToLower()).Distinct().ToList();
+                var nonStaff = (await _unitOfWork.Repository<User>().Query()
+                        .Where(u => (u.Role == UserRole.Parent || u.Role == UserRole.Teacher) && firstNames.Contains(u.FirstName.ToLower()))
+                        .Select(u => new { u.FirstName, u.LastName })
+                        .ToListAsync(cancellationToken))
+                    .Select(u => $"{u.FirstName} {u.LastName}".Trim())
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                staffNames = staff.Where(n => !nonStaff.Contains(n)).ToList();
+            }
+
             return new JitsiJoinDto
             {
                 SessionId = session.Id,
@@ -1805,6 +1835,7 @@ namespace iucs.readernest.application.Services
                 Token = token,
                 ScheduledEndAtUtc = session.ScheduledEndAtUtc,
                 IsDemo = session.Type == SessionType.Demo,
+                StaffNames = staffNames,
             };
         }
 

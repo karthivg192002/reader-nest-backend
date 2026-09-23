@@ -482,7 +482,7 @@ namespace iucs.readernest.api.Controllers
         /// credential rather than replacing one -- and every call is audit-logged.
         /// </summary>
         [HttpGet("{id:guid}/pin")]
-        [Authorize(Roles = nameof(UserRole.Admin))]
+        [HasPermission(PermissionModule.Settings, PermissionAction.Edit)]
         public async Task<ActionResult<RevealedPinDto>> RevealPin(Guid id, CancellationToken cancellationToken)
         {
             var pin = await _userService.RevealPinAsync(id, cancellationToken);

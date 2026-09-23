@@ -139,7 +139,7 @@ namespace iucs.readernest.api.Controllers
         }
 
         [HttpPost]
-        [Authorize(Roles = nameof(UserRole.Admin))]
+        [HasPermission(PermissionModule.LeaveManagement, PermissionAction.Edit)]
         public async Task<ActionResult<LeaveAllowanceDto>> Set(SaveLeaveAllowanceRequest request, CancellationToken cancellationToken)
         {
             return Ok(await _academicOps.SetLeaveAllowanceAsync(request, cancellationToken));
