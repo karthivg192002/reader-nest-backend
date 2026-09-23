@@ -109,7 +109,9 @@ namespace iucs.readernest.api.Services
                 .Select(a => a.ClassSessionId)
                 .ToHashSet();
             var studentPresentSessionIds = (await unitOfWork.Repository<SessionAttendance>().Query()
-                .Where(a => candidateIds.Contains(a.ClassSessionId) && a.ChildId != null)
+                // Absent rows don't count as present — e.g. a parent's planned absence from a
+                // group class is recorded up front as Absent (SessionService.CancelByParentAsync).
+                .Where(a => candidateIds.Contains(a.ClassSessionId) && a.ChildId != null && a.Status != AttendanceStatus.Absent)
                 .Select(a => a.ClassSessionId)
                 .ToListAsync(cancellationToken))
                 .ToHashSet();

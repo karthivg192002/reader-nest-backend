@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using iucs.readernest.domain.Data;
@@ -11,9 +12,11 @@ using iucs.readernest.domain.Data;
 namespace iucs.readernest.domain.Migrations
 {
     [DbContext(typeof(ReaderNestDbContext))]
-    partial class ReaderNestDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260923131949_AddSupportTickets")]
+    partial class AddSupportTickets
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -3168,11 +3171,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("numeric(12,2)")
                         .HasColumnName("amount");
 
-                    b.Property<decimal?>("AmountBeforeReview")
-                        .HasPrecision(12, 2)
-                        .HasColumnType("numeric(12,2)")
-                        .HasColumnName("amount_before_review");
-
                     b.Property<Guid?>("ClassSessionId")
                         .HasColumnType("uuid")
                         .HasColumnName("class_session_id");
@@ -3184,10 +3182,6 @@ namespace iucs.readernest.domain.Migrations
                     b.Property<DateTime?>("DeletedAtUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at_utc");
-
-                    b.Property<int?>("DeliveredMinutes")
-                        .HasColumnType("integer")
-                        .HasColumnName("delivered_minutes");
 
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("boolean")
@@ -3205,23 +3199,6 @@ namespace iucs.readernest.domain.Migrations
                     b.Property<bool>("RequiresReview")
                         .HasColumnType("boolean")
                         .HasColumnName("requires_review");
-
-                    b.Property<string>("ReviewDecision")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("review_decision");
-
-                    b.Property<DateTime?>("ReviewedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("reviewed_at_utc");
-
-                    b.Property<Guid?>("ReviewedByUserId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("reviewed_by_user_id");
-
-                    b.Property<int?>("ScheduledMinutes")
-                        .HasColumnType("integer")
-                        .HasColumnName("scheduled_minutes");
 
                     b.Property<string>("Type")
                         .IsRequired()
@@ -4812,86 +4789,6 @@ namespace iucs.readernest.domain.Migrations
                     b.ToTable("role_permissions");
                 });
 
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Users.StaffLeaveRequest", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at_utc");
-
-                    b.Property<Guid?>("CreatedBy")
-                        .HasColumnType("uuid")
-                        .HasColumnName("created_by");
-
-                    b.Property<DateTime?>("DeletedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("deleted_at_utc");
-
-                    b.Property<DateOnly>("EndDate")
-                        .HasColumnType("date")
-                        .HasColumnName("end_date");
-
-                    b.Property<bool>("IsDeleted")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_deleted");
-
-                    b.Property<string>("Reason")
-                        .IsRequired()
-                        .HasMaxLength(1000)
-                        .HasColumnType("character varying(1000)")
-                        .HasColumnName("reason");
-
-                    b.Property<string>("ReviewNote")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)")
-                        .HasColumnName("review_note");
-
-                    b.Property<DateTime?>("ReviewedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("reviewed_at_utc");
-
-                    b.Property<Guid?>("ReviewedByUserId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("reviewed_by_user_id");
-
-                    b.Property<DateOnly>("StartDate")
-                        .HasColumnType("date")
-                        .HasColumnName("start_date");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("status");
-
-                    b.Property<DateTime?>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at_utc");
-
-                    b.Property<Guid?>("UpdatedBy")
-                        .HasColumnType("uuid")
-                        .HasColumnName("updated_by");
-
-                    b.Property<Guid>("UserId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("user_id");
-
-                    b.HasKey("Id")
-                        .HasName("pk_staff_leave_requests");
-
-                    b.HasIndex("Status", "StartDate")
-                        .HasDatabaseName("ix_staff_leave_requests_status_start_date");
-
-                    b.HasIndex("UserId", "StartDate")
-                        .HasDatabaseName("ix_staff_leave_requests_user_id_start_date");
-
-                    b.ToTable("staff_leave_requests");
-                });
-
             modelBuilder.Entity("iucs.readernest.domain.Entities.Users.SubAdminPermission", b =>
                 {
                     b.Property<Guid>("Id")
@@ -6211,18 +6108,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasConstraintName("fk_role_permissions_role_definitions_role_definition_id");
 
                     b.Navigation("RoleDefinition");
-                });
-
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Users.StaffLeaveRequest", b =>
-                {
-                    b.HasOne("iucs.readernest.domain.Entities.Users.User", "User")
-                        .WithMany()
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired()
-                        .HasConstraintName("fk_staff_leave_requests_users_user_id");
-
-                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Users.SubAdminPermission", b =>

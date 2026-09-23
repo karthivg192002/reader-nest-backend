@@ -58,8 +58,83 @@ namespace iucs.readernest.application.Dto.Payouts
 
         public DateTime CreatedAtUtc { get; set; }
 
-        /// <summary>Teacher's captured attendance fell well short of the scheduled duration — needs a human look before this payout is finalized.</summary>
+        /// <summary>The class ran shorter than scheduled (or no attendance was recorded) — awaiting an Admin / Management decision in Payout Approvals before this payout can be finalized.</summary>
         public bool RequiresReview { get; set; }
+
+        public int? ScheduledMinutes { get; set; }
+
+        public int? DeliveredMinutes { get; set; }
+
+        public PayoutReviewDecision? ReviewDecision { get; set; }
+    }
+
+    /// <summary>One short / unattended class awaiting (or given) a payout decision — a row on the Payout Approvals screen.</summary>
+    public class PayoutApprovalDto
+    {
+        public Guid ItemId { get; set; }
+
+        public Guid PayoutId { get; set; }
+
+        public PayoutStatus PayoutStatus { get; set; }
+
+        public Guid? ClassSessionId { get; set; }
+
+        public string TeacherName { get; set; } = null!;
+
+        /// <summary>Batch name, "Demo class", or "Class session".</summary>
+        public string ClassName { get; set; } = null!;
+
+        /// <summary>Enrolled students (batch) or the demo child's name.</summary>
+        public string? StudentNames { get; set; }
+
+        public DateTime? ScheduledStartAtUtc { get; set; }
+
+        public DateTime? ScheduledEndAtUtc { get; set; }
+
+        public DateTime? ActualStartAtUtc { get; set; }
+
+        public DateTime? ActualEndAtUtc { get; set; }
+
+        public int? ScheduledMinutes { get; set; }
+
+        /// <summary>Null when no teacher attendance was recorded at all.</summary>
+        public int? DeliveredMinutes { get; set; }
+
+        public int? ShortfallMinutes { get; set; }
+
+        /// <summary>Full scheduled-duration amount as accrued.</summary>
+        public decimal FullAmount { get; set; }
+
+        /// <summary>Full amount pro-rated to the delivered minutes — the suggested partial payout.</summary>
+        public decimal ProRatedAmount { get; set; }
+
+        /// <summary>Current amount on the payout (after any decision).</summary>
+        public decimal Amount { get; set; }
+
+        public bool Pending { get; set; }
+
+        public PayoutReviewDecision? Decision { get; set; }
+
+        public string? ReviewedByName { get; set; }
+
+        public DateTime? ReviewedAtUtc { get; set; }
+
+        public string? Note { get; set; }
+
+        public DateTime CreatedAtUtc { get; set; }
+    }
+
+    public class DecidePayoutApprovalRequest
+    {
+        [Required]
+        public PayoutReviewDecision Decision { get; set; }
+
+        /// <summary>Partial approvals only: the amount to pay. Omitted = pro-rated to the delivered minutes.</summary>
+        [Range(0, 99_999_999)]
+        public decimal? Amount { get; set; }
+
+        [MaxLength(300)]
+        public string? Note { get; set; }
     }
 
     /// <summary>Admin correction to one line item — only while its payout is still Pending.</summary>

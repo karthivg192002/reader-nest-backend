@@ -5,6 +5,10 @@ namespace iucs.readernest.application.Dto.Admission
 {
     public class DemoParticipantDto
     {
+        /// <summary>Existing participant's id — set on reads, and echoed back on an edit so the
+        /// invitee keeps their own join link (it's keyed by this id). Null for a new invitee.</summary>
+        public Guid? Id { get; set; }
+
         [Required]
         [MaxLength(200)]
         public string Name { get; set; } = null!;
@@ -57,6 +61,39 @@ namespace iucs.readernest.application.Dto.Admission
         public DateTime ScheduledEndAtUtc { get; set; }
 
         /// <summary>Additional invitees — demos are flexible for more than one parent to join.</summary>
+        public List<DemoParticipantDto> Participants { get; set; } = [];
+    }
+
+    /// <summary>
+    /// Corrects a booking's parent/child details (a mistyped email being the usual case) without
+    /// touching its slot, teacher or pipeline stage — those have their own endpoints (reschedule,
+    /// reassign, conversion-status). <see cref="Participants"/> replaces the extra-invitee list:
+    /// entries carrying an existing Id are updated in place, new ones are added, and any not sent
+    /// back are removed.
+    /// </summary>
+    public class UpdateDemoBookingRequest
+    {
+        [Required]
+        [MaxLength(200)]
+        public string ParentName { get; set; } = null!;
+
+        [Required]
+        [EmailAddress]
+        [MaxLength(256)]
+        public string ParentEmail { get; set; } = null!;
+
+        [MaxLength(20)]
+        public string? ParentPhone { get; set; }
+
+        [Required]
+        [MaxLength(200)]
+        public string ChildName { get; set; } = null!;
+
+        [Range(1, 18)]
+        public int? ChildAge { get; set; }
+
+        public Guid? DepartmentId { get; set; }
+
         public List<DemoParticipantDto> Participants { get; set; } = [];
     }
 
