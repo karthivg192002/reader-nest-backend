@@ -320,6 +320,98 @@ namespace iucs.readernest.application.Services
             return await GetAsync(session.Id, cancellationToken);
         }
 
+        public async Task<ClassSessionDto> CancelByParentAsync(
+            Guid parentUserId,
+            Guid sessionId,
+            string reason,
+            CancellationToken cancellationToken = default)
+        {
+            reason = reason?.Trim() ?? string.Empty;
+            if (reason.Length == 0)
+            {
+                throw new DomainValidationException("Please tell us why you're cancelling this class.");
+            }
+
+            var parent = await _unitOfWork.Repository<User>().Query()
+                .FirstOrDefaultAsync(u => u.Id == parentUserId && u.Role == UserRole.Parent, cancellationToken)
+                ?? throw new NotFoundException("Parent account not found.");
+
+            var session = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .Include(s => s.Batch)
+                .Include(s => s.TeacherProfile).ThenInclude(t => t.User)
+                .FirstOrDefaultAsync(s => s.Id == sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+
+            // Someone else's class answers 404 (not 403), so session ids can't be probed.
+            if (session.BatchId is not { } batchId)
+            {
+                throw new NotFoundException(nameof(ClassSession), sessionId);
+            }
+
+            var enrolled = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.BatchId == batchId && e.Status == EnrollmentStatus.Active)
+                .Select(e => new { e.ChildId, ParentUserId = e.Child.ParentProfile.UserId, e.Child.FirstName, e.Child.LastName })
+                .ToListAsync(cancellationToken);
+            var mine = enrolled.Where(e => e.ParentUserId == parentUserId).ToList();
+            if (mine.Count == 0)
+            {
+                throw new NotFoundException(nameof(ClassSession), sessionId);
+            }
+
+            // One family can't call off a shared class for everyone else in the batch — only
+            // a class that is theirs alone (1:1, or siblings together) can be cancelled here.
+            if (enrolled.Any(e => e.ParentUserId != parentUserId))
+            {
+                throw new DomainValidationException(
+                    "This is a group class with other students, so it can't be cancelled from here. Please raise a ticket under Help & Support and the team will help.");
+            }
+
+            if (session.Status is not (SessionStatus.Scheduled or SessionStatus.CarriedForward))
+            {
+                throw new DomainValidationException("Only an upcoming class can be cancelled.");
+            }
+
+            if (session.ScheduledStartAtUtc <= DateTime.UtcNow)
+            {
+                throw new DomainValidationException("This class has already started, so it can't be cancelled.");
+            }
+
+            // No admin approval: a parent's cancellation takes effect immediately, the mirror of a
+            // teacher's cancellation reaching parents automatically. The reason is recorded on the
+            // class itself so staff see exactly who cancelled and why.
+            var parentName = $"{parent.FirstName} {parent.LastName}".Trim();
+            session.Status = SessionStatus.Cancelled;
+            var storedReason = $"Cancelled by parent ({parentName}): {reason}";
+            session.CancellationReason = storedReason.Length <= 500 ? storedReason : storedReason[..500];
+            await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
+                changesJson: "{\"cancelledBy\":\"parent\"}", cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            var teacher = session.TeacherProfile.User;
+            try
+            {
+                await _notificationService.SendTemplatedEmailAsync(
+                    teacher.Id, teacher.Email, NotificationType.General, "class-cancelled-by-parent",
+                    new Dictionary<string, string>
+                    {
+                        ["TeacherFirstName"] = teacher.FirstName,
+                        ["ParentName"] = parentName,
+                        ["ChildName"] = string.Join(", ", mine.Select(m => $"{m.FirstName} {m.LastName}".Trim())),
+                        ["ClassName"] = session.Batch?.Name ?? "Class",
+                        ["StartLocal"] = DateTimeDisplay.ToLocalRange(session.ScheduledStartAtUtc, session.ScheduledEndAtUtc, teacher.TimeZoneId),
+                        ["Reason"] = reason,
+                    },
+                    cancellationToken);
+            }
+            catch (Exception)
+            {
+                // Best-effort: the cancellation is already saved and shows on the teacher's
+                // schedule; a mail failure must not make the parent think it didn't go through.
+            }
+
+            return await GetAsync(session.Id, cancellationToken);
+        }
+
         public async Task<ClassSessionDto> CompleteAsync(
             Guid id,
             CompleteSessionRequest? request = null,
@@ -359,13 +451,20 @@ namespace iucs.readernest.application.Services
             }
 
             // Auto payout calculation post-class: the earning accrues in the same unit of work
-            await _payoutService.AccrueForSessionAsync(
+            var earning = await _payoutService.AccrueForSessionAsync(
                 session, PayoutItemType.SessionEarning,
                 session.Type == SessionType.Demo ? "Demo session" : null,
                 cancellationToken);
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            // A class that ran shorter than scheduled goes to Payout Approvals — alert Admin and
+            // Management straight away (best-effort, after the completion is durably saved).
+            if (earning.RequiresReview)
+            {
+                await _payoutService.NotifyPayoutReviewAsync(earning.Id, cancellationToken);
+            }
 
             // The definitive "End Class" timestamp for the Class Session Logs screen — best
             // effort, after the real completion has already durably saved.
@@ -1468,16 +1567,26 @@ namespace iucs.readernest.application.Services
                         cancellationToken);
             }
 
-            // Coordinator (and anyone else with the same scheduling-edit grant): "the
-            // coordinator can drop into any ongoing/upcoming class or demo" is documented,
-            // deliberate monitor access on the frontend (coordinator/Calendar.tsx's Join Class
-            // button) — not scoped to a specific batch/session the way Parent/Teacher are,
-            // since coordinating means being able to check any of them.
+            // The admin team (RM, Coordinator, Management, Founder, ...) can drop into any
+            // ongoing/upcoming class or demo as a monitor — not scoped to a specific
+            // batch/session the way Parent/Teacher are. Client requirement: "no additional
+            // permission or approval" beyond being an authorised admin member, so seeing the
+            // academy calendar (SessionCalendarManagement:View, baseline for every admin-team
+            // preset — see RequiredSystemRolePermissions) is the whole test; it used to demand
+            // the scheduling Edit grant only the Coordinator preset carried. A Sub Admin with no
+            // calendar access at all (e.g. a billing-only account) is still refused.
             if (user.Role == UserRole.SubAdmin)
             {
                 return await _unitOfWork.Repository<SubAdminPermission>().ExistsAsync(
-                    p => p.UserId == userId && p.Module == nameof(PermissionModule.SessionCalendarManagement) && p.CanEdit,
+                    p => p.UserId == userId && p.Module == nameof(PermissionModule.SessionCalendarManagement) && p.CanView,
                     cancellationToken);
+            }
+
+            // Admission team: always carries SessionCalendarManagement:View (required grant) and
+            // runs the demo pipeline, so it can monitor any class the same way.
+            if (user.Role == UserRole.AdmissionTeam)
+            {
+                return true;
             }
 
             return false;
@@ -1561,7 +1670,7 @@ namespace iucs.readernest.application.Services
             // so this check applying to them too silently broke the button with "This class
             // hasn't opened for joining yet." on anything more than 10 minutes away. A genuine
             // participant (Teacher/Parent) still only gets the real join window.
-            var isMonitor = user.Role is UserRole.Admin or UserRole.SubAdmin;
+            var isMonitor = user.Role is UserRole.Admin or UserRole.SubAdmin or UserRole.AdmissionTeam;
             var now = DateTime.UtcNow;
             if (!isMonitor && now < session.ScheduledStartAtUtc.AddMinutes(-10))
             {
@@ -1586,7 +1695,10 @@ namespace iucs.readernest.application.Services
                 .Select(i => i.ConfigJson)
                 .FirstOrDefaultAsync(cancellationToken);
             var domain = JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
-            var moderator = user.Role is UserRole.Teacher or UserRole.Admin;
+            // Admin-team monitors join as moderators too: a non-moderator lands in the class's
+            // lobby (DefaultLobbyEnabled) and has to wait for the teacher to admit them, which
+            // is exactly the "approval to enter" the client asked to remove for the admin team.
+            var moderator = isMonitor || user.Role == UserRole.Teacher;
 
             var token = _jitsiTokenService.CreateToken(
                 domain,

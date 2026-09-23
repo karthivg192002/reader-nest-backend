@@ -272,6 +272,18 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _sessionService.CancelAsync(id, request, cancellationToken));
         }
 
+        /// <summary>Parent cancels their own child's upcoming class; the teacher is emailed with the reason. No admin approval.</summary>
+        [HttpPost("{id:guid}/parent-cancel")]
+        [Authorize(Roles = nameof(UserRole.Parent))]
+        public async Task<ActionResult<ClassSessionDto>> CancelByParent(
+            Guid id,
+            CancelSessionRequest request,
+            CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _sessionService.CancelByParentAsync(userId, id, request.Reason ?? string.Empty, cancellationToken));
+        }
+
         /// <summary>
         /// Marks a session completed with an optional class summary;
         /// auto-moves the batch to Dormant when the course finishes.

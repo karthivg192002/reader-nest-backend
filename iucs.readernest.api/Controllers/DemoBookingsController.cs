@@ -118,6 +118,17 @@ namespace iucs.readernest.api.Controllers
 
         /// <summary>Move a still-scheduled demo to a new date/time. Notifies the parent, invitees
         /// and teacher with the new time, same as resend-link.</summary>
+        /// <summary>Edit a booking's parent/child details and extra invitees (e.g. fix a wrong email).</summary>
+        [HttpPut("{id:guid}")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<DemoBookingDto>> Update(
+            Guid id,
+            UpdateDemoBookingRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _demoBookingService.UpdateAsync(id, request, cancellationToken));
+        }
+
         [HttpPut("{id:guid}/reschedule")]
         [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
         public async Task<ActionResult<DemoBookingDto>> Reschedule(

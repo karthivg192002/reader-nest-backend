@@ -88,6 +88,37 @@ namespace iucs.readernest.application.Common
                     """,
                     "Occasion", "ParentName", "ChildName", "Stars", "Comment"),
 
+                New("class-cancelled-by-parent", "Class Cancelled by Parent (Teacher)",
+                    "Sent to the teacher when a parent cancels an upcoming class from the parent portal (no admin approval needed).",
+                    NotificationType.General, "Class cancelled by parent: {{ClassName}} on {{StartLocal}}",
+                    """
+                    <p>Hi {{TeacherFirstName}},</p>
+                    <p>The parent <strong>{{ParentName}}</strong> has cancelled the class for <strong>{{ChildName}}</strong>:</p>
+                    <p style="font-weight:600;">{{ClassName}} &ndash; {{StartLocal}}</p>
+                    <p><strong>Reason given by the parent:</strong> &ldquo;{{Reason}}&rdquo;</p>
+                    <p>No action is needed from you &ndash; the class has been removed from your schedule.</p>
+                    """,
+                    "TeacherFirstName", "ParentName", "ChildName", "ClassName", "StartLocal", "Reason"),
+
+                New("short-class-payout-approval", "Short Class — Payout Approval Needed (Admin / Management)",
+                    "Sent to Admin and Management when a class ends before its scheduled duration (or with no teacher attendance recorded); the payout waits in Payout Approvals.",
+                    NotificationType.General, "Payout approval needed: {{TeacherName}}'s class ran {{ShortfallMinutes}} min short",
+                    """
+                    <p>A class ended before its scheduled duration and needs a payout decision.</p>
+                    <table style="border-collapse:collapse;font-size:14px;">
+                      <tr><td style="padding:4px 12px 4px 0;color:#6b7280;">Teacher</td><td style="padding:4px 0;"><strong>{{TeacherName}}</strong></td></tr>
+                      <tr><td style="padding:4px 12px 4px 0;color:#6b7280;">Batch / class</td><td style="padding:4px 0;">{{ClassName}}</td></tr>
+                      <tr><td style="padding:4px 12px 4px 0;color:#6b7280;">Student(s)</td><td style="padding:4px 0;">{{Students}}</td></tr>
+                      <tr><td style="padding:4px 12px 4px 0;color:#6b7280;">Scheduled time</td><td style="padding:4px 0;">{{ScheduledTime}}</td></tr>
+                      <tr><td style="padding:4px 12px 4px 0;color:#6b7280;">Scheduled duration</td><td style="padding:4px 0;">{{ScheduledMinutes}} min</td></tr>
+                      <tr><td style="padding:4px 12px 4px 0;color:#6b7280;">Actual duration</td><td style="padding:4px 0;">{{ActualMinutes}} min</td></tr>
+                      <tr><td style="padding:4px 12px 4px 0;color:#6b7280;">Shortfall</td><td style="padding:4px 0;"><strong>{{ShortfallMinutes}} min</strong></td></tr>
+                    </table>
+                    <p>Approve it for full payout, a partial payout, or no payout.</p>
+                    <p><a href="{{ApprovalsUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">Review in Payout Approvals</a></p>
+                    """,
+                    "TeacherName", "ClassName", "Students", "ScheduledTime", "ScheduledMinutes", "ActualMinutes", "ShortfallMinutes", "ApprovalsUrl"),
+
                 New("support-ticket-raised", "Support Ticket Raised (Relationship Manager / Admin)",
                     "Sent to Relationship Managers and Admins when a parent raises a new support ticket from the portal.",
                     NotificationType.General, "New ticket {{Reference}} from {{ParentName}}: {{Subject}}",

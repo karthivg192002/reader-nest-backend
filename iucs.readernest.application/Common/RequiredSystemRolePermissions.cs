@@ -34,19 +34,29 @@ namespace iucs.readernest.application.Common
             // Communication already gates Progress Reports/Email Templates for the same module.
             new("teacher", PermissionModule.Communication, View: true, Edit: true),
             new("coordinator", PermissionModule.Communication, View: true, Edit: true),
-            // SessionService.IsSessionParticipantAsync's SubAdmin branch requires CanEdit
-            // specifically (not just View) before letting a coordinator join a live class as a
-            // monitor — the seeded default grants Edit, but nothing protected it from being
-            // silently wiped by a preset re-save missing that checkbox, unlike every other
-            // required grant here. Confirmed live: a coordinator account could see every class
-            // on the calendar fine (View survives) but got 403 "You do not have access to this
-            // session" on every single Join Class click, with no per-session pattern to it.
+            // The coordinator schedules and reschedules classes, so its Create/Edit is baseline
+            // too, not just the View every admin-team preset now carries (below) — nothing else
+            // protected it from being silently wiped by a preset re-save missing that checkbox.
             new("coordinator", PermissionModule.SessionCalendarManagement, View: true, Create: true, Edit: true),
+            // Full calendar visibility for the whole admin team (client requirement): the
+            // Relationship Manager and Management see every upcoming and ongoing class too, and
+            // — since IsSessionParticipantAsync's SubAdmin branch only asks for this View grant —
+            // can join any of them as a monitor with no further approval.
+            new("sub-admin", PermissionModule.SessionCalendarManagement, View: true),
+            new("management", PermissionModule.SessionCalendarManagement, View: true),
+            // Short-class payout approval: Management / Owners decide full, partial or no payout
+            // for any class that ran shorter than scheduled (Payout Approvals), alongside Admin.
+            new("management", PermissionModule.Payouts, View: true, Approve: true),
             new("parent", PermissionModule.SessionCalendarManagement, View: true),
             new("parent", PermissionModule.ContentAccessManagement, View: true),
             new("parent", PermissionModule.BillingFinance, View: true),
             new("parent", PermissionModule.Communication, View: true),
             new("admission", PermissionModule.BillingFinance, View: true, Edit: true, Approve: true),
+            // Delete is what DELETE /api/demo-bookings/{id} is gated on — the admission preset
+            // shipped without it, so the Demo Scheduling "Delete" button 403'd for the very team
+            // that books demos, and a demo created with a wrong parent email could neither be
+            // removed nor have its teacher slot freed to rebook it correctly.
+            new("admission", PermissionModule.Admission, View: true, Create: true, Edit: true, Delete: true, Approve: true),
             // The Admission Dashboard's KPI tiles, conversion funnel and "Today & Upcoming
             // Demos" list all read GET /api/sessions, which is gated on this module (see
             // SessionsController.List's [HasPermission] — the [Authorize(Roles=...)] on that
