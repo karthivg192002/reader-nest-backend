@@ -88,6 +88,38 @@ namespace iucs.readernest.application.Common
                     """,
                     "Occasion", "ParentName", "ChildName", "Stars", "Comment"),
 
+                New("support-ticket-raised", "Support Ticket Raised (Relationship Manager / Admin)",
+                    "Sent to Relationship Managers and Admins when a parent raises a new support ticket from the portal.",
+                    NotificationType.General, "New ticket {{Reference}} from {{ParentName}}: {{Subject}}",
+                    """
+                    <p><strong>{{ParentName}}</strong> raised a new support ticket (<strong>{{Reference}}</strong>, {{Category}}).</p>
+                    <p style="font-weight:600;">{{Subject}}</p>
+                    <p>&ldquo;{{Message}}&rdquo;</p>
+                    <p><a href="{{TicketUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">Open ticket</a></p>
+                    """,
+                    "Reference", "ParentName", "Category", "Subject", "Message", "TicketUrl"),
+
+                New("support-ticket-parent-replied", "Support Ticket Parent Reply (Relationship Manager / Admin)",
+                    "Sent to Relationship Managers and Admins when a parent adds a message to an existing support ticket.",
+                    NotificationType.General, "{{ParentName}} replied on ticket {{Reference}}",
+                    """
+                    <p><strong>{{ParentName}}</strong> replied on ticket <strong>{{Reference}}</strong> &ndash; {{Subject}}:</p>
+                    <p>&ldquo;{{Message}}&rdquo;</p>
+                    <p><a href="{{TicketUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">Open ticket</a></p>
+                    """,
+                    "Reference", "ParentName", "Subject", "Message", "TicketUrl"),
+
+                New("support-ticket-updated", "Support Ticket Update (Parent)",
+                    "Sent to the parent when the team replies on their support ticket or changes its status.",
+                    NotificationType.General, "Update on your ticket {{Reference}}: {{Subject}}",
+                    """
+                    <p>There's an update on your support ticket <strong>{{Reference}}</strong> &ndash; {{Subject}}.</p>
+                    <p>{{Update}}</p>
+                    <p>Status: <strong>{{Status}}</strong></p>
+                    <p><a href="{{TicketUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">View ticket</a></p>
+                    """,
+                    "Reference", "Subject", "Update", "Status", "TicketUrl"),
+
                 New("class-scheduled", "Class Scheduled (Teacher)",
                     "Sent to the teacher when a new session is scheduled for them.",
                     NotificationType.BookingConfirmation, "New class scheduled: {{SessionType}}",

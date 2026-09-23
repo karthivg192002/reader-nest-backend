@@ -104,6 +104,8 @@ namespace iucs.readernest.domain.Data
         public DbSet<BulkEmailBlast> BulkEmailBlasts => Set<BulkEmailBlast>();
         public DbSet<BulkEmailRecipient> BulkEmailRecipients => Set<BulkEmailRecipient>();
         public DbSet<BulkEmailReply> BulkEmailReplies => Set<BulkEmailReply>();
+        public DbSet<SupportTicket> SupportTickets => Set<SupportTicket>();
+        public DbSet<SupportTicketMessage> SupportTicketMessages => Set<SupportTicketMessage>();
         public DbSet<EmailTemplate> EmailTemplates => Set<EmailTemplate>();
         public DbSet<ProgressReport> ProgressReports => Set<ProgressReport>();
         public DbSet<AuditLog> AuditLogs => Set<AuditLog>();

@@ -9429,6 +9429,93 @@ namespace iucs.readernest.tests
             await Assert.ThrowsAsync<NotFoundException>(() => folders.SetBatchAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderBatchAccessRequest { AddBatchIds = [Guid.NewGuid()] }));
         }
 
+        private SupportTicketService CreateSupportTicketService() =>
+            new(_db.UnitOfWork, _notifications, new ConfigurationBuilder().Build(), NullLogger<SupportTicketService>.Instance);
+
+        [Fact]
+        public async Task SupportTickets_ParentRaises_RmIsAlerted_ReplyThreadAndStatusFlow()
+        {
+            var parent = await _db.SeedUserAsync($"st-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var profile = new ParentProfile { UserId = parent.Id };
+            var child = new Child { ParentProfile = profile, FirstName = "Izaan", LastName = "A" };
+            var rm = await _db.SeedUserAsync($"rm-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+            var otherSubAdmin = await _db.SeedUserAsync($"co-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+            _db.Context.AddRange(profile, child, new SubAdminPermission
+            {
+                UserId = rm.Id, Module = PermissionModule.SupportTickets.ToString(), CanView = true, CanEdit = true,
+            });
+            await _db.Context.SaveChangesAsync();
+            _emailSender.Sent.Clear();
+            var service = CreateSupportTicketService();
+
+            var ticket = await service.CreateAsync(parent.Id, new CreateSupportTicketRequest
+            {
+                Category = SupportTicketCategory.ClassSchedule,
+                Subject = "  Class time looks wrong  ",
+                Message = "Email says 4:00 PM, our time is 5:30 PM.",
+                ChildId = child.Id,
+            });
+
+            Assert.Equal("Class time looks wrong", ticket.Subject);
+            Assert.Equal(SupportTicketStatus.Open, ticket.Status);
+            Assert.True(ticket.AwaitingStaffReply);
+            Assert.Equal("Izaan A", ticket.ChildName);
+            Assert.Single(ticket.Messages);
+            // Only Sub Admins holding SupportTickets:View are alerted, not every Sub Admin.
+            Assert.Contains(_emailSender.Sent, m => m.To == rm.Email && m.Subject.StartsWith("New ticket"));
+            Assert.DoesNotContain(_emailSender.Sent, m => m.To == otherSubAdmin.Email);
+
+            // RM reply moves it to In Progress and emails the parent.
+            _emailSender.Sent.Clear();
+            var replied = await service.StaffReplyAsync(rm.Id, ticket.Id, new ReplySupportTicketRequest { Message = "We'll move it to 7:00 PM IST." });
+            Assert.Equal(SupportTicketStatus.InProgress, replied.Status);
+            Assert.False(replied.AwaitingStaffReply);
+            Assert.True(replied.Messages[1].IsStaff);
+            Assert.Contains(_emailSender.Sent, m => m.To == parent.Email && m.Subject.StartsWith("Update on your ticket"));
+
+            // Resolved, then a parent reply reopens it and flags it for the team again.
+            await service.UpdateStatusAsync(rm.Id, ticket.Id, SupportTicketStatus.Resolved);
+            var reopened = await service.ParentReplyAsync(parent.Id, ticket.Id, new ReplySupportTicketRequest { Message = "Still showing 4 PM." });
+            Assert.Equal(SupportTicketStatus.Open, reopened.Status);
+            Assert.Null(reopened.ResolvedAtUtc);
+            Assert.True(reopened.AwaitingStaffReply);
+            Assert.Equal(3, reopened.Messages.Count);
+
+            var counts = await service.GetCountsAsync();
+            Assert.True(counts.AwaitingReply >= 1);
+            Assert.Contains(await service.ListForStaffAsync(null, "izaan"), t => t.Id == ticket.Id);
+        }
+
+        [Fact]
+        public async Task SupportTickets_ParentCannotSeeOrReplyToAnotherFamilysTicket_OrTagSomeoneElsesChild()
+        {
+            var owner = await _db.SeedUserAsync($"st-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var stranger = await _db.SeedUserAsync($"st-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var strangerProfile = new ParentProfile { UserId = stranger.Id };
+            var strangersChild = new Child { ParentProfile = strangerProfile, FirstName = "Other", LastName = "Kid" };
+            _db.Context.AddRange(strangerProfile, strangersChild);
+            await _db.Context.SaveChangesAsync();
+            var service = CreateSupportTicketService();
+
+            var ticket = await service.CreateAsync(owner.Id, new CreateSupportTicketRequest
+            {
+                Category = SupportTicketCategory.Other, Subject = "Hello", Message = "Question",
+            });
+
+            Assert.Empty(await service.ListForParentAsync(stranger.Id));
+            await Assert.ThrowsAsync<NotFoundException>(() => service.GetForParentAsync(stranger.Id, ticket.Id));
+            await Assert.ThrowsAsync<NotFoundException>(() => service.ParentReplyAsync(
+                stranger.Id, ticket.Id, new ReplySupportTicketRequest { Message = "hi" }));
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.CreateAsync(owner.Id, new CreateSupportTicketRequest
+            {
+                Category = SupportTicketCategory.Other, Subject = "x", Message = "y", ChildId = strangersChild.Id,
+            }));
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.CreateAsync(owner.Id, new CreateSupportTicketRequest
+            {
+                Category = SupportTicketCategory.Other, Subject = "   ", Message = "y",
+            }));
+        }
+
         private ParentFeedbackService CreateParentFeedbackService() =>
             new(_db.UnitOfWork, _notifications, NullLogger<ParentFeedbackService>.Instance);
 

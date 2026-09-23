@@ -81,6 +81,12 @@ namespace iucs.readernest.application.Common
             // like any other custom module — e.g. to a custom "IT Admin" preset — not baseline
             // access for Coordinator/Management/etc.).
             new("admin", PermissionModule.ClassSessionLogs, View: true, Create: true, Edit: true, Delete: true, Approve: true),
+            // Parent support tickets: the portal replaces WhatsApp/phone contact between families
+            // and the team, so every Relationship Manager must be able to read and answer them
+            // from day one. A net-new module, so existing "admin" rows need the same backfill as
+            // ClassSessionLogs above for the Roles & Permissions matrix to show it checked.
+            new("sub-admin", PermissionModule.SupportTickets, View: true, Edit: true),
+            new("admin", PermissionModule.SupportTickets, View: true, Create: true, Edit: true, Delete: true, Approve: true),
         ];
 
         public sealed record RequiredGrant(

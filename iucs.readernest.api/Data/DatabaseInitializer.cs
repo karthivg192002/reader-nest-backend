@@ -69,6 +69,8 @@ namespace iucs.readernest.api.Data
             await EnsurePinResetEmailTemplateAsync(context);
             await EnsureParentFeedbackEmailTemplateAsync(context);
             await EnsureParentFeedbackMenusAsync(context);
+            await EnsureSupportTicketEmailTemplatesAsync(context);
+            await EnsureSupportTicketMenusAsync(context);
             await EnsureAccessRequestEmailTemplatesAsync(context);
             await EnsurePaymentPlanReminderEmailTemplatesAsync(context);
             await ReconcileOrgNameEmailTemplatesAsync(context);
@@ -251,6 +253,7 @@ namespace iucs.readernest.api.Data
                 (PermissionModule.Settings, "Settings"),
                 (PermissionModule.SystemMonitoring, "Server Monitoring"),
                 (PermissionModule.ClassSessionLogs, "Class Session Logs"),
+                (PermissionModule.SupportTickets, "Support Tickets"),
             ];
 
             var existingKeys = await context.PermissionModuleDefinitions
@@ -580,6 +583,7 @@ namespace iucs.readernest.api.Data
             ("admin", "People", "Enrollment Review", "/admin/enrollments", "ClipboardCheck", PermissionModule.Admission.ToString()),
             ("admin", "People", "Store Inquiries", "/admin/store-inquiries", "ShoppingBag", PermissionModule.Admission.ToString()),
             ("admin", "People", "Parent Feedback", "/admin/parent-feedback", "Star", PermissionModule.Admission.ToString()),
+            ("admin", "People", "Parent Tickets", "/admin/support-tickets", "LifeBuoy", PermissionModule.SupportTickets.ToString()),
             ("admin", "People", "Leave Management", "/admin/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
             ("admin", "People", "Teacher Availability", "/admin/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
             ("admin", "Content", "Content & Resources", "/admin/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
@@ -611,6 +615,7 @@ namespace iucs.readernest.api.Data
             ("parent", "Learning", "Student View", "/student", "Sparkles", null),
             ("parent", "Account", "Payments & Billing", "/parent/billing", "CreditCard", PermissionModule.BillingFinance.ToString()),
             ("parent", "Account", "Notifications & Reports", "/parent/notifications", "Bell", PermissionModule.Communication.ToString()),
+            ("parent", "Account", "Help & Support", "/parent/support", "LifeBuoy", null),
             ("parent", "Account", "Add Child", "/parent/add-child", "UserPlus", null),
             ("subadmin", null, "Dashboard", "/subadmin", "LayoutDashboard", null),
             ("subadmin", "Access", "My Permissions", "/subadmin/permissions", "ShieldCheck", null),
@@ -618,6 +623,7 @@ namespace iucs.readernest.api.Data
             ("subadmin", "Delegated Work", "Batches", "/subadmin/batches", "Layers", PermissionModule.CourseBatchManagement.ToString()),
             ("subadmin", "Delegated Work", "Sessions", "/subadmin/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
             ("subadmin", "Delegated Work", "Users", "/subadmin/users", "Users", PermissionModule.UserManagement.ToString()),
+            ("subadmin", "Delegated Work", "Parent Tickets", "/subadmin/support-tickets", "LifeBuoy", PermissionModule.SupportTickets.ToString()),
             ("subadmin", "Delegated Work", "Assigned Reports", "/subadmin/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
             ("subadmin", "Delegated Work", "Audit Log", "/subadmin/audit-log", "History", null),
             ("admission", null, "Dashboard", "/admission", "LayoutDashboard", null),
@@ -2240,6 +2246,74 @@ namespace iucs.readernest.api.Data
                     SortOrder = anchor.SortOrder + 1,
                     IsActive = true,
                     RequiredModule = PermissionModule.Admission.ToString(),
+                });
+            }
+        }
+
+        /// <summary>Inserts the three parent support-ticket templates into a DB seeded before they existed.</summary>
+        private static async Task EnsureSupportTicketEmailTemplatesAsync(ReaderNestDbContext context)
+        {
+            foreach (var key in new[] { "support-ticket-raised", "support-ticket-parent-replied", "support-ticket-updated" })
+            {
+                if (context.EmailTemplates.Local.Any(t => t.Key == key) || await context.EmailTemplates.AnyAsync(t => t.Key == key))
+                {
+                    continue;
+                }
+
+                var seed = EmailTemplateSeedData.All.First(s => s.Key == key);
+                context.EmailTemplates.Add(new EmailTemplate
+                {
+                    Key = seed.Key,
+                    Name = seed.Name,
+                    Description = seed.Description,
+                    Category = seed.Category,
+                    Subject = seed.Subject,
+                    HtmlBody = seed.HtmlBody,
+                    PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders),
+                    IsActive = true,
+                    IsSystem = true,
+                });
+            }
+        }
+
+        /// <summary>
+        /// Adds parent support tickets to a DB seeded before they existed: "Help &amp; Support" for
+        /// parents (always visible — every family must be able to reach the team now that WhatsApp
+        /// and phone contact are being retired) and "Parent Tickets" for Admin and Relationship
+        /// Managers, gated on the SupportTickets module.
+        /// </summary>
+        private static async Task EnsureSupportTicketMenusAsync(ReaderNestDbContext context)
+        {
+            foreach (var (portal, anchorPath, section, label, path, module) in new[]
+            {
+                ("parent", "/parent/notifications", "Account", "Help & Support", "/parent/support", (string?)null),
+                ("admin", "/admin/parent-feedback", "People", "Parent Tickets", "/admin/support-tickets", PermissionModule.SupportTickets.ToString()),
+                ("subadmin", "/subadmin/users", "Delegated Work", "Parent Tickets", "/subadmin/support-tickets", PermissionModule.SupportTickets.ToString()),
+            })
+            {
+                if (context.MenuItems.Local.Any(m => m.Portal == portal && m.Path == path) ||
+                    await context.MenuItems.AnyAsync(m => m.Portal == portal && m.Path == path))
+                {
+                    continue;
+                }
+
+                var anchor = await context.MenuItems.FirstOrDefaultAsync(m => m.Portal == portal && m.Path == anchorPath);
+                if (anchor is null)
+                {
+                    continue;
+                }
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = portal,
+                    Section = section,
+                    SectionOrder = anchor.SectionOrder,
+                    Label = label,
+                    Path = path,
+                    Icon = "LifeBuoy",
+                    SortOrder = anchor.SortOrder + 1,
+                    IsActive = true,
+                    RequiredModule = module,
                 });
             }
         }
