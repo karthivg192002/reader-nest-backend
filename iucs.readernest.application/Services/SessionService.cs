@@ -1676,7 +1676,7 @@ namespace iucs.readernest.application.Services
                 guestLinkExpiresAtUtc = DateTime.UtcNow.AddHours(1);
             }
             var guestToken = _tokenService.CreateGuestJoinToken(session.Id, childId, guestLinkExpiresAtUtc);
-            return new GuestLinkDto { Token = guestToken.AccessToken };
+            return new GuestLinkDto { Token = guestToken.AccessToken, ExpiresAtUtc = guestLinkExpiresAtUtc };
         }
 
         public async Task<GuestLinkDto> CreateGuestLinkForParticipantAsync(Guid sessionId, string guestName, string? guestEmail, CancellationToken cancellationToken = default)
