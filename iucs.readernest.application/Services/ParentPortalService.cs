@@ -257,6 +257,25 @@ namespace iucs.readernest.application.Services
                 .Where(a => a.ParentProfileId == parentProfileId)
                 .Select(a => a.FolderId)
                 .ToListAsync(cancellationToken);
+
+            // Folders shared with a batch reach every parent with an actively enrolled child in it,
+            // evaluated now (a parent who enrols later gets them with no extra step). A child under an
+            // active fee suspension doesn't unlock its batch's folders, same as batch-visible files.
+            var suspendedChildIds = (await _unitOfWork.Repository<FeeSuspension>().Query()
+                    .Where(s => s.ParentProfileId == parentProfileId && s.Status == SuspensionStatus.Active && s.ChildId != null)
+                    .Select(s => s.ChildId!.Value)
+                    .ToListAsync(cancellationToken))
+                .ToHashSet();
+            var enrolledBatchIds = _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.Status == EnrollmentStatus.Active
+                    && e.Child.ParentProfileId == parentProfileId
+                    && !suspendedChildIds.Contains(e.ChildId))
+                .Select(e => e.BatchId);
+            roots.AddRange(await _unitOfWork.Repository<ResourceFolderBatchAccess>().Query()
+                .Where(a => enrolledBatchIds.Contains(a.BatchId))
+                .Select(a => a.FolderId)
+                .ToListAsync(cancellationToken));
+
             if (roots.Count == 0)
             {
                 return new HashSet<Guid>();

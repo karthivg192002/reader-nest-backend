@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using iucs.readernest.domain.Data;
@@ -11,9 +12,11 @@ using iucs.readernest.domain.Data;
 namespace iucs.readernest.domain.Migrations
 {
     [DbContext(typeof(ReaderNestDbContext))]
-    partial class ReaderNestDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260921154144_AddResourceFolderBatchAccess")]
+    partial class AddResourceFolderBatchAccess
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -3714,7 +3717,7 @@ namespace iucs.readernest.domain.Migrations
                     b.HasIndex("BatchId", "ScheduledStartAtUtc")
                         .IsUnique()
                         .HasDatabaseName("ix_class_sessions_batch_id_scheduled_start_at_utc")
-                        .HasFilter("is_deleted = false AND batch_id IS NOT NULL AND status <> 'Cancelled'");
+                        .HasFilter("is_deleted = false AND batch_id IS NOT NULL");
 
                     b.HasIndex("TeacherProfileId", "Status")
                         .HasDatabaseName("ix_class_sessions_teacher_profile_id_status");

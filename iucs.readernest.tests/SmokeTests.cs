@@ -3004,6 +3004,57 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task Menu_ExecutiveRole_ResolvesOwnPortal_AndShowsAdminAndManagementItemsByPermission()
+        {
+            // The "admin-management" persona: a Sub Admin whose RoleDefinition.DefaultRoute is
+            // "/executive". Its portal menu mixes Admin-style and Management-style items, and which
+            // ones show is decided only by the modules the role grants — nothing hardcoded per role.
+            var role = new domain.Entities.Users.RoleDefinition
+            {
+                Name = $"admin-management-{Guid.NewGuid():N}", DisplayName = "Admin & Management", DefaultRoute = "/executive",
+            };
+            _db.Context.RoleDefinitions.Add(role);
+            var user = await _db.SeedUserAsync($"exec-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+            user.RoleDefinitionId = role.Id;
+            _db.Context.MenuItems.AddRange(
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "executive", Label = "Overall Dashboard", Path = "/executive", Icon = "LayoutDashboard",
+                    SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = null,
+                },
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "executive", Section = "Management", Label = "Revenue & Courses", Path = "/executive/revenue", Icon = "TrendingUp",
+                    SectionOrder = 1, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.ReportsAnalytics.ToString(),
+                },
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "executive", Section = "Finance", Label = "Billing & Finance", Path = "/executive/billing", Icon = "Receipt",
+                    SectionOrder = 2, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.BillingFinance.ToString(),
+                },
+                // Same path in another portal must never leak in.
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "management", Label = "Revenue & Courses", Path = "/management/revenue", Icon = "TrendingUp",
+                    SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = null,
+                });
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateMenuService();
+
+            var managementOnly = await service.GetForUserAsync(user.Id, UserRole.SubAdmin, [PermissionModule.ReportsAnalytics.ToString()]);
+            Assert.Contains(managementOnly, m => m.Path == "/executive/revenue");
+            Assert.DoesNotContain(managementOnly, m => m.Path == "/executive/billing");
+            Assert.DoesNotContain(managementOnly, m => m.Portal != "executive");
+
+            var both = await service.GetForUserAsync(
+                user.Id, UserRole.SubAdmin,
+                [PermissionModule.ReportsAnalytics.ToString(), PermissionModule.BillingFinance.ToString()]);
+            Assert.Contains(both, m => m.Path == "/executive/revenue");
+            Assert.Contains(both, m => m.Path == "/executive/billing");
+        }
+
+        [Fact]
         public async Task Login_Succeeds_WithValidCredentials()
         {
             await _db.SeedUserAsync("admin@test.com", _hasher.Hash("4821"), UserRole.Admin);
@@ -4991,6 +5042,61 @@ namespace iucs.readernest.tests
             _db.Context.ChangeTracker.Clear();
             var reloaded = await _db.Context.ClassSessions.FirstAsync(s => s.Id == moving.Id);
             Assert.Equal(TimeOnly.FromDateTime(originalStart), TimeOnly.FromDateTime(reloaded.ScheduledStartAtUtc));
+        }
+
+        [Fact]
+        public async Task UpdateFutureSchedule_NewPatternKeepsAnOldWeekday_DoesNotCollideWithTheJustCancelledSession()
+        {
+            // Reproduces a live crash: a batch already met on one weekday (say Friday). Adding
+            // extra weekdays alongside it (Tuesday/Friday/Saturday) plus a new remaining-session
+            // count takes the "regenerate" path, which cancels the old sessions (status change,
+            // not soft-deleted — same convention CancelAsync uses) and re-places fresh ones from
+            // today. Because the new pattern still includes Friday at the same time, the first
+            // newly-placed Friday session lands on the exact same (batch, start time) the
+            // just-cancelled Friday session still occupies. Before this fix the unique index on
+            // (batch_id, scheduled_start_at_utc) didn't exclude Cancelled rows, so that insert
+            // threw an unhandled DbUpdateException surfaced to the caller as a raw 500.
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 3, includeSession: false);
+
+            var day7 = DateTime.UtcNow.AddDays(7);
+            var oldDay = day7.DayOfWeek;
+            for (var i = 0; i < 3; i++)
+            {
+                var d = day7.AddDays(7 * i);
+                var start = new DateTime(d.Year, d.Month, d.Day, 11, 30, 0, DateTimeKind.Utc);
+                _db.Context.Add(new ClassSession
+                {
+                    BatchId = batch.Id,
+                    TeacherProfileId = batch.TeacherProfileId,
+                    Status = SessionStatus.Scheduled,
+                    ScheduledStartAtUtc = start,
+                    ScheduledEndAtUtc = start.AddMinutes(45),
+                });
+            }
+            await _db.Context.SaveChangesAsync();
+
+            var otherDay1 = oldDay == DayOfWeek.Sunday ? DayOfWeek.Monday : oldDay - 1;
+            var otherDay2 = oldDay == DayOfWeek.Saturday ? DayOfWeek.Sunday : oldDay + 1;
+
+            var sessions = await CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                Slots =
+                [
+                    new GenerateScheduleSlot { DayOfWeek = otherDay1, StartTimeUtc = new TimeOnly(11, 30) },
+                    new GenerateScheduleSlot { DayOfWeek = oldDay, StartTimeUtc = new TimeOnly(11, 30) },
+                    new GenerateScheduleSlot { DayOfWeek = otherDay2, StartTimeUtc = new TimeOnly(11, 30) },
+                ],
+                RemainingSessionCount = 6,
+            });
+
+            // ListAsync (what UpdateFutureScheduleAsync returns) includes the whole batch
+            // history, so the 3 just-cancelled originals are still in there alongside the 6
+            // freshly-placed ones -- same shape as UpdateFutureSchedule_WeekdayPatternChange_
+            // RegeneratesRemainingSessions_CancellingOldOnes above.
+            var scheduled = sessions.Where(s => s.Status == SessionStatus.Scheduled).ToList();
+            var cancelled = sessions.Where(s => s.Status == SessionStatus.Cancelled).ToList();
+            Assert.Equal(6, scheduled.Count);
+            Assert.Equal(3, cancelled.Count);
         }
 
         [Fact]
@@ -9258,6 +9364,69 @@ namespace iucs.readernest.tests
             // Unsharing takes the recording away again without touching the file.
             await folders.SetAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderAccessRequest { RemoveParentProfileIds = [buyer.Profile.Id] });
             await Assert.ThrowsAsync<NotFoundException>(() => portal.GetResourceForViewAsync(buyer.User.Id, recording.Id));
+        }
+
+        private async Task<(User User, BatchEnrollment Enrollment)> SeedFolderParentEnrolledAsync(Guid batchId)
+        {
+            var (profile, user) = await SeedFolderParentAsync();
+            var child = new Child { ParentProfileId = profile.Id, FirstName = "Kid", LastName = "One" };
+            _db.Context.Add(child);
+            await _db.Context.SaveChangesAsync();
+            var enrollment = new BatchEnrollment { BatchId = batchId, ChildId = child.Id, Status = EnrollmentStatus.Active };
+            _db.Context.Add(enrollment);
+            await _db.Context.SaveChangesAsync();
+            return (user, enrollment);
+        }
+
+        [Fact]
+        public async Task ResourceFolders_ShareWithSeveralBatches_ReachesEnrolledParentsLive_IncludingLaterEnrolments()
+        {
+            var folders = CreateFolderService();
+            var folder = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Jolly Phonics Level 1" });
+            var sub = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Worksheets", ParentFolderId = folder.Id });
+            var file = await SeedFolderFileAsync(sub.Id);
+
+            var (batchA, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var (batchB, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var (otherBatch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var inA = await SeedFolderParentEnrolledAsync(batchA.Id);
+            var inB = await SeedFolderParentEnrolledAsync(batchB.Id);
+            var inOther = await SeedFolderParentEnrolledAsync(otherBatch.Id);
+            var portal = new ParentPortalService(_db.UnitOfWork);
+
+            // Nothing is shared yet, so nobody sees the file.
+            Assert.Empty(await portal.GetResourcesAsync(inA.User.Id));
+
+            // One call shares with two batches; sharing the parent folder reaches the subfolder's file.
+            var shared = await folders.SetBatchAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderBatchAccessRequest { AddBatchIds = [batchA.Id, batchB.Id] });
+            Assert.Equal(2, shared.Count);
+            Assert.Equal(2, (await folders.ListAsync()).Single(f => f.Id == folder.Id).SharedBatchCount);
+            foreach (var parent in new[] { inA, inB })
+            {
+                Assert.Contains(await portal.GetResourcesAsync(parent.User.Id), r => r.Id == file.Id);
+                Assert.Equal(file.Id, (await portal.GetResourceForDownloadAsync(parent.User.Id, file.Id)).Id);
+            }
+            Assert.Empty(await portal.GetResourcesAsync(inOther.User.Id));
+            await Assert.ThrowsAsync<NotFoundException>(() => portal.GetResourceForDownloadAsync(inOther.User.Id, file.Id));
+
+            // Re-sharing is idempotent.
+            Assert.Equal(2, (await folders.SetBatchAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderBatchAccessRequest { AddBatchIds = [batchA.Id] })).Count);
+
+            // A parent who enrols in a shared batch AFTER the share still gets it, with no further step.
+            var lateJoiner = await SeedFolderParentEnrolledAsync(batchA.Id);
+            Assert.Contains(await portal.GetResourcesAsync(lateJoiner.User.Id), r => r.Id == file.Id);
+
+            // A withdrawn enrolment stops counting.
+            inA.Enrollment.Status = EnrollmentStatus.Withdrawn;
+            await _db.Context.SaveChangesAsync();
+            Assert.Empty(await portal.GetResourcesAsync(inA.User.Id));
+
+            // Unsharing one batch removes just that batch's parents.
+            await folders.SetBatchAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderBatchAccessRequest { RemoveBatchIds = [batchB.Id] });
+            Assert.Empty(await portal.GetResourcesAsync(inB.User.Id));
+            Assert.Contains(await portal.GetResourcesAsync(lateJoiner.User.Id), r => r.Id == file.Id);
+
+            await Assert.ThrowsAsync<NotFoundException>(() => folders.SetBatchAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderBatchAccessRequest { AddBatchIds = [Guid.NewGuid()] }));
         }
 
         private ParentFeedbackService CreateParentFeedbackService() =>

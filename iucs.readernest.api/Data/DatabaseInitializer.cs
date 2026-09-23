@@ -52,6 +52,8 @@ namespace iucs.readernest.api.Data
             await EnsureAdminServerMonitoringMenuAsync(context);
             await EnsureClassSessionLogsMenuAsync(context);
             await EnsureItAdminMenuAsync(context);
+            await EnsureExecutiveMenuAsync(context);
+            await RelabelExecutiveDashboardMenuAsync(context);
             await EnsureBulkEmailHistoryMenuAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
@@ -75,6 +77,7 @@ namespace iucs.readernest.api.Data
             await EnsureAdminLeaveAndAvailabilityMenuAsync(context);
             await EnsureTeacherRecordingsMenuAsync(context);
             await EnsureAdminRecordingsMenuAsync(context);
+            await EnsureCoordinatorRecordingsMenuAsync(context);
             await EnsureAdmissionPaymentTrackingMenuAsync(context);
             await EnsureTeacherAssignmentMenuAsync(context);
             await EnsureParentRecordingsMenuAsync(context);
@@ -505,6 +508,13 @@ namespace iucs.readernest.api.Data
                     // ₹0 total" instead of the real figures shown by the chart above it.
                     Grant(PermissionModule.CourseBatchManagement, view: true),
                 ]),
+                // Founder Dashboard = Management Dashboard + Admin Dashboard on one login (renamed
+                // from "Admin & Management" 2026-09-22; the role Name/route are unchanged so no one
+                // already assigned it is disturbed). Its menu (the "executive" portal, see
+                // EnsureExecutiveMenuAsync) shows exactly the items whose module the role is
+                // granted, so what it sees is edited on the Roles & Permissions screen, not in
+                // code. Seeded with every module; trim it there for a narrower persona.
+                ("admin-management", "Founder Dashboard", "Complete visibility and control — every Admin permission plus Management's business view, in one dashboard.", "/executive", AllModulesFull()),
                 ("student", "Student", "Learner experience surfaced through the parent account.", "/student", []),
             ];
         }
@@ -519,11 +529,32 @@ namespace iucs.readernest.api.Data
         /// </summary>
         private static async Task RemoveRetiredMenusAsync(ReaderNestDbContext context)
         {
-            var retiredPaths = new[] { "/coordinator/scheduling", "/teacher/live/s-1" };
+            // "/executive/overview" (ManagementDashboard) was merged into the "/executive" index
+            // page (FounderDashboard) 2026-09-22 — the sidebar item is retired the same way as any
+            // other dropped screen; the route itself still redirects (see App.tsx) for anyone with
+            // the old link bookmarked.
+            var retiredPaths = new[] { "/coordinator/scheduling", "/teacher/live/s-1", "/executive/overview" };
             var stale = await context.MenuItems.Where(m => retiredPaths.Contains(m.Path)).ToListAsync();
             if (stale.Count > 0)
             {
                 context.MenuItems.RemoveRange(stale);
+            }
+        }
+
+        /// <summary>
+        /// One-time relabel: the "/executive" dashboard menu item was seeded as "Overall
+        /// Dashboard" before this persona was renamed "Founder Dashboard" (see SystemRoleSeeds'
+        /// "admin-management" entry and EnsureExecutiveMenuAsync). SeedRolesAsync's own
+        /// DisplayName sync doesn't reach MenuItem rows, so this exists purely to carry that
+        /// rename onto an already-seeded database. Only touches a row still carrying the old
+        /// default label, so a title an admin already customised via Menu Manager is left alone.
+        /// </summary>
+        private static async Task RelabelExecutiveDashboardMenuAsync(ReaderNestDbContext context)
+        {
+            var item = await context.MenuItems.FirstOrDefaultAsync(m => m.Portal == "executive" && m.Path == "/executive");
+            if (item is not null && item.Label == "Overall Dashboard")
+            {
+                item.Label = "Founder Dashboard";
             }
         }
 
@@ -603,6 +634,7 @@ namespace iucs.readernest.api.Data
             ("coordinator", "Monitoring", "Academic Calendar", "/coordinator/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement.ToString()),
             ("coordinator", "Monitoring", "Teacher Availability", "/coordinator/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
             ("coordinator", "Monitoring", "Sessions", "/coordinator/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+            ("coordinator", "Monitoring", "Recordings", "/coordinator/recordings", "Video", PermissionModule.SessionCalendarManagement.ToString()),
             ("management", null, "Executive Overview", "/management", "LayoutDashboard", null),
             ("management", "Performance", "Revenue & Courses", "/management/revenue", "TrendingUp", PermissionModule.ReportsAnalytics.ToString()),
             ("management", "Performance", "Teacher & Batch Performance", "/management/performance", "Gauge", PermissionModule.ReportsAnalytics.ToString()),
@@ -1138,6 +1170,94 @@ namespace iucs.readernest.api.Data
                 context.MenuItems.Add(new MenuItem
                 {
                     Portal = "itadmin",
+                    Section = section,
+                    SectionOrder = sectionOrder,
+                    Label = label,
+                    Path = path,
+                    Icon = icon,
+                    SortOrder = sortOrder,
+                    RequiredModule = requiredModule,
+                    IsActive = true,
+                });
+            }
+        }
+
+        /// <summary>
+        /// Seeds the "executive" portal menu — the landing console for the "admin-management"
+        /// Sub Admin persona (see SystemRoleSeeds), branded "Founder Dashboard": every Admin-portal
+        /// item plus the Management executive pages (Revenue &amp; Courses, Teacher &amp; Batch
+        /// Performance, Management Reports — the old standalone "Executive Overview" item now
+        /// merges into the Founder Dashboard landing page itself), each gated by the same
+        /// RequiredModule as its Admin/Management original. Nothing about who sees what is decided
+        /// in code — MenuService only shows an item when the user's role grants View on its
+        /// module, so narrowing this persona is a Roles &amp; Permissions edit, and any row can be
+        /// reordered/hidden in Menu Manager. The Admin and Management portals themselves are
+        /// untouched. Same idiom as EnsureItAdminMenuAsync: runs once, a no-op if the portal
+        /// already has rows.
+        /// </summary>
+        private static async Task EnsureExecutiveMenuAsync(ReaderNestDbContext context)
+        {
+            if (context.MenuItems.Local.Any(m => m.Portal == "executive") ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "executive"))
+            {
+                return;
+            }
+
+            (string? Section, string Label, string Path, string Icon, string? RequiredModule)[] items =
+            [
+                (null, "Founder Dashboard", "/executive", "LayoutDashboard", null),
+                ("Management", "Revenue & Courses", "/executive/revenue", "TrendingUp", PermissionModule.ReportsAnalytics.ToString()),
+                ("Management", "Teacher & Batch Performance", "/executive/performance", "Gauge", PermissionModule.ReportsAnalytics.ToString()),
+                ("Management", "Management Reports", "/executive/management-reports", "FileBarChart", PermissionModule.ReportsAnalytics.ToString()),
+                ("Academics", "Courses", "/executive/courses", "BookOpen", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Departments", "/executive/departments", "Building2", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Batches", "/executive/batches", "Layers", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Academic Calendar", "/executive/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement.ToString()),
+                ("Academics", "Sessions", "/executive/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+                ("Academics", "Recordings", "/executive/recordings", "Video", PermissionModule.SessionCalendarManagement.ToString()),
+                ("Academics", "Quiz Bank", "/executive/quiz-bank", "Sparkles", PermissionModule.CourseBatchManagement.ToString()),
+                ("Academics", "Activity Bank", "/executive/activity-bank", "PencilRuler", PermissionModule.CourseBatchManagement.ToString()),
+                ("People", "Users", "/executive/users", "Users", PermissionModule.UserManagement.ToString()),
+                ("People", "Roles & Permissions", "/executive/permissions", "ShieldCheck", PermissionModule.UserManagement.ToString()),
+                ("People", "Enrollment Review", "/executive/enrollments", "ClipboardCheck", PermissionModule.Admission.ToString()),
+                ("People", "Store Inquiries", "/executive/store-inquiries", "ShoppingBag", PermissionModule.Admission.ToString()),
+                ("People", "Parent Feedback", "/executive/parent-feedback", "Star", PermissionModule.Admission.ToString()),
+                ("People", "Leave Management", "/executive/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
+                ("People", "Teacher Availability", "/executive/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
+                ("Content", "Content & Resources", "/executive/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
+                ("Finance", "Billing & Finance", "/executive/billing", "Receipt", PermissionModule.BillingFinance.ToString()),
+                ("Finance", "Packages & Subscriptions", "/executive/packages", "CreditCard", PermissionModule.BillingFinance.ToString()),
+                ("Finance", "Payment Gateway Mapping", "/executive/payment-mapping", "Landmark", PermissionModule.BillingFinance.ToString()),
+                ("Finance", "Teacher Payouts", "/executive/payouts", "Wallet", PermissionModule.Payouts.ToString()),
+                ("Finance", "Fee Suspension", "/executive/fee-suspension", "Ban", PermissionModule.BillingFinance.ToString()),
+                ("Insights", "Reports & Analytics", "/executive/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
+                ("Insights", "Bulk Email", "/executive/bulk-email", "Mail", PermissionModule.Communication.ToString()),
+                ("Insights", "Bulk Email History", "/executive/bulk-email/history", "History", PermissionModule.Communication.ToString()),
+                ("Insights", "Email Templates", "/executive/email-templates", "FileText", PermissionModule.Communication.ToString()),
+                ("Insights", "Progress Reports", "/executive/progress-reports", "ScrollText", PermissionModule.Communication.ToString()),
+                ("Insights", "Doubt Chatbot", "/executive/chatbot", "MessageCircleQuestion", PermissionModule.Communication.ToString()),
+                ("System", "Settings & Branding", "/executive/settings", "Settings", PermissionModule.Settings.ToString()),
+                ("System", "Server Monitoring", "/executive/monitoring", "Activity", PermissionModule.SystemMonitoring.ToString()),
+                ("System", "Class Session Logs", "/executive/class-logs", "Radar", PermissionModule.ClassSessionLogs.ToString()),
+            ];
+
+            var sectionOrders = new Dictionary<string, int>();
+            var sortOrders = new Dictionary<string, int>();
+            foreach (var (section, label, path, icon, requiredModule) in items)
+            {
+                var sectionKey = section ?? "";
+                if (!sectionOrders.TryGetValue(sectionKey, out var sectionOrder))
+                {
+                    sectionOrder = sectionOrders.Count;
+                    sectionOrders[sectionKey] = sectionOrder;
+                }
+
+                var sortOrder = sortOrders.TryGetValue(sectionKey, out var current) ? current : 0;
+                sortOrders[sectionKey] = sortOrder + 1;
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = "executive",
                     Section = section,
                     SectionOrder = sectionOrder,
                     Label = label,
@@ -1786,6 +1906,51 @@ namespace iucs.readernest.api.Data
             {
                 Portal = "admin",
                 Section = "Academics",
+                SectionOrder = sessions.SectionOrder,
+                Label = "Recordings",
+                Path = path,
+                Icon = "Video",
+                SortOrder = sessions.SortOrder + 1,
+                IsActive = true,
+                RequiredModule = PermissionModule.SessionCalendarManagement.ToString(),
+            });
+        }
+
+        /// <summary>
+        /// Retrofits the Coordinator "Recordings" menu item (/coordinator/recordings, the same
+        /// AdminRecordings.tsx page every Sub Admin-type portal mounts) into a database seeded
+        /// before it existed. The coordinator's only path to a recording used to be opening a
+        /// completed session on the Calendar one at a time. Anchored right after the portal's
+        /// own "Sessions" item; fresh databases get it from MenuSeedItems().
+        /// </summary>
+        private static async Task EnsureCoordinatorRecordingsMenuAsync(ReaderNestDbContext context)
+        {
+            const string path = "/coordinator/recordings";
+            if (context.MenuItems.Local.Any(m => m.Portal == "coordinator" && m.Path == path) ||
+                await context.MenuItems.AnyAsync(m => m.Portal == "coordinator" && m.Path == path))
+            {
+                return;
+            }
+
+            var sessions = await context.MenuItems
+                .FirstOrDefaultAsync(m => m.Portal == "coordinator" && m.Path == "/coordinator/sessions");
+            if (sessions is null)
+            {
+                return; // no Sessions item to anchor after (unexpected) — nothing sensible to append after
+            }
+
+            var toShift = await context.MenuItems
+                .Where(m => m.Portal == "coordinator" && m.Section == sessions.Section && m.SortOrder > sessions.SortOrder)
+                .ToListAsync();
+            foreach (var item in toShift)
+            {
+                item.SortOrder += 1;
+            }
+
+            context.MenuItems.Add(new MenuItem
+            {
+                Portal = "coordinator",
+                Section = sessions.Section,
                 SectionOrder = sessions.SectionOrder,
                 Label = "Recordings",
                 Path = path,
