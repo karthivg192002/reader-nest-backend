@@ -73,6 +73,7 @@ namespace iucs.readernest.api.Data
             await EnsureSupportTicketEmailTemplatesAsync(context);
             await EnsureSupportTicketMenusAsync(context);
             await EnsurePayoutApprovalsMenusAsync(context);
+            await EnsureStaffLeaveMenusAsync(context);
             await EnsureAccessRequestEmailTemplatesAsync(context);
             await EnsurePaymentPlanReminderEmailTemplatesAsync(context);
             await ReconcileOrgNameEmailTemplatesAsync(context);
@@ -587,6 +588,7 @@ namespace iucs.readernest.api.Data
             ("admin", "People", "Parent Feedback", "/admin/parent-feedback", "Star", PermissionModule.Admission.ToString()),
             ("admin", "People", "Parent Tickets", "/admin/support-tickets", "LifeBuoy", PermissionModule.SupportTickets.ToString()),
             ("admin", "People", "Leave Management", "/admin/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
+            ("admin", "People", "Staff Leave", "/admin/staff-leave", "CalendarOff", PermissionModule.UserManagement.ToString()),
             ("admin", "People", "Teacher Availability", "/admin/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
             ("admin", "Content", "Content & Resources", "/admin/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
             ("admin", "Finance", "Billing & Finance", "/admin/billing", "Receipt", PermissionModule.BillingFinance.ToString()),
@@ -630,6 +632,7 @@ namespace iucs.readernest.api.Data
             ("subadmin", "Delegated Work", "Parent Tickets", "/subadmin/support-tickets", "LifeBuoy", PermissionModule.SupportTickets.ToString()),
             ("subadmin", "Delegated Work", "Assigned Reports", "/subadmin/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
             ("subadmin", "Delegated Work", "Audit Log", "/subadmin/audit-log", "History", null),
+            ("subadmin", "Delegated Work", "My Leave", "/subadmin/my-leave", "CalendarOff", null),
             ("admission", null, "Dashboard", "/admission", "LayoutDashboard", null),
             ("admission", "Pipeline", "Demo Scheduling", "/admission/demo-scheduling", "CalendarClock", PermissionModule.Admission.ToString()),
             ("admission", "Pipeline", "Teacher Assignment", "/admission/demo-teacher-assignment", "UserCog", PermissionModule.Admission.ToString()),
@@ -640,11 +643,13 @@ namespace iucs.readernest.api.Data
             ("admission", "CRM", "Leads & Parents", "/admission/leads", "UserSearch", PermissionModule.Admission.ToString()),
             ("admission", "CRM", "Payment Tracking", "/admission/payments", "Link2", PermissionModule.BillingFinance.ToString()),
             ("admission", "Insights", "Reports", "/admission/reports", "BarChart3", PermissionModule.ReportsAnalytics.ToString()),
+            ("admission", "Insights", "My Leave", "/admission/my-leave", "CalendarOff", null),
             ("admission", "Insights", "Parent Feedback", "/admission/parent-feedback", "Star", PermissionModule.Admission.ToString()),
             ("coordinator", null, "Dashboard", "/coordinator", "LayoutDashboard", null),
             ("coordinator", "Monitoring", "Academic Calendar", "/coordinator/calendar", "CalendarDays", PermissionModule.SessionCalendarManagement.ToString()),
             ("coordinator", "Monitoring", "Teacher Availability", "/coordinator/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
             ("coordinator", "Monitoring", "Sessions", "/coordinator/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
+            ("coordinator", "Monitoring", "My Leave", "/coordinator/my-leave", "CalendarOff", null),
             ("coordinator", "Monitoring", "Recordings", "/coordinator/recordings", "Video", PermissionModule.SessionCalendarManagement.ToString()),
             ("management", null, "Executive Overview", "/management", "LayoutDashboard", null),
             ("management", "Performance", "Revenue & Courses", "/management/revenue", "TrendingUp", PermissionModule.ReportsAnalytics.ToString()),
@@ -653,6 +658,7 @@ namespace iucs.readernest.api.Data
             ("management", "Performance", "Sessions", "/management/sessions", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
             ("management", "Performance", "Recordings", "/management/recordings", "Video", PermissionModule.SessionCalendarManagement.ToString()),
             ("management", "Performance", "Payout Approvals", "/management/payout-approvals", "ClipboardCheck", PermissionModule.Payouts.ToString()),
+            ("management", "Performance", "My Leave", "/management/my-leave", "CalendarOff", null),
             ("management", "Insights", "Reports", "/management/reports", "FileBarChart", PermissionModule.ReportsAnalytics.ToString()),
             ("student", null, "My Learning", "/student", "Sparkles", null),
         ];
@@ -1284,6 +1290,7 @@ namespace iucs.readernest.api.Data
                 ("People", "Store Inquiries", "/executive/store-inquiries", "ShoppingBag", PermissionModule.Admission.ToString()),
                 ("People", "Parent Feedback", "/executive/parent-feedback", "Star", PermissionModule.Admission.ToString()),
                 ("People", "Leave Management", "/executive/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
+                ("People", "Staff Leave", "/executive/staff-leave", "CalendarOff", PermissionModule.UserManagement.ToString()),
                 ("People", "Teacher Availability", "/executive/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
                 ("Content", "Content & Resources", "/executive/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
                 ("Finance", "Billing & Finance", "/executive/billing", "Receipt", PermissionModule.BillingFinance.ToString()),
@@ -2349,10 +2356,55 @@ namespace iucs.readernest.api.Data
             }
         }
 
-        /// <summary>Inserts the support-ticket, short-class payout-approval and parent-cancellation templates into a DB seeded before they existed.</summary>
+        /// <summary>
+        /// Staff leave, for a DB seeded before it existed: "My Leave" (always visible) in each
+        /// admin-team portal, and "Staff Leave" review for Admin / Founder, gated on UserManagement.
+        /// </summary>
+        private static async Task EnsureStaffLeaveMenusAsync(ReaderNestDbContext context)
+        {
+            foreach (var (portal, anchorPath, label, slug, module) in new[]
+            {
+                ("subadmin", "/subadmin/audit-log", "My Leave", "my-leave", (string?)null),
+                ("admission", "/admission/reports", "My Leave", "my-leave", null),
+                ("coordinator", "/coordinator/sessions", "My Leave", "my-leave", null),
+                ("management", "/management/sessions", "My Leave", "my-leave", null),
+                ("admin", "/admin/leave", "Staff Leave", "staff-leave", PermissionModule.UserManagement.ToString()),
+                ("executive", "/executive/leave", "Staff Leave", "staff-leave", PermissionModule.UserManagement.ToString()),
+            })
+            {
+                var path = $"/{portal}/{slug}";
+                if (context.MenuItems.Local.Any(m => m.Portal == portal && m.Path == path) ||
+                    await context.MenuItems.AnyAsync(m => m.Portal == portal && m.Path == path))
+                {
+                    continue;
+                }
+
+                var anchor = context.MenuItems.Local.FirstOrDefault(m => m.Portal == portal && m.Path == anchorPath)
+                    ?? await context.MenuItems.FirstOrDefaultAsync(m => m.Portal == portal && m.Path == anchorPath);
+                if (anchor is null)
+                {
+                    continue;
+                }
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = portal,
+                    Section = anchor.Section,
+                    SectionOrder = anchor.SectionOrder,
+                    Label = label,
+                    Path = path,
+                    Icon = "CalendarOff",
+                    SortOrder = anchor.SortOrder + 1,
+                    IsActive = true,
+                    RequiredModule = module,
+                });
+            }
+        }
+
+        /// <summary>Inserts the support-ticket, short-class payout-approval, parent-cancellation and staff-leave templates into a DB seeded before they existed.</summary>
         private static async Task EnsureSupportTicketEmailTemplatesAsync(ReaderNestDbContext context)
         {
-            foreach (var key in new[] { "support-ticket-raised", "support-ticket-parent-replied", "support-ticket-updated", "short-class-payout-approval", "class-cancelled-by-parent" })
+            foreach (var key in new[] { "support-ticket-raised", "support-ticket-parent-replied", "support-ticket-updated", "short-class-payout-approval", "class-cancelled-by-parent", "staff-leave-submitted", "staff-leave-reviewed" })
             {
                 if (context.EmailTemplates.Local.Any(t => t.Key == key) || await context.EmailTemplates.AnyAsync(t => t.Key == key))
                 {

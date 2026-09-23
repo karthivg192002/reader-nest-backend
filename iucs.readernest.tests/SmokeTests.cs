@@ -9495,20 +9495,28 @@ namespace iucs.readernest.tests
             var teacherEmail = (await _db.Context.TeacherProfiles.Include(t => t.User).FirstAsync(t => t.Id == session.TeacherProfileId)).User.Email;
             _emailSender.Sent.Clear();
 
-            var cancelled = await CreateSessionService().CancelByParentAsync(parent.Id, session.Id, "  Child is unwell  ");
+            await CreateSessionService().CancelByParentAsync(parent.Id, session.Id, "  Child is unwell  ");
 
-            Assert.Equal(SessionStatus.Cancelled, cancelled.Status);
             var stored = await _db.Context.ClassSessions.AsNoTracking().FirstAsync(s => s.Id == session.Id);
+            Assert.Equal(SessionStatus.Cancelled, stored.Status);
             Assert.StartsWith("Cancelled by parent", stored.CancellationReason);
             Assert.EndsWith("Child is unwell", stored.CancellationReason);
+
+            // A make-up class is placed automatically, a week later at the same time.
+            var makeUp = await _db.Context.ClassSessions.AsNoTracking().SingleAsync(s => s.CarriedForwardFromSessionId == session.Id);
+            Assert.Equal(SessionStatus.CarriedForward, makeUp.Status);
+            Assert.Equal(stored.ScheduledStartAtUtc.AddDays(7), makeUp.ScheduledStartAtUtc);
+            Assert.Equal(stored.ScheduledEndAtUtc - stored.ScheduledStartAtUtc, makeUp.ScheduledEndAtUtc - makeUp.ScheduledStartAtUtc);
+
             var mail = Assert.Single(_emailSender.Sent, m => m.To == teacherEmail);
             Assert.StartsWith("Class cancelled by parent", mail.Subject);
             Assert.Contains("Child is unwell", mail.Body);
             Assert.Contains("Izaan A", mail.Body);
+            Assert.Contains("make-up class has been scheduled", mail.Body);
         }
 
         [Fact]
-        public async Task ParentCancel_RefusesAGroupClass_SomeoneElsesClass_AndAMissingReason()
+        public async Task ParentCancel_InAGroupClass_MarksOnlyTheirChildAbsent_AndTheClassGoesAhead()
         {
             var (parent, session) = await SeedParentOwnedUpcomingClassAsync();
             var service = CreateSessionService();
@@ -9523,8 +9531,87 @@ namespace iucs.readernest.tests
             var otherChild = new Child { ParentProfile = otherProfile, FirstName = "Other", LastName = "Kid" };
             _db.Context.AddRange(otherProfile, otherChild, new BatchEnrollment { BatchId = session.BatchId!.Value, Child = otherChild, Status = EnrollmentStatus.Active });
             await _db.Context.SaveChangesAsync();
-            await Assert.ThrowsAsync<DomainValidationException>(() => service.CancelByParentAsync(parent.Id, session.Id, "Travelling"));
+            _emailSender.Sent.Clear();
+
+            await service.CancelByParentAsync(parent.Id, session.Id, "Travelling");
+
             Assert.Equal(SessionStatus.Scheduled, (await _db.Context.ClassSessions.AsNoTracking().FirstAsync(s => s.Id == session.Id)).Status);
+            Assert.False(await _db.Context.ClassSessions.AnyAsync(s => s.CarriedForwardFromSessionId == session.Id));
+            var absence = await _db.Context.SessionAttendances.AsNoTracking().SingleAsync(a => a.ClassSessionId == session.Id);
+            Assert.Equal(AttendanceStatus.Absent, absence.Status);
+            Assert.NotEqual(otherChild.Id, absence.ChildId);
+            Assert.Contains(_emailSender.Sent, m => m.Subject.StartsWith("Izaan A won't attend") && m.Body.Contains("Travelling"));
+        }
+
+        /// <summary>
+        /// A teacher who leaves without pressing End Class (and never rejoins) used to leave the
+        /// class InProgress forever — no payout accrual, so no short-class flag either. The
+        /// system completion ends it at the moment the teacher left, so a class cut short lands
+        /// in Payout Approvals like any other.
+        /// </summary>
+        [Fact]
+        public async Task CompleteAbandoned_EndsAtTheTeachersLeaveTime_AndFlagsTheShortClass()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var tracked = await _db.Context.ClassSessions.FirstAsync(s => s.Id == session.Id);
+            var start = DateTime.UtcNow.AddHours(-2);
+            tracked.ScheduledStartAtUtc = start;
+            tracked.ScheduledEndAtUtc = start.AddMinutes(30);
+            tracked.Status = SessionStatus.InProgress;
+            tracked.ActualStartAtUtc = start;
+            var leftAt = start.AddMinutes(20);
+            _db.Context.SessionAttendances.Add(new SessionAttendance
+            {
+                ClassSessionId = session.Id,
+                ParticipantType = ParticipantType.Teacher,
+                TeacherProfileId = session.TeacherProfileId,
+                Status = AttendanceStatus.Present,
+                JoinedAtUtc = start,
+                LeftAtUtc = leftAt,
+            });
+            await _db.Context.SaveChangesAsync();
+
+            await CreateSessionService().CompleteAbandonedAsync(session.Id, leftAt);
+
+            var stored = await _db.Context.ClassSessions.AsNoTracking().FirstAsync(s => s.Id == session.Id);
+            Assert.Equal(SessionStatus.Completed, stored.Status);
+            Assert.Equal(leftAt, stored.ActualEndAtUtc);
+            var item = Assert.Single(_db.Context.PayoutItems.Where(i => i.ClassSessionId == session.Id).ToList());
+            Assert.True(item.RequiresReview);
+            Assert.Equal(20, item.DeliveredMinutes);
+        }
+
+        private StaffLeaveService CreateStaffLeaveService() =>
+            new(_db.UnitOfWork, _auditLog, _notifications, new ConfigurationBuilder().Build(), NullLogger<StaffLeaveService>.Instance);
+
+        [Fact]
+        public async Task StaffLeave_ApplyAnyTime_AdminIsAlerted_AndReviewEmailsTheStaffMember()
+        {
+            var rm = await _db.SeedUserAsync($"rm-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+            var admin = await _db.SeedUserAsync($"adm-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            var service = CreateStaffLeaveService();
+            _emailSender.Sent.Clear();
+
+            // Today itself — no minimum notice.
+            var today = DateOnly.FromDateTime(DateTime.UtcNow);
+            var leave = await service.SubmitAsync(rm.Id, new SubmitStaffLeaveRequest { StartDate = today, EndDate = today.AddDays(1), Reason = "Family function" });
+            Assert.Equal(LeaveStatus.Pending, leave.Status);
+            Assert.Equal(2, leave.Days);
+            Assert.Contains(_emailSender.Sent, m => m.To == admin.Email && m.Subject.StartsWith("Leave application"));
+
+            // Overlapping days are refused; a teacher can't use staff leave.
+            await Assert.ThrowsAsync<ConflictException>(() => service.SubmitAsync(rm.Id,
+                new SubmitStaffLeaveRequest { StartDate = today.AddDays(1), EndDate = today.AddDays(2), Reason = "x" }));
+            var teacher = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            await Assert.ThrowsAsync<ForbiddenException>(() => service.SubmitAsync(teacher.Id,
+                new SubmitStaffLeaveRequest { StartDate = today, EndDate = today, Reason = "x" }));
+
+            _emailSender.Sent.Clear();
+            var reviewed = await service.ReviewAsync(admin.Id, leave.Id, new ReviewStaffLeaveRequest { Approve = true, Note = "Enjoy" });
+            Assert.Equal(LeaveStatus.Approved, reviewed.Status);
+            Assert.Contains(_emailSender.Sent, m => m.To == rm.Email && m.Subject.Contains("approved"));
+            await Assert.ThrowsAsync<ConflictException>(() => service.ReviewAsync(admin.Id, leave.Id, new ReviewStaffLeaveRequest { Approve = false }));
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.CancelMineAsync(rm.Id, leave.Id)); // only Pending can be withdrawn
         }
 
         private SupportTicketService CreateSupportTicketService() =>

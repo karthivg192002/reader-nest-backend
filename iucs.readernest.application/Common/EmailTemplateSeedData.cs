@@ -88,17 +88,37 @@ namespace iucs.readernest.application.Common
                     """,
                     "Occasion", "ParentName", "ChildName", "Stars", "Comment"),
 
+                New("staff-leave-submitted", "Staff Leave Application (Admin / Founder)",
+                    "Sent to Admin and the Founder when an admin-team member (RM, Coordinator, Management, Admission) applies for leave.",
+                    NotificationType.General, "Leave application: {{StaffName}} ({{Dates}})",
+                    """
+                    <p><strong>{{StaffName}}</strong> has applied for leave on <strong>{{Dates}}</strong>.</p>
+                    <p><strong>Reason:</strong> &ldquo;{{Reason}}&rdquo;</p>
+                    <p><a href="{{ReviewUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">Review leave</a></p>
+                    """,
+                    "StaffName", "Dates", "Reason", "ReviewUrl"),
+
+                New("staff-leave-reviewed", "Staff Leave Decision (Staff)",
+                    "Sent to the admin-team member when their leave application is approved or not approved.",
+                    NotificationType.LeaveStatusUpdate, "Your leave for {{Dates}} was {{Status}}",
+                    """
+                    <p>Hi {{FirstName}},</p>
+                    <p>Your leave for <strong>{{Dates}}</strong> was <strong>{{Status}}</strong>.</p>
+                    <p>{{ReviewNote}}</p>
+                    """,
+                    "FirstName", "Dates", "Status", "ReviewNote"),
+
                 New("class-cancelled-by-parent", "Class Cancelled by Parent (Teacher)",
-                    "Sent to the teacher when a parent cancels an upcoming class from the parent portal (no admin approval needed).",
-                    NotificationType.General, "Class cancelled by parent: {{ClassName}} on {{StartLocal}}",
+                    "Sent to the teacher when a parent cancels an upcoming class from the parent portal (no admin approval needed): a family's own class is cancelled with a make-up scheduled; in a group class only their child is marked absent.",
+                    NotificationType.General, "{{Headline}}: {{ClassName}} on {{StartLocal}}",
                     """
                     <p>Hi {{TeacherFirstName}},</p>
                     <p>The parent <strong>{{ParentName}}</strong> has cancelled the class for <strong>{{ChildName}}</strong>:</p>
                     <p style="font-weight:600;">{{ClassName}} &ndash; {{StartLocal}}</p>
                     <p><strong>Reason given by the parent:</strong> &ldquo;{{Reason}}&rdquo;</p>
-                    <p>No action is needed from you &ndash; the class has been removed from your schedule.</p>
+                    <p>{{Outcome}}</p>
                     """,
-                    "TeacherFirstName", "ParentName", "ChildName", "ClassName", "StartLocal", "Reason"),
+                    "Headline", "TeacherFirstName", "ParentName", "ChildName", "ClassName", "StartLocal", "Reason", "Outcome"),
 
                 New("short-class-payout-approval", "Short Class — Payout Approval Needed (Admin / Management)",
                     "Sent to Admin and Management when a class ends before its scheduled duration (or with no teacher attendance recorded); the payout waits in Payout Approvals.",

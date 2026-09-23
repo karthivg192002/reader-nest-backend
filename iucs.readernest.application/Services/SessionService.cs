@@ -358,14 +358,6 @@ namespace iucs.readernest.application.Services
                 throw new NotFoundException(nameof(ClassSession), sessionId);
             }
 
-            // One family can't call off a shared class for everyone else in the batch — only
-            // a class that is theirs alone (1:1, or siblings together) can be cancelled here.
-            if (enrolled.Any(e => e.ParentUserId != parentUserId))
-            {
-                throw new DomainValidationException(
-                    "This is a group class with other students, so it can't be cancelled from here. Please raise a ticket under Help & Support and the team will help.");
-            }
-
             if (session.Status is not (SessionStatus.Scheduled or SessionStatus.CarriedForward))
             {
                 throw new DomainValidationException("Only an upcoming class can be cancelled.");
@@ -377,29 +369,97 @@ namespace iucs.readernest.application.Services
             }
 
             // No admin approval: a parent's cancellation takes effect immediately, the mirror of a
-            // teacher's cancellation reaching parents automatically. The reason is recorded on the
-            // class itself so staff see exactly who cancelled and why.
+            // teacher's cancellation reaching parents automatically.
             var parentName = $"{parent.FirstName} {parent.LastName}".Trim();
-            session.Status = SessionStatus.Cancelled;
-            var storedReason = $"Cancelled by parent ({parentName}): {reason}";
-            session.CancellationReason = storedReason.Length <= 500 ? storedReason : storedReason[..500];
-            await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
-                changesJson: "{\"cancelledBy\":\"parent\"}", cancellationToken: cancellationToken);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-
+            var childNames = string.Join(", ", mine.Select(m => $"{m.FirstName} {m.LastName}".Trim()));
             var teacher = session.TeacherProfile.User;
+            string headline;
+            string outcome;
+
+            if (enrolled.Any(e => e.ParentUserId != parentUserId))
+            {
+                // A shared group class: one family can't call it off for everyone else, so their
+                // cancellation means "my child won't attend" — marked Absent up front (so the
+                // teacher and the attendance record know it's a planned absence) while the class
+                // goes ahead for the other students.
+                var myChildIds = mine.Select(m => m.ChildId).ToList();
+                var existing = await _unitOfWork.Repository<SessionAttendance>().TrackedQuery()
+                    .Where(a => a.ClassSessionId == session.Id && a.ChildId != null && myChildIds.Contains(a.ChildId.Value))
+                    .ToListAsync(cancellationToken);
+                foreach (var childId in myChildIds)
+                {
+                    var row = existing.FirstOrDefault(a => a.ChildId == childId);
+                    if (row is null)
+                    {
+                        await _unitOfWork.Repository<SessionAttendance>().AddAsync(new SessionAttendance
+                        {
+                            ClassSessionId = session.Id,
+                            ParticipantType = ParticipantType.Student,
+                            ChildId = childId,
+                            Status = AttendanceStatus.Absent,
+                        }, cancellationToken);
+                    }
+                    else
+                    {
+                        row.Status = AttendanceStatus.Absent;
+                    }
+                }
+
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
+                    changesJson: "{\"parentCancelledAttendance\":true}", cancellationToken: cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+                headline = $"{childNames} won't attend";
+                outcome = $"{childNames} will not attend this class. It is a group class, so it still goes ahead as scheduled for the other students.";
+            }
+            else
+            {
+                // The family's own class (1:1, or siblings together): cancelled outright, with the
+                // reason recorded on the class so staff see who cancelled and why, and a make-up
+                // class placed automatically — a week later at the same time, skipping holidays and
+                // this batch's other classes, same placement as a carried-forward no-show.
+                session.Status = SessionStatus.Cancelled;
+                var storedReason = $"Cancelled by parent ({parentName}): {reason}";
+                session.CancellationReason = storedReason.Length <= 500 ? storedReason : storedReason[..500];
+
+                var duration = session.ScheduledEndAtUtc - session.ScheduledStartAtUtc;
+                var makeUpStart = await NextAvailableCarryForwardSlotAsync(
+                    session.ScheduledStartAtUtc.AddDays(7), session.BatchId, duration, cancellationToken);
+                var makeUp = new ClassSession
+                {
+                    BatchId = session.BatchId,
+                    TeacherProfileId = session.TeacherProfileId,
+                    Type = session.Type,
+                    Status = SessionStatus.CarriedForward,
+                    ScheduledStartAtUtc = makeUpStart,
+                    ScheduledEndAtUtc = makeUpStart.Add(duration),
+                    MeetingRoomId = session.MeetingRoomId,
+                    CarriedForwardFromSessionId = session.Id,
+                };
+                await _unitOfWork.Repository<ClassSession>().AddAsync(makeUp, cancellationToken);
+
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
+                    changesJson: "{\"cancelledBy\":\"parent\",\"makeUpSession\":\"" + makeUp.Id + "\"}", cancellationToken: cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+                headline = "Class cancelled by parent";
+                outcome = $"The class has been cancelled and a make-up class has been scheduled for {DateTimeDisplay.ToLocalRange(makeUp.ScheduledStartAtUtc, makeUp.ScheduledEndAtUtc, teacher.TimeZoneId)}.";
+            }
+
             try
             {
                 await _notificationService.SendTemplatedEmailAsync(
                     teacher.Id, teacher.Email, NotificationType.General, "class-cancelled-by-parent",
                     new Dictionary<string, string>
                     {
+                        ["Headline"] = headline,
                         ["TeacherFirstName"] = teacher.FirstName,
                         ["ParentName"] = parentName,
-                        ["ChildName"] = string.Join(", ", mine.Select(m => $"{m.FirstName} {m.LastName}".Trim())),
+                        ["ChildName"] = childNames,
                         ["ClassName"] = session.Batch?.Name ?? "Class",
                         ["StartLocal"] = DateTimeDisplay.ToLocalRange(session.ScheduledStartAtUtc, session.ScheduledEndAtUtc, teacher.TimeZoneId),
                         ["Reason"] = reason,
+                        ["Outcome"] = outcome,
                     },
                     cancellationToken);
             }
@@ -424,6 +484,32 @@ namespace iucs.readernest.application.Services
             // is not enough — the caller must be this session's own teacher (or an Admin).
             await EnsureSessionParticipantAsync(session, cancellationToken);
 
+            return await CompleteCoreAsync(session, request?.Summary, null, cancellationToken);
+        }
+
+        public async Task<ClassSessionDto> CompleteAbandonedAsync(
+            Guid id,
+            DateTime teacherLeftAtUtc,
+            CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(id, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), id);
+
+            // The class ended when the teacher left, not when the background job noticed.
+            return await CompleteCoreAsync(session, null, teacherLeftAtUtc, cancellationToken);
+        }
+
+        /// <summary>
+        /// Shared by the teacher/admin "End Class" and the system completion of a class the
+        /// teacher abandoned: status, summary, payout accrual (short-class flag + approval
+        /// alert), event log and the parents' summary email.
+        /// </summary>
+        private async Task<ClassSessionDto> CompleteCoreAsync(
+            ClassSession session,
+            string? summary,
+            DateTime? endedAtUtc,
+            CancellationToken cancellationToken)
+        {
             if (TerminalStatuses.Contains(session.Status))
             {
                 throw new DomainValidationException($"A session in status '{session.Status}' cannot be completed.");
@@ -431,10 +517,10 @@ namespace iucs.readernest.application.Services
 
             session.Status = SessionStatus.Completed;
             session.ActualStartAtUtc ??= session.ScheduledStartAtUtc;
-            session.ActualEndAtUtc ??= DateTime.UtcNow;
-            if (!string.IsNullOrWhiteSpace(request?.Summary))
+            session.ActualEndAtUtc ??= endedAtUtc ?? DateTime.UtcNow;
+            if (!string.IsNullOrWhiteSpace(summary))
             {
-                session.Summary = request.Summary.Trim();
+                session.Summary = summary.Trim();
             }
             else
             {

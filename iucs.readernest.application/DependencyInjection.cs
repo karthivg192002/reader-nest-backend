@@ -59,6 +59,7 @@ namespace iucs.readernest.application
             services.AddScoped<IWhiteboardActivityService, WhiteboardActivityService>();
             services.AddScoped<IChatbotService, ChatbotService>();
             services.AddScoped<ISupportTicketService, SupportTicketService>();
+            services.AddScoped<IStaffLeaveService, StaffLeaveService>();
             return services;
         }
     }
