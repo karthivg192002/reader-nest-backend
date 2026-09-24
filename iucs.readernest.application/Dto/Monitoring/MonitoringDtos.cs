@@ -281,6 +281,10 @@ namespace iucs.readernest.application.Dto.Monitoring
         public string State { get; set; } = string.Empty;
         public DateTime ActiveSince { get; set; }
         public string? Instance { get; set; }
+        /// <summary>Participant named by a call-quality alert (PoorConnection's `person` label); null otherwise.</summary>
+        public string? Person { get; set; }
+        /// <summary>The alert's `room` label resolved to a class name (falls back to the raw room); null when the alert has no room.</summary>
+        public string? ClassName { get; set; }
     }
 
     /// <summary>Request body for POST .../jibri/min-replicas.</summary>

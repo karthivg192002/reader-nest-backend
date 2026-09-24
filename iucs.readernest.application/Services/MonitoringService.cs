@@ -102,6 +102,10 @@ namespace iucs.readernest.application.Services
                         State = a.State,
                         ActiveSince = a.ActiveSince,
                         Instance = a.Labels.TryGetValue("instance", out var instance) ? instance : null,
+                        Person = a.Labels.TryGetValue("person", out var person) ? person : null,
+                        ClassName = a.Labels.TryGetValue("room", out var room)
+                            ? roomLabels.GetValueOrDefault(room, room)
+                            : null,
                     })
                     .OrderByDescending(a => a.Severity == "critical")
                     .ThenBy(a => a.ActiveSince)
