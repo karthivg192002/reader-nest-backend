@@ -44,6 +44,7 @@ namespace iucs.readernest.api.Data
             await RemoveRetiredMenusAsync(context);
             await EnsureSubAdminIntegrationsMenuAsync(context);
             await EnsureSubAdminBatchesAndUsersMenusAsync(context);
+            await EnsureSubAdminModuleMenusAsync(context);
             await EnsureDelegatedPortalSessionsMenuAsync(context);
             await EnsureDelegatedPortalCalendarMenuAsync(context);
             await EnsurePackagesAndStudentViewMenusAsync(context);
@@ -785,6 +786,80 @@ namespace iucs.readernest.api.Data
                     IsActive = true,
                     RequiredModule = PermissionModule.UserManagement.ToString(),
                 });
+            }
+        }
+
+        /// <summary>
+        /// A Relationship Manager's permission matrix can grant any module, but the sub admin
+        /// portal was only ever seeded with a handful of menu items — so a granted Content &amp;
+        /// Resources (or Courses, Billing, ...) produced no sidebar entry even though the page is
+        /// already routed under /subadmin and the API already admits the SubAdmin role. Adds one
+        /// module-gated item per already-routed screen, in new sections after the existing ones
+        /// (Access / Delegated Work stay untouched). The menu endpoint hides anything the RM's
+        /// role can't view, so ungranted modules stay invisible. Idempotent per path.
+        /// </summary>
+        public static async Task EnsureSubAdminModuleMenusAsync(ReaderNestDbContext context)
+        {
+            (string Section, string Label, string Slug, string Icon, PermissionModule Module)[] items =
+            [
+                ("Academics", "Courses", "courses", "BookOpen", PermissionModule.CourseBatchManagement),
+                ("Academics", "Departments", "departments", "Building2", PermissionModule.CourseBatchManagement),
+                ("Academics", "Quiz Bank", "quiz-bank", "Sparkles", PermissionModule.CourseBatchManagement),
+                ("Academics", "Activity Bank", "activity-bank", "PencilRuler", PermissionModule.CourseBatchManagement),
+                ("Academics", "Recordings", "recordings", "Video", PermissionModule.SessionCalendarManagement),
+                ("Academics", "Teacher Availability", "availability", "CalendarRange", PermissionModule.SessionCalendarManagement),
+                ("Content", "Content & Resources", "resources", "FolderOpen", PermissionModule.ContentAccessManagement),
+                ("Admission", "Enrollment Review", "enrollments", "ClipboardCheck", PermissionModule.Admission),
+                ("Admission", "Store Inquiries", "store-inquiries", "ShoppingBag", PermissionModule.Admission),
+                ("Finance", "Billing & Finance", "billing", "Receipt", PermissionModule.BillingFinance),
+                ("Finance", "Packages & Subscriptions", "packages", "CreditCard", PermissionModule.BillingFinance),
+                ("Finance", "Payment Gateway Mapping", "payment-mapping", "Landmark", PermissionModule.BillingFinance),
+                ("Finance", "Fee Suspension", "fee-suspension", "Ban", PermissionModule.BillingFinance),
+                ("Finance", "Teacher Payouts", "payouts", "Wallet", PermissionModule.Payouts),
+                ("Communication", "Bulk Email", "bulk-email", "Mail", PermissionModule.Communication),
+                ("Communication", "Email Templates", "email-templates", "FileText", PermissionModule.Communication),
+                ("Communication", "Progress Reports", "progress-reports", "ScrollText", PermissionModule.Communication),
+                ("Communication", "Doubt Chatbot", "chatbot", "MessageCircleQuestion", PermissionModule.Communication),
+                ("System", "Class Session Logs", "class-logs", "Radar", PermissionModule.ClassSessionLogs),
+            ];
+
+            var existing = await context.MenuItems.Where(m => m.Portal == "subadmin").ToListAsync();
+            var all = existing.Concat(context.MenuItems.Local.Where(m => m.Portal == "subadmin" && !existing.Contains(m))).ToList();
+            var sectionOrders = all
+                .Where(m => m.Section != null)
+                .GroupBy(m => m.Section!)
+                .ToDictionary(g => g.Key, g => g.Min(m => m.SectionOrder));
+            var nextSectionOrder = all.Count == 0 ? 1 : all.Max(m => m.SectionOrder) + 1;
+
+            foreach (var (section, label, slug, icon, module) in items)
+            {
+                var path = $"/subadmin/{slug}";
+                if (all.Any(m => m.Path == path))
+                {
+                    continue;
+                }
+
+                if (!sectionOrders.TryGetValue(section, out var sectionOrder))
+                {
+                    sectionOrder = nextSectionOrder++;
+                    sectionOrders[section] = sectionOrder;
+                }
+
+                var sortOrder = all.Where(m => m.Section == section).Select(m => m.SortOrder + 1).DefaultIfEmpty(0).Max();
+                var item = new MenuItem
+                {
+                    Portal = "subadmin",
+                    Section = section,
+                    SectionOrder = sectionOrder,
+                    Label = label,
+                    Path = path,
+                    Icon = icon,
+                    SortOrder = sortOrder,
+                    IsActive = true,
+                    RequiredModule = module.ToString(),
+                };
+                context.MenuItems.Add(item);
+                all.Add(item);
             }
         }
 

@@ -3107,6 +3107,40 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task SubAdminModuleMenus_AreIdempotent_AndGatedByGrantedModule()
+        {
+            var rm = await _db.SeedUserAsync($"rm-menu-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+            // A database seeded before the module menus existed: only the old baseline rows.
+            _db.Context.MenuItems.AddRange(
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "subadmin", Label = "Dashboard", Path = "/subadmin", Icon = "LayoutDashboard",
+                    SectionOrder = 0, SortOrder = 0, IsActive = true, RequiredModule = null,
+                },
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "subadmin", Section = "Delegated Work", Label = "Batches", Path = "/subadmin/batches", Icon = "Layers",
+                    SectionOrder = 2, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.CourseBatchManagement.ToString(),
+                });
+            await _db.Context.SaveChangesAsync();
+
+            await iucs.readernest.api.Data.DatabaseInitializer.EnsureSubAdminModuleMenusAsync(_db.Context);
+            await _db.Context.SaveChangesAsync();
+            await iucs.readernest.api.Data.DatabaseInitializer.EnsureSubAdminModuleMenusAsync(_db.Context);
+            await _db.Context.SaveChangesAsync();
+
+            var paths = _db.Context.MenuItems.Where(m => m.Portal == "subadmin").Select(m => m.Path).ToList();
+            Assert.Equal(paths.Count, paths.Distinct().Count());
+            Assert.Contains("/subadmin/resources", paths);
+
+            // Content & Resources granted only → its item appears; Billing's stays hidden.
+            var menu = await CreateMenuService().GetForUserAsync(rm.Id, UserRole.SubAdmin, [PermissionModule.ContentAccessManagement.ToString()]);
+            Assert.Contains(menu, m => m.Path == "/subadmin/resources");
+            Assert.DoesNotContain(menu, m => m.Path == "/subadmin/billing");
+            Assert.DoesNotContain(menu, m => m.Path == "/subadmin/courses");
+        }
+
+        [Fact]
         public async Task Menu_ForUser_FiltersItemsByRolePermission()
         {
             var subAdmin = await _db.SeedUserAsync($"menu-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
