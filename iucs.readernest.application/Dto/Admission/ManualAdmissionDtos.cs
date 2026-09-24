@@ -30,9 +30,16 @@ namespace iucs.readernest.application.Dto.Admission
         [Required]
         public DateOnly ChildDateOfBirth { get; set; }
 
-        /// <summary>Course plan to bill — issues the first invoice and the payment link.</summary>
-        [Required]
-        public Guid PackagePlanId { get; set; }
+        /// <summary>Recurring package plan to bill, where the org uses plans. Otherwise leave it
+        /// empty and give <see cref="CourseId"/>: a one-off invoice for the course fee.</summary>
+        public Guid? PackagePlanId { get; set; }
+
+        /// <summary>Course the student joins (implied by <see cref="BatchId"/> when omitted).</summary>
+        public Guid? CourseId { get; set; }
+
+        /// <summary>Fee to invoice for the course; defaults to the course price. 0 = no invoice.</summary>
+        [Range(0, 9_999_999)]
+        public decimal? Amount { get; set; }
 
         public Guid? BatchId { get; set; }
     }
@@ -42,6 +49,8 @@ namespace iucs.readernest.application.Dto.Admission
     public class ManualAdmissionOptionsDto
     {
         public List<ManualAdmissionPlanOption> Plans { get; set; } = [];
+
+        public List<ManualAdmissionCourseOption> Courses { get; set; } = [];
 
         public List<ManualAdmissionBatchOption> Batches { get; set; } = [];
     }
@@ -57,9 +66,22 @@ namespace iucs.readernest.application.Dto.Admission
         public decimal Price { get; set; }
     }
 
+    public class ManualAdmissionCourseOption
+    {
+        public Guid Id { get; set; }
+
+        public string Name { get; set; } = null!;
+
+        public string DepartmentName { get; set; } = null!;
+
+        public decimal Price { get; set; }
+    }
+
     public class ManualAdmissionBatchOption
     {
         public Guid Id { get; set; }
+
+        public Guid CourseId { get; set; }
 
         public string Name { get; set; } = null!;
 

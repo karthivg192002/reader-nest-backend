@@ -3,6 +3,7 @@ using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Admission;
+using iucs.readernest.application.Dto.Billing;
 using iucs.readernest.application.Dto.Enrollment;
 using iucs.readernest.application.Dto.Users;
 using iucs.readernest.domain.Entities.Academics;
@@ -37,6 +38,9 @@ namespace iucs.readernest.application.Services
     /// </summary>
     public class ManualAdmissionService : IManualAdmissionService
     {
+        /// <summary>A manually admitted student's course-fee invoice is due a week out.</summary>
+        private const int FeeDueDays = 7;
+
         private readonly IUnitOfWork _unitOfWork;
         private readonly IDemoBookingService _demoBookingService;
         private readonly IUserService _userService;
@@ -90,14 +94,53 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("Child's date of birth cannot be in the future.");
             }
 
-            // Fail before creating anything: ReviewAsync re-checks the plan, but only after the
-            // account and form below would already exist.
-            var plan = await _unitOfWork.Repository<PackagePlan>().Query()
-                .FirstOrDefaultAsync(p => p.Id == request.PackagePlanId, cancellationToken)
-                ?? throw new NotFoundException(nameof(PackagePlan), request.PackagePlanId);
-            if (!plan.IsActive)
+            // What to bill: a package plan (recurring subscription) where the org uses them, or —
+            // the usual case — a course's one-off fee (course price, editable). A batch alone
+            // implies its course. Everything is checked here, before anything is created.
+            PackagePlan? plan = null;
+            Course? course = null;
+            decimal feeAmount = 0;
+            if (request.PackagePlanId.HasValue)
             {
-                throw new DomainValidationException($"Course plan '{plan.Name}' is inactive — pick an active plan.");
+                plan = await _unitOfWork.Repository<PackagePlan>().Query()
+                    .FirstOrDefaultAsync(p => p.Id == request.PackagePlanId.Value, cancellationToken)
+                    ?? throw new NotFoundException(nameof(PackagePlan), request.PackagePlanId.Value);
+                if (!plan.IsActive)
+                {
+                    throw new DomainValidationException($"Course plan '{plan.Name}' is inactive — pick an active plan.");
+                }
+            }
+            else
+            {
+                var courseId = request.CourseId;
+                if (!courseId.HasValue && request.BatchId.HasValue)
+                {
+                    courseId = await _unitOfWork.Repository<Batch>().Query()
+                        .Where(b => b.Id == request.BatchId.Value)
+                        .Select(b => (Guid?)b.CourseId)
+                        .FirstOrDefaultAsync(cancellationToken);
+                }
+                if (!courseId.HasValue)
+                {
+                    throw new DomainValidationException("Pick the course the student is joining.");
+                }
+
+                course = await _unitOfWork.Repository<Course>().Query()
+                    .Include(c => c.Department)
+                    .FirstOrDefaultAsync(c => c.Id == courseId.Value, cancellationToken)
+                    ?? throw new NotFoundException(nameof(Course), courseId.Value);
+                feeAmount = request.Amount ?? course.Price;
+                if (feeAmount < 0)
+                {
+                    throw new DomainValidationException("The fee can't be negative.");
+                }
+                var hasAccount = await _unitOfWork.Repository<PaymentAccount>().ExistsAsync(
+                    a => a.DepartmentId == course.DepartmentId && a.IsActive, cancellationToken);
+                if (feeAmount > 0 && !hasAccount)
+                {
+                    throw new DomainValidationException(
+                        $"No active payment account is set up for the {course.Department.Name} department, so no invoice can be made. Add one in Billing → Payment accounts.");
+                }
             }
 
             // Keep the demo's own contact details in step with what was just confirmed.
@@ -206,6 +249,22 @@ namespace iucs.readernest.application.Services
             var childId = reviewed.ChildId
                 ?? throw new InvalidOperationException("Approved enrollment form has no child.");
 
+            if (course is not null && feeAmount > 0)
+            {
+                // Course fee: a one-off invoice, the same thing staff create by hand in Billing.
+                await _billingService.CreateInvoiceAsync(
+                    new CreateInvoiceRequest
+                    {
+                        ParentProfileId = parentProfile.Id,
+                        ChildId = childId,
+                        CourseId = course.Id,
+                        DepartmentId = course.DepartmentId,
+                        Amount = feeAmount,
+                        DueDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(FeeDueDays),
+                    },
+                    cancellationToken);
+            }
+
             var invoice = await _unitOfWork.Repository<Invoice>().Query()
                 .Where(i => i.ChildId == childId && i.Status != InvoiceStatus.Cancelled)
                 .OrderByDescending(i => i.CreatedAtUtc)
@@ -264,7 +323,7 @@ namespace iucs.readernest.application.Services
                 PaymentLinkUrl = paymentLinkUrl,
                 PaymentLinkError = paymentLinkError,
                 WhatsAppMessage = BuildWhatsAppMessage(
-                    request.ParentName.Trim(), request.ChildFirstName.Trim(), plan.Name,
+                    request.ParentName.Trim(), request.ChildFirstName.Trim(), plan?.Name ?? course!.Name,
                     loginUrl, loginId, temporaryPin, amountDue, currency, paymentLinkUrl),
             };
         }
@@ -289,6 +348,7 @@ namespace iucs.readernest.application.Services
                 .Select(b => new ManualAdmissionBatchOption
                 {
                     Id = b.Id,
+                    CourseId = b.CourseId,
                     Name = b.Name,
                     CourseName = b.Course.Name,
                     TeacherName = b.TeacherProfile.User.FirstName + " " + b.TeacherProfile.User.LastName,
@@ -296,7 +356,19 @@ namespace iucs.readernest.application.Services
                 })
                 .ToListAsync(cancellationToken);
 
-            return new ManualAdmissionOptionsDto { Plans = plans, Batches = batches };
+            var courses = await _unitOfWork.Repository<Course>().Query()
+                .Where(c => c.IsActive)
+                .OrderBy(c => c.Name)
+                .Select(c => new ManualAdmissionCourseOption
+                {
+                    Id = c.Id,
+                    Name = c.Name,
+                    DepartmentName = c.Department.Name,
+                    Price = c.Price,
+                })
+                .ToListAsync(cancellationToken);
+
+            return new ManualAdmissionOptionsDto { Plans = plans, Courses = courses, Batches = batches };
         }
 
         private static string BuildWhatsAppMessage(

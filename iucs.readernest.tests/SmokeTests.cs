@@ -3846,6 +3846,58 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task ManualAdmission_WithoutPlans_InvoicesTheCourseFee_AndAllowsAnEditedAmount()
+        {
+            // The org bills per course (no package plans at all), so admission must work from
+            // the course: its price by default, or the fee the counselor agreed with the parent.
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Super Reader", Type = CourseType.Group,
+                DurationMinutes = 45, Price = 9500, TotalSessions = 36, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            _db.Context.AddRange(teacher, category, course,
+                new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" });
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+            var admission = new ManualAdmissionService(
+                _db.UnitOfWork, demoService, CreateUserService(), CreateEnrollmentService(), CreateBillingService(),
+                _auditLog, new ConfigurationBuilder().Build(), NullLogger<ManualAdmissionService>.Instance);
+
+            var options = await admission.GetOptionsAsync();
+            Assert.Contains(options.Courses, c => c.Id == course.Id && c.Price == 9500);
+
+            async Task<ManualAdmissionResultDto> Admit(string phone, decimal? amount, int dayOffset)
+            {
+                var start = DateTime.UtcNow.AddDays(dayOffset);
+                var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+                {
+                    ParentName = "Parent", ParentPhone = phone, ChildName = "Kid",
+                    TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+                });
+                return await admission.AdmitAsync(demo.Id, new ManualAdmissionRequest
+                {
+                    ParentName = "Parent", ParentPhone = phone, ChildFirstName = "Kid",
+                    ChildDateOfBirth = new DateOnly(2018, 1, 1), CourseId = course.Id, Amount = amount,
+                });
+            }
+
+            var byPrice = await Admit("9111111111", null, 1);
+            Assert.Equal(9500, byPrice.AmountDue);
+            Assert.NotNull(byPrice.PaymentLinkUrl);
+            Assert.Contains("Super Reader", byPrice.WhatsAppMessage);
+            var invoice = await _db.Context.Invoices.SingleAsync(i => i.Id == byPrice.InvoiceId);
+            Assert.Equal(course.Id, invoice.CourseId);
+            Assert.Equal(byPrice.ChildId, invoice.ChildId);
+
+            var discounted = await Admit("9222222222", 8000, 2);
+            Assert.Equal(8000, discounted.AmountDue);
+            Assert.Equal(ConversionStatus.PaymentPending, discounted.Booking.ConversionStatus);
+        }
+
+        [Fact]
         public async Task ResolveLiveJoinUrl_ForThePrimaryParent_ResolvesTheCurrentRoom()
         {
             var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
