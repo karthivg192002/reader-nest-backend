@@ -427,4 +427,11 @@ app.MapGet("/m/{slug}", async (
 
 await DatabaseInitializer.InitializeAsync(app.Services, app.Configuration);
 
+// Browser-direct (multipart) uploads need the bucket itself to allow the portal's origin.
+if (app.Services.GetService<iucs.readernest.application.Common.Interfaces.IDirectUploadStorage>() is iucs.readernest.api.Services.S3FileStorage s3Storage)
+{
+    _ = Task.Run(() => s3Storage.EnsureBrowserUploadCorsAsync(
+        allowedOrigins, app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("BucketCors")));
+}
+
 app.Run();

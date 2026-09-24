@@ -450,9 +450,9 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _sessionService.ListAllRecordingsAsync(page <= 0 ? 1 : page, pageSize <= 0 ? 20 : pageSize, date, userId, cancellationToken));
         }
 
-        /// <summary>Deletes a registered recording. Admin only — unregisters the row; the underlying file in storage is left untouched.</summary>
+        /// <summary>Deletes a registered recording. Admin, or a role granted SessionCalendarManagement:Delete (e.g. Founder Dashboard) — unregisters the row; the underlying file in storage is left untouched.</summary>
         [HttpDelete("{id:guid}/recordings/{recordingId:guid}")]
-        [Authorize(Roles = nameof(UserRole.Admin))]
+        [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Delete)]
         public async Task<IActionResult> DeleteRecording(
             Guid id,
             Guid recordingId,

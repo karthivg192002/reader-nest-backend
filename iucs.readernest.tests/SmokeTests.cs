@@ -9798,6 +9798,87 @@ namespace iucs.readernest.tests
             Assert.Empty(await service.GetPendingAsync(parent.Id));
         }
 
+        [Fact]
+        public async Task GetJitsiJoin_ListsStaffNamesForTheTeacher_ButNeverForAParent()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var rm = await _db.SeedUserAsync($"rm-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+            var admission = await _db.SeedUserAsync($"ad-{Guid.NewGuid():N}@test.com", "x", UserRole.AdmissionTeam);
+            var parentUser = await _db.SeedUserAsync($"pp-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var lookalikeParent = await _db.SeedUserAsync($"lk-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            rm.FirstName = "Riya"; rm.LastName = "Menon";
+            admission.FirstName = "Arun"; admission.LastName = "Das";
+            parentUser.FirstName = "Pooja"; parentUser.LastName = "Shah";
+            // A parent sharing a staff member's exact name must not be treated as staff.
+            lookalikeParent.FirstName = "Arun"; lookalikeParent.LastName = "Das";
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+            var session = new ClassSession
+            {
+                TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddMinutes(5),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddMinutes(50),
+                Status = SessionStatus.Scheduled,
+                MeetingRoomId = "trn-staff-names",
+            };
+            _db.Context.ClassSessions.Add(session);
+            await _db.Context.SaveChangesAsync();
+
+            var join = await CreateSessionService().GetJitsiJoinAsync(session.Id, teacherUser.Id);
+
+            Assert.Contains("Riya Menon", join.StaffNames);
+            Assert.DoesNotContain("Pooja Shah", join.StaffNames);
+            // "Arun Das" is shared with a parent, so it is withheld (manual admit instead).
+            Assert.DoesNotContain("Arun Das", join.StaffNames);
+        }
+
+        [Fact]
+        public async Task ResourceFromRecording_FilesByReferenceOnce_AndDeleteRemovesItWithItsGrants()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var recording = new SessionRecording { ClassSessionId = session.Id, StorageUrl = "https://cdn.test/sold.mp4" };
+            _db.Context.SessionRecordings.Add(recording);
+            var folder = await CreateFolderService().CreateAsync(new CreateResourceFolderRequest { Name = "Sold recordings" });
+            await _db.Context.SaveChangesAsync();
+            var resources = CreateResourceService();
+
+            var first = await resources.CreateFromRecordingAsync(new AddRecordingResourceRequest { RecordingId = recording.Id, FolderId = folder.Id });
+            var again = await resources.CreateFromRecordingAsync(new AddRecordingResourceRequest { RecordingId = recording.Id, FolderId = folder.Id });
+
+            Assert.Equal(first.Id, again.Id);
+            var stored = await _db.Context.Resources.SingleAsync();
+            Assert.Equal("https://cdn.test/sold.mp4", stored.FileUrl);
+            Assert.False(stored.IsDownloadable);
+            Assert.Equal(folder.Id, stored.FolderId);
+
+            var (profile, _) = await SeedFolderParentAsync();
+            _db.Context.ResourceAccesses.Add(new ResourceAccess { ResourceId = stored.Id, ParentProfileId = profile.Id });
+            await _db.Context.SaveChangesAsync();
+
+            await resources.DeleteAsync(stored.Id);
+
+            Assert.Empty(await _db.Context.Resources.ToListAsync());
+            Assert.Empty(await _db.Context.ResourceAccesses.ToListAsync());
+            // The class recording itself is untouched.
+            Assert.NotNull(await _db.Context.SessionRecordings.FindAsync(recording.Id));
+            await Assert.ThrowsAsync<NotFoundException>(() => resources.DeleteAsync(stored.Id));
+        }
+
+        [Fact]
+        public async Task ResourceFolder_CanBeDeleted_OnceItsFileIsDeleted()
+        {
+            var folders = CreateFolderService();
+            var folder = await folders.CreateAsync(new CreateResourceFolderRequest { Name = "Jolly Phonics Level 1" });
+            var file = await SeedFolderFileAsync(folder.Id);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => folders.DeleteAsync(folder.Id));
+            await CreateResourceService().DeleteAsync(file.Id);
+            await folders.DeleteAsync(folder.Id);
+
+            Assert.Empty(await _db.Context.ResourceFolders.ToListAsync());
+        }
+
         public void Dispose() => _db.Dispose();
     }
 }

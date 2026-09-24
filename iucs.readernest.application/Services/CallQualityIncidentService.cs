@@ -6,8 +6,8 @@ namespace iucs.readernest.application.Services
 {
     public class CallQualityIncidentService : ICallQualityIncidentService
     {
-        // Fixed container name on the Jitsi/Video server; never user input.
-        private const string JvbContainer = "docker-jitsi-meet-jvb-1";
+        // Fixed container names on the Jitsi/Video server (two video bridges share the load); never user input.
+        private static readonly string[] JvbContainers = { "docker-jitsi-meet-jvb-1", "docker-jitsi-meet-jvb2-1" };
         private readonly MonitoringOptions _options;
 
         public CallQualityIncidentService(IOptions<MonitoringOptions> options)
@@ -28,7 +28,7 @@ namespace iucs.readernest.application.Services
             {
                 raw = await BurstWorkerSsh.RunAsync(
                     main,
-                    $"docker logs {JvbContainer} --since 24h 2>&1 | grep 'SendSideBandwidthEstimation.maybeLogLowBitrateWarning'",
+                    $"for c in {string.Join(' ', JvbContainers)}; do docker logs $c --since 24h 2>&1; done | grep 'SendSideBandwidthEstimation.maybeLogLowBitrateWarning'",
                     TimeSpan.FromSeconds(20),
                     cancellationToken);
             }
