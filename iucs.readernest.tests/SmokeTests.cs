@@ -4116,6 +4116,20 @@ namespace iucs.readernest.tests
             Assert.Equal("https://meet.techmisai.com/trn-abc123", JitsiLinkBuilder.BuildJoinUrl("trn-abc123", "not-json"));
         }
 
+        /// <summary>
+        /// Jitsi's web client reads the token only from the query string — carried in the
+        /// "#" fragment it was silently ignored, which dropped a moderator into the lobby
+        /// (verified live on UAT). The display name stays a fragment config override.
+        /// </summary>
+        [Fact]
+        public void JitsiLinkBuilder_PutsTheTokenInTheQueryString_NotTheFragment()
+        {
+            var url = JitsiLinkBuilder.BuildJoinUrl("trn-abc123", """{"domain":"meet.example.org"}""", token: "a.b.c", displayName: "Rama S");
+            Assert.StartsWith("https://meet.example.org/trn-abc123?jwt=a.b.c#", url);
+            Assert.DoesNotContain("#jwt=", url);
+            Assert.Contains("userInfo.displayName=", url);
+        }
+
         [Fact]
         public void JitsiLinkBuilder_ReturnsNull_WhenNoMeetingRoom()
         {

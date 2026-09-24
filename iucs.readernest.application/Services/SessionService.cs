@@ -1805,6 +1805,8 @@ namespace iucs.readernest.application.Services
                 Token = token,
                 ScheduledEndAtUtc = session.ScheduledEndAtUtc,
                 IsDemo = session.Type == SessionType.Demo,
+                DisplayName = $"{user.FirstName} {user.LastName}".Trim(),
+                IsMonitor = isMonitor,
             };
         }
 
