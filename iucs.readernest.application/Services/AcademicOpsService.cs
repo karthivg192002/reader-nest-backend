@@ -15,8 +15,6 @@ namespace iucs.readernest.application.Services
 {
     public class AcademicOpsService : IAcademicOpsService
     {
-        private static readonly TimeSpan LeaveCutoff = TimeSpan.FromHours(6);
-
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
         private readonly INotificationService _notificationService;
@@ -534,23 +532,10 @@ namespace iucs.readernest.application.Services
                     $"({DateTimeDisplay.ToLocalRange(duplicate.StartAtUtc, duplicate.EndAtUtc)}).");
             }
 
+            // No minimum notice (the old 6-hour rule was removed at the client's request): leave
+            // can be applied for whenever it's needed, including for a class starting shortly --
+            // the admin review / monthly allowance still decides what happens to those classes.
             var affectedSessions = await CountAffectedSessionsAsync(teacher.Id, startAtUtc, endAtUtc, cancellationToken);
-
-            // 6-hour rule: leave covering a session that starts within the cutoff is auto-blocked
-            var cutoffLimit = DateTime.UtcNow.Add(LeaveCutoff);
-            var blockingSession = await _unitOfWork.Repository<ClassSession>().Query()
-                .Where(s => s.TeacherProfileId == teacher.Id
-                            && s.Status == SessionStatus.Scheduled
-                            && s.ScheduledStartAtUtc < cutoffLimit
-                            && s.ScheduledStartAtUtc < endAtUtc
-                            && s.ScheduledEndAtUtc > startAtUtc)
-                .OrderBy(s => s.ScheduledStartAtUtc)
-                .FirstOrDefaultAsync(cancellationToken);
-            if (blockingSession is not null)
-            {
-                throw new DomainValidationException(
-                    $"Leave cannot cover the session at {DateTimeDisplay.ToLocal(blockingSession.ScheduledStartAtUtc)}: applications must be made at least 6 hours before a scheduled class.");
-            }
 
             var leave = new LeaveRequest
             {
@@ -649,18 +634,6 @@ namespace iucs.readernest.application.Services
             if (windowOverlap)
             {
                 throw new ConflictException("One of the selected classes already falls inside an existing pending or approved leave request.");
-            }
-
-            // 6-hour rule, same cutoff as the whole-window path, checked per selected session.
-            var cutoffLimit = DateTime.UtcNow.Add(LeaveCutoff);
-            var blockingSession = sessions
-                .Where(s => s.ScheduledStartAtUtc < cutoffLimit)
-                .OrderBy(s => s.ScheduledStartAtUtc)
-                .FirstOrDefault();
-            if (blockingSession is not null)
-            {
-                throw new DomainValidationException(
-                    $"The class at {DateTimeDisplay.ToLocal(blockingSession.ScheduledStartAtUtc)} can't be cancelled this way: applications must be made at least 6 hours before a scheduled class.");
             }
 
             // The monthly allowance is keyed to the month each class was actually scheduled in

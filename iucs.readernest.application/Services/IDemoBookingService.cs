@@ -50,6 +50,15 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Corrects a booking's parent/child details and extra invitees in place — the fix for a
+        /// mistyped parent email, instead of deleting and recreating the demo. Slot, teacher and
+        /// pipeline stage are untouched. Any email address that is new or changed gets the join
+        /// link sent to it (only while the demo is still upcoming), since the original went to
+        /// the wrong address.
+        /// </summary>
+        Task<DemoBookingDto> UpdateAsync(Guid bookingId, UpdateDemoBookingRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Manually re-sends the demo's join link to the parent, every extra invitee, and the
         /// assigned teacher — for when a parent reports never getting (or losing) the original
         /// confirmation email. Always uses the teacher's current fixed personal room.

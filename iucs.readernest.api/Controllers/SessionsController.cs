@@ -7,6 +7,8 @@ using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
+using iucs.readernest.api.Hubs;
 using Microsoft.Extensions.Configuration;
 
 namespace iucs.readernest.api.Controllers
@@ -20,12 +22,14 @@ namespace iucs.readernest.api.Controllers
         private readonly ISessionService _sessionService;
         private readonly IFileStorage _fileStorage;
         private readonly IAcademicOpsService _academicOpsService;
+        private readonly IHubContext<ClassroomHub> _classroomHub;
 
-        public SessionsController(ISessionService sessionService, IFileStorage fileStorage, IAcademicOpsService academicOpsService)
+        public SessionsController(ISessionService sessionService, IFileStorage fileStorage, IAcademicOpsService academicOpsService, IHubContext<ClassroomHub> classroomHub)
         {
             _sessionService = sessionService;
             _fileStorage = fileStorage;
             _academicOpsService = academicOpsService;
+            _classroomHub = classroomHub;
         }
 
         // Staff console only: Teacher and Parent also carry SessionCalendarManagement:View
@@ -87,7 +91,27 @@ namespace iucs.readernest.api.Controllers
         public async Task<ActionResult<JitsiJoinDto>> GetJitsiJoin(Guid id, CancellationToken cancellationToken)
         {
             var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-            return Ok(await _sessionService.GetJitsiJoinAsync(id, userId, cancellationToken));
+            var join = await _sessionService.GetJitsiJoinAsync(id, userId, cancellationToken);
+
+            // Admin-team monitors must not wait in the lobby for the teacher to admit them. This
+            // Jitsi deployment's lobby lets nobody skip it on a moderator token alone (only room
+            // owners/members, a whitelist or the room password do — verified live on UAT), so
+            // the host's own classroom admits them instead: it's told who was just authorized
+            // here and answers that person's knock automatically (JitsiLive's staffJoining).
+            if (join.IsMonitor && !string.IsNullOrWhiteSpace(join.DisplayName))
+            {
+                try
+                {
+                    await _classroomHub.Clients.Group(ClassroomHub.GroupFor(join.SessionId))
+                        .SendAsync("StaffJoining", join.DisplayName, cancellationToken);
+                }
+                catch (Exception)
+                {
+                    // Best-effort: without it the monitor simply knocks like anyone else.
+                }
+            }
+
+            return Ok(join);
         }
 
         /// <summary>
@@ -272,6 +296,18 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _sessionService.CancelAsync(id, request, cancellationToken));
         }
 
+        /// <summary>Parent cancels their own child's upcoming class; the teacher is emailed with the reason. No admin approval.</summary>
+        [HttpPost("{id:guid}/parent-cancel")]
+        [Authorize(Roles = nameof(UserRole.Parent))]
+        public async Task<ActionResult<ClassSessionDto>> CancelByParent(
+            Guid id,
+            CancelSessionRequest request,
+            CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _sessionService.CancelByParentAsync(userId, id, request.Reason ?? string.Empty, cancellationToken));
+        }
+
         /// <summary>
         /// Marks a session completed with an optional class summary;
         /// auto-moves the batch to Dormant when the course finishes.
@@ -414,9 +450,9 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _sessionService.ListAllRecordingsAsync(page <= 0 ? 1 : page, pageSize <= 0 ? 20 : pageSize, date, userId, cancellationToken));
         }
 
-        /// <summary>Deletes a registered recording. Admin only — unregisters the row; the underlying file in storage is left untouched.</summary>
+        /// <summary>Deletes a registered recording. Admin, or a role granted SessionCalendarManagement:Delete (e.g. Founder Dashboard) — unregisters the row; the underlying file in storage is left untouched.</summary>
         [HttpDelete("{id:guid}/recordings/{recordingId:guid}")]
-        [Authorize(Roles = nameof(UserRole.Admin))]
+        [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Delete)]
         public async Task<IActionResult> DeleteRecording(
             Guid id,
             Guid recordingId,

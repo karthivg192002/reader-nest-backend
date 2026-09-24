@@ -35,7 +35,7 @@ namespace iucs.readernest.application.Mappings
                 PayableAmount = booking.ConversionStatus == ConversionStatus.Enrolled ? ConvertedDemoFee : NormalDemoFee,
                 ParentJoinedAtUtc = booking.ParentJoinedAtUtc,
                 Participants = booking.Participants
-                    .Select(p => new DemoParticipantDto { Name = p.Name, Email = p.Email, Phone = p.Phone, IsChild = p.IsChild, HasJoined = p.HasJoined })
+                    .Select(p => new DemoParticipantDto { Id = p.Id, Name = p.Name, Email = p.Email, Phone = p.Phone, IsChild = p.IsChild, HasJoined = p.HasJoined })
                     .ToList(),
             };
         }

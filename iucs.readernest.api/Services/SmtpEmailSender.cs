@@ -30,6 +30,14 @@ namespace iucs.readernest.api.Services
 
         public async Task SendAsync(string toEmail, string subject, string body, CancellationToken cancellationToken = default)
         {
+            // A parent with no email (demo booked by phone, or a no-email account's internal
+            // login key) has nothing to deliver to — skip quietly rather than bounce or fail the
+            // caller's own action. They're reached on WhatsApp instead.
+            if (!application.Common.ParentLogin.IsDeliverable(toEmail))
+            {
+                return;
+            }
+
             var integration = await _unitOfWork.Repository<Integration>().Query()
                 .FirstOrDefaultAsync(i => i.Key == EmailIntegrationKey, cancellationToken);
 

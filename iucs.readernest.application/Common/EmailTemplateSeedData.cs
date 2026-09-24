@@ -88,6 +88,89 @@ namespace iucs.readernest.application.Common
                     """,
                     "Occasion", "ParentName", "ChildName", "Stars", "Comment"),
 
+                New("staff-leave-submitted", "Staff Leave Application (Admin / Founder)",
+                    "Sent to Admin and the Founder when an admin-team member (RM, Coordinator, Management, Admission) applies for leave.",
+                    NotificationType.General, "Leave application: {{StaffName}} ({{Dates}})",
+                    """
+                    <p><strong>{{StaffName}}</strong> has applied for leave on <strong>{{Dates}}</strong>.</p>
+                    <p><strong>Reason:</strong> &ldquo;{{Reason}}&rdquo;</p>
+                    <p><a href="{{ReviewUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">Review leave</a></p>
+                    """,
+                    "StaffName", "Dates", "Reason", "ReviewUrl"),
+
+                New("staff-leave-reviewed", "Staff Leave Decision (Staff)",
+                    "Sent to the admin-team member when their leave application is approved or not approved.",
+                    NotificationType.LeaveStatusUpdate, "Your leave for {{Dates}} was {{Status}}",
+                    """
+                    <p>Hi {{FirstName}},</p>
+                    <p>Your leave for <strong>{{Dates}}</strong> was <strong>{{Status}}</strong>.</p>
+                    <p>{{ReviewNote}}</p>
+                    """,
+                    "FirstName", "Dates", "Status", "ReviewNote"),
+
+                New("class-cancelled-by-parent", "Class Cancelled by Parent (Teacher)",
+                    "Sent to the teacher when a parent cancels an upcoming class from the parent portal (no admin approval needed): a family's own class is cancelled with a make-up scheduled; in a group class only their child is marked absent.",
+                    NotificationType.General, "{{Headline}}: {{ClassName}} on {{StartLocal}}",
+                    """
+                    <p>Hi {{TeacherFirstName}},</p>
+                    <p>The parent <strong>{{ParentName}}</strong> has cancelled the class for <strong>{{ChildName}}</strong>:</p>
+                    <p style="font-weight:600;">{{ClassName}} &ndash; {{StartLocal}}</p>
+                    <p><strong>Reason given by the parent:</strong> &ldquo;{{Reason}}&rdquo;</p>
+                    <p>{{Outcome}}</p>
+                    """,
+                    "Headline", "TeacherFirstName", "ParentName", "ChildName", "ClassName", "StartLocal", "Reason", "Outcome"),
+
+                New("short-class-payout-approval", "Short Class — Payout Approval Needed (Admin / Management)",
+                    "Sent to Admin and Management when a class ends before its scheduled duration (or with no teacher attendance recorded); the payout waits in Payout Approvals.",
+                    NotificationType.General, "Payout approval needed: {{TeacherName}}'s class ran {{ShortfallMinutes}} min short",
+                    """
+                    <p>A class ended before its scheduled duration and needs a payout decision.</p>
+                    <table style="border-collapse:collapse;font-size:14px;">
+                      <tr><td style="padding:4px 12px 4px 0;color:#6b7280;">Teacher</td><td style="padding:4px 0;"><strong>{{TeacherName}}</strong></td></tr>
+                      <tr><td style="padding:4px 12px 4px 0;color:#6b7280;">Batch / class</td><td style="padding:4px 0;">{{ClassName}}</td></tr>
+                      <tr><td style="padding:4px 12px 4px 0;color:#6b7280;">Student(s)</td><td style="padding:4px 0;">{{Students}}</td></tr>
+                      <tr><td style="padding:4px 12px 4px 0;color:#6b7280;">Scheduled time</td><td style="padding:4px 0;">{{ScheduledTime}}</td></tr>
+                      <tr><td style="padding:4px 12px 4px 0;color:#6b7280;">Scheduled duration</td><td style="padding:4px 0;">{{ScheduledMinutes}} min</td></tr>
+                      <tr><td style="padding:4px 12px 4px 0;color:#6b7280;">Actual duration</td><td style="padding:4px 0;">{{ActualMinutes}} min</td></tr>
+                      <tr><td style="padding:4px 12px 4px 0;color:#6b7280;">Shortfall</td><td style="padding:4px 0;"><strong>{{ShortfallMinutes}} min</strong></td></tr>
+                    </table>
+                    <p>Approve it for full payout, a partial payout, or no payout.</p>
+                    <p><a href="{{ApprovalsUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">Review in Payout Approvals</a></p>
+                    """,
+                    "TeacherName", "ClassName", "Students", "ScheduledTime", "ScheduledMinutes", "ActualMinutes", "ShortfallMinutes", "ApprovalsUrl"),
+
+                New("support-ticket-raised", "Support Ticket Raised (Relationship Manager / Admin)",
+                    "Sent to Relationship Managers and Admins when a parent raises a new support ticket from the portal.",
+                    NotificationType.General, "New ticket {{Reference}} from {{ParentName}}: {{Subject}}",
+                    """
+                    <p><strong>{{ParentName}}</strong> raised a new support ticket (<strong>{{Reference}}</strong>, {{Category}}).</p>
+                    <p style="font-weight:600;">{{Subject}}</p>
+                    <p>&ldquo;{{Message}}&rdquo;</p>
+                    <p><a href="{{TicketUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">Open ticket</a></p>
+                    """,
+                    "Reference", "ParentName", "Category", "Subject", "Message", "TicketUrl"),
+
+                New("support-ticket-parent-replied", "Support Ticket Parent Reply (Relationship Manager / Admin)",
+                    "Sent to Relationship Managers and Admins when a parent adds a message to an existing support ticket.",
+                    NotificationType.General, "{{ParentName}} replied on ticket {{Reference}}",
+                    """
+                    <p><strong>{{ParentName}}</strong> replied on ticket <strong>{{Reference}}</strong> &ndash; {{Subject}}:</p>
+                    <p>&ldquo;{{Message}}&rdquo;</p>
+                    <p><a href="{{TicketUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">Open ticket</a></p>
+                    """,
+                    "Reference", "ParentName", "Subject", "Message", "TicketUrl"),
+
+                New("support-ticket-updated", "Support Ticket Update (Parent)",
+                    "Sent to the parent when the team replies on their support ticket or changes its status.",
+                    NotificationType.General, "Update on your ticket {{Reference}}: {{Subject}}",
+                    """
+                    <p>There's an update on your support ticket <strong>{{Reference}}</strong> &ndash; {{Subject}}.</p>
+                    <p>{{Update}}</p>
+                    <p>Status: <strong>{{Status}}</strong></p>
+                    <p><a href="{{TicketUrl}}" style="display:inline-block;padding:10px 18px;background:#4F46E5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">View ticket</a></p>
+                    """,
+                    "Reference", "Subject", "Update", "Status", "TicketUrl"),
+
                 New("class-scheduled", "Class Scheduled (Teacher)",
                     "Sent to the teacher when a new session is scheduled for them.",
                     NotificationType.BookingConfirmation, "New class scheduled: {{SessionType}}",

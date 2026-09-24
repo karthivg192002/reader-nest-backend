@@ -89,6 +89,18 @@ namespace iucs.readernest.application.Services
                 query = query.Where(s => s.BatchId == batchId.Value);
             }
 
+            // Demos are account-specific (DemoOwnershipScope): an Admission Counselor or RM sees
+            // only the demos they scheduled on Sessions/Calendar/dashboards too, not just on the
+            // demo list — regular classes stay visible to the whole team. A demo's owner is whoever
+            // booked it (DemoBooking.CreatedBy), or whoever scheduled the bare demo session.
+            if (await DemoOwnershipScope.GetAsync(_unitOfWork, _currentUser.UserId, cancellationToken) is { } owner)
+            {
+                var bookings = _unitOfWork.Repository<DemoBooking>().Query();
+                query = query.Where(s => s.Type != SessionType.Demo
+                    || bookings.Any(b => b.ClassSessionId == s.Id && b.CreatedBy == owner)
+                    || (!bookings.Any(b => b.ClassSessionId == s.Id) && s.CreatedBy == owner));
+            }
+
             var sessions = await query.OrderBy(s => s.ScheduledStartAtUtc).ToListAsync(cancellationToken);
             var activeRecordings = await SessionRecordingLookup.ActiveRecordingsBySessionAsync(
                 _unitOfWork, sessions.Select(s => s.Id), cancellationToken);
@@ -320,6 +332,158 @@ namespace iucs.readernest.application.Services
             return await GetAsync(session.Id, cancellationToken);
         }
 
+        public async Task<ClassSessionDto> CancelByParentAsync(
+            Guid parentUserId,
+            Guid sessionId,
+            string reason,
+            CancellationToken cancellationToken = default)
+        {
+            reason = reason?.Trim() ?? string.Empty;
+            if (reason.Length == 0)
+            {
+                throw new DomainValidationException("Please tell us why you're cancelling this class.");
+            }
+
+            var parent = await _unitOfWork.Repository<User>().Query()
+                .FirstOrDefaultAsync(u => u.Id == parentUserId && u.Role == UserRole.Parent, cancellationToken)
+                ?? throw new NotFoundException("Parent account not found.");
+
+            var session = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .Include(s => s.Batch)
+                .Include(s => s.TeacherProfile).ThenInclude(t => t.User)
+                .FirstOrDefaultAsync(s => s.Id == sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+
+            // Someone else's class answers 404 (not 403), so session ids can't be probed.
+            if (session.BatchId is not { } batchId)
+            {
+                throw new NotFoundException(nameof(ClassSession), sessionId);
+            }
+
+            var enrolled = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.BatchId == batchId && e.Status == EnrollmentStatus.Active)
+                .Select(e => new { e.ChildId, ParentUserId = e.Child.ParentProfile.UserId, e.Child.FirstName, e.Child.LastName })
+                .ToListAsync(cancellationToken);
+            var mine = enrolled.Where(e => e.ParentUserId == parentUserId).ToList();
+            if (mine.Count == 0)
+            {
+                throw new NotFoundException(nameof(ClassSession), sessionId);
+            }
+
+            if (session.Status is not (SessionStatus.Scheduled or SessionStatus.CarriedForward))
+            {
+                throw new DomainValidationException("Only an upcoming class can be cancelled.");
+            }
+
+            if (session.ScheduledStartAtUtc <= DateTime.UtcNow)
+            {
+                throw new DomainValidationException("This class has already started, so it can't be cancelled.");
+            }
+
+            // No admin approval: a parent's cancellation takes effect immediately, the mirror of a
+            // teacher's cancellation reaching parents automatically.
+            var parentName = $"{parent.FirstName} {parent.LastName}".Trim();
+            var childNames = string.Join(", ", mine.Select(m => $"{m.FirstName} {m.LastName}".Trim()));
+            var teacher = session.TeacherProfile.User;
+            string headline;
+            string outcome;
+
+            if (enrolled.Any(e => e.ParentUserId != parentUserId))
+            {
+                // A shared group class: one family can't call it off for everyone else, so their
+                // cancellation means "my child won't attend" — marked Absent up front (so the
+                // teacher and the attendance record know it's a planned absence) while the class
+                // goes ahead for the other students.
+                var myChildIds = mine.Select(m => m.ChildId).ToList();
+                var existing = await _unitOfWork.Repository<SessionAttendance>().TrackedQuery()
+                    .Where(a => a.ClassSessionId == session.Id && a.ChildId != null && myChildIds.Contains(a.ChildId.Value))
+                    .ToListAsync(cancellationToken);
+                foreach (var childId in myChildIds)
+                {
+                    var row = existing.FirstOrDefault(a => a.ChildId == childId);
+                    if (row is null)
+                    {
+                        await _unitOfWork.Repository<SessionAttendance>().AddAsync(new SessionAttendance
+                        {
+                            ClassSessionId = session.Id,
+                            ParticipantType = ParticipantType.Student,
+                            ChildId = childId,
+                            Status = AttendanceStatus.Absent,
+                        }, cancellationToken);
+                    }
+                    else
+                    {
+                        row.Status = AttendanceStatus.Absent;
+                    }
+                }
+
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
+                    changesJson: "{\"parentCancelledAttendance\":true}", cancellationToken: cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+                headline = $"{childNames} won't attend";
+                outcome = $"{childNames} will not attend this class. It is a group class, so it still goes ahead as scheduled for the other students.";
+            }
+            else
+            {
+                // The family's own class (1:1, or siblings together): cancelled outright, with the
+                // reason recorded on the class so staff see who cancelled and why, and a make-up
+                // class placed automatically — a week later at the same time, skipping holidays and
+                // this batch's other classes, same placement as a carried-forward no-show.
+                session.Status = SessionStatus.Cancelled;
+                var storedReason = $"Cancelled by parent ({parentName}): {reason}";
+                session.CancellationReason = storedReason.Length <= 500 ? storedReason : storedReason[..500];
+
+                var duration = session.ScheduledEndAtUtc - session.ScheduledStartAtUtc;
+                var makeUpStart = await NextAvailableCarryForwardSlotAsync(
+                    session.ScheduledStartAtUtc.AddDays(7), session.BatchId, duration, cancellationToken);
+                var makeUp = new ClassSession
+                {
+                    BatchId = session.BatchId,
+                    TeacherProfileId = session.TeacherProfileId,
+                    Type = session.Type,
+                    Status = SessionStatus.CarriedForward,
+                    ScheduledStartAtUtc = makeUpStart,
+                    ScheduledEndAtUtc = makeUpStart.Add(duration),
+                    MeetingRoomId = session.MeetingRoomId,
+                    CarriedForwardFromSessionId = session.Id,
+                };
+                await _unitOfWork.Repository<ClassSession>().AddAsync(makeUp, cancellationToken);
+
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
+                    changesJson: "{\"cancelledBy\":\"parent\",\"makeUpSession\":\"" + makeUp.Id + "\"}", cancellationToken: cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+                headline = "Class cancelled by parent";
+                outcome = $"The class has been cancelled and a make-up class has been scheduled for {DateTimeDisplay.ToLocalRange(makeUp.ScheduledStartAtUtc, makeUp.ScheduledEndAtUtc, teacher.TimeZoneId)}.";
+            }
+
+            try
+            {
+                await _notificationService.SendTemplatedEmailAsync(
+                    teacher.Id, teacher.Email, NotificationType.General, "class-cancelled-by-parent",
+                    new Dictionary<string, string>
+                    {
+                        ["Headline"] = headline,
+                        ["TeacherFirstName"] = teacher.FirstName,
+                        ["ParentName"] = parentName,
+                        ["ChildName"] = childNames,
+                        ["ClassName"] = session.Batch?.Name ?? "Class",
+                        ["StartLocal"] = DateTimeDisplay.ToLocalRange(session.ScheduledStartAtUtc, session.ScheduledEndAtUtc, teacher.TimeZoneId),
+                        ["Reason"] = reason,
+                        ["Outcome"] = outcome,
+                    },
+                    cancellationToken);
+            }
+            catch (Exception)
+            {
+                // Best-effort: the cancellation is already saved and shows on the teacher's
+                // schedule; a mail failure must not make the parent think it didn't go through.
+            }
+
+            return await GetAsync(session.Id, cancellationToken);
+        }
+
         public async Task<ClassSessionDto> CompleteAsync(
             Guid id,
             CompleteSessionRequest? request = null,
@@ -332,6 +496,32 @@ namespace iucs.readernest.application.Services
             // is not enough — the caller must be this session's own teacher (or an Admin).
             await EnsureSessionParticipantAsync(session, cancellationToken);
 
+            return await CompleteCoreAsync(session, request?.Summary, null, cancellationToken);
+        }
+
+        public async Task<ClassSessionDto> CompleteAbandonedAsync(
+            Guid id,
+            DateTime teacherLeftAtUtc,
+            CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(id, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), id);
+
+            // The class ended when the teacher left, not when the background job noticed.
+            return await CompleteCoreAsync(session, null, teacherLeftAtUtc, cancellationToken);
+        }
+
+        /// <summary>
+        /// Shared by the teacher/admin "End Class" and the system completion of a class the
+        /// teacher abandoned: status, summary, payout accrual (short-class flag + approval
+        /// alert), event log and the parents' summary email.
+        /// </summary>
+        private async Task<ClassSessionDto> CompleteCoreAsync(
+            ClassSession session,
+            string? summary,
+            DateTime? endedAtUtc,
+            CancellationToken cancellationToken)
+        {
             if (TerminalStatuses.Contains(session.Status))
             {
                 throw new DomainValidationException($"A session in status '{session.Status}' cannot be completed.");
@@ -339,10 +529,10 @@ namespace iucs.readernest.application.Services
 
             session.Status = SessionStatus.Completed;
             session.ActualStartAtUtc ??= session.ScheduledStartAtUtc;
-            session.ActualEndAtUtc ??= DateTime.UtcNow;
-            if (!string.IsNullOrWhiteSpace(request?.Summary))
+            session.ActualEndAtUtc ??= endedAtUtc ?? DateTime.UtcNow;
+            if (!string.IsNullOrWhiteSpace(summary))
             {
-                session.Summary = request.Summary.Trim();
+                session.Summary = summary.Trim();
             }
             else
             {
@@ -359,13 +549,20 @@ namespace iucs.readernest.application.Services
             }
 
             // Auto payout calculation post-class: the earning accrues in the same unit of work
-            await _payoutService.AccrueForSessionAsync(
+            var earning = await _payoutService.AccrueForSessionAsync(
                 session, PayoutItemType.SessionEarning,
                 session.Type == SessionType.Demo ? "Demo session" : null,
                 cancellationToken);
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            // A class that ran shorter than scheduled goes to Payout Approvals — alert Admin and
+            // Management straight away (best-effort, after the completion is durably saved).
+            if (earning.RequiresReview)
+            {
+                await _payoutService.NotifyPayoutReviewAsync(earning.Id, cancellationToken);
+            }
 
             // The definitive "End Class" timestamp for the Class Session Logs screen — best
             // effort, after the real completion has already durably saved.
@@ -893,7 +1090,7 @@ namespace iucs.readernest.application.Services
             Guid recordingId,
             CancellationToken cancellationToken = default)
         {
-            // Admin-only is enforced by the controller's [Authorize(Roles)] — this just has to
+            // The delete permission is enforced by the controller's [HasPermission] — this just has to
             // exist and belong to the session named in the route.
             var recording = await _unitOfWork.Repository<SessionRecording>().TrackedQuery()
                 .FirstOrDefaultAsync(r => r.Id == recordingId && r.ClassSessionId == sessionId, cancellationToken)
@@ -917,11 +1114,19 @@ namespace iucs.readernest.application.Services
             var course = await _unitOfWork.Repository<Course>().GetByIdAsync(batch.CourseId, cancellationToken)
                 ?? throw new NotFoundException(nameof(Course), batch.CourseId);
 
-            var hasSessions = await _unitOfWork.Repository<ClassSession>()
-                .ExistsAsync(s => s.BatchId == batchId, cancellationToken);
-            if (hasSessions)
+            // Only refused while sessions are still upcoming (those are adjusted via the
+            // future-schedule edit). Once every existing session is completed or cancelled --
+            // e.g. a 12-session block delivered and the parent has now paid for the next block --
+            // more can be appended; this used to refuse forever after the first generation, so a
+            // finished batch could never be extended.
+            var now = DateTime.UtcNow;
+            var hasUpcomingSessions = await _unitOfWork.Repository<ClassSession>()
+                .ExistsAsync(s => s.BatchId == batchId
+                    && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                    && s.ScheduledStartAtUtc > now, cancellationToken);
+            if (hasUpcomingSessions)
             {
-                throw new DomainValidationException("This batch already has scheduled sessions; reschedule or cancel them individually.");
+                throw new DomainValidationException("This batch already has upcoming sessions; adjust the remaining schedule instead.");
             }
 
             var slotDays = request.Slots.Select(s => s.DayOfWeek).ToList();
@@ -1468,16 +1673,26 @@ namespace iucs.readernest.application.Services
                         cancellationToken);
             }
 
-            // Coordinator (and anyone else with the same scheduling-edit grant): "the
-            // coordinator can drop into any ongoing/upcoming class or demo" is documented,
-            // deliberate monitor access on the frontend (coordinator/Calendar.tsx's Join Class
-            // button) — not scoped to a specific batch/session the way Parent/Teacher are,
-            // since coordinating means being able to check any of them.
+            // The admin team (RM, Coordinator, Management, Founder, ...) can drop into any
+            // ongoing/upcoming class or demo as a monitor — not scoped to a specific
+            // batch/session the way Parent/Teacher are. Client requirement: "no additional
+            // permission or approval" beyond being an authorised admin member, so seeing the
+            // academy calendar (SessionCalendarManagement:View, baseline for every admin-team
+            // preset — see RequiredSystemRolePermissions) is the whole test; it used to demand
+            // the scheduling Edit grant only the Coordinator preset carried. A Sub Admin with no
+            // calendar access at all (e.g. a billing-only account) is still refused.
             if (user.Role == UserRole.SubAdmin)
             {
                 return await _unitOfWork.Repository<SubAdminPermission>().ExistsAsync(
-                    p => p.UserId == userId && p.Module == nameof(PermissionModule.SessionCalendarManagement) && p.CanEdit,
+                    p => p.UserId == userId && p.Module == nameof(PermissionModule.SessionCalendarManagement) && p.CanView,
                     cancellationToken);
+            }
+
+            // Admission team: always carries SessionCalendarManagement:View (required grant) and
+            // runs the demo pipeline, so it can monitor any class the same way.
+            if (user.Role == UserRole.AdmissionTeam)
+            {
+                return true;
             }
 
             return false;
@@ -1561,7 +1776,7 @@ namespace iucs.readernest.application.Services
             // so this check applying to them too silently broke the button with "This class
             // hasn't opened for joining yet." on anything more than 10 minutes away. A genuine
             // participant (Teacher/Parent) still only gets the real join window.
-            var isMonitor = user.Role is UserRole.Admin or UserRole.SubAdmin;
+            var isMonitor = user.Role is UserRole.Admin or UserRole.SubAdmin or UserRole.AdmissionTeam;
             var now = DateTime.UtcNow;
             if (!isMonitor && now < session.ScheduledStartAtUtc.AddMinutes(-10))
             {
@@ -1586,7 +1801,10 @@ namespace iucs.readernest.application.Services
                 .Select(i => i.ConfigJson)
                 .FirstOrDefaultAsync(cancellationToken);
             var domain = JitsiLinkBuilder.ResolveDomain(jitsiConfigJson);
-            var moderator = user.Role is UserRole.Teacher or UserRole.Admin;
+            // Admin-team monitors join as moderators too: a non-moderator lands in the class's
+            // lobby (DefaultLobbyEnabled) and has to wait for the teacher to admit them, which
+            // is exactly the "approval to enter" the client asked to remove for the admin team.
+            var moderator = isMonitor || user.Role == UserRole.Teacher;
 
             var token = _jitsiTokenService.CreateToken(
                 domain,
@@ -1599,6 +1817,38 @@ namespace iucs.readernest.application.Services
                 // token that's valid indefinitely — it dies with the class, not with the link.
                 session.ScheduledEndAtUtc.AddHours(2));
 
+            var staffNames = new List<string>();
+            // The host (teacher/admin) classroom is what answers knocks, so only it needs the list —
+            // staff monitors are moderators too now, but never admit anyone from their raw Jitsi tab.
+            if (user.Role is UserRole.Teacher or UserRole.Admin)
+            {
+                // Staff (Admin/RM/Coordinator/Counselor/Admission/Management) enter without
+                // knocking: the moderator's classroom screen auto-admits these names from the
+                // waiting room. Name-matched because Jitsi's knock event carries only a display
+                // name; the real fix is server-side lobby bypass (see JITSI_ARCHITECTURE.md).
+                var staff = (await _unitOfWork.Repository<User>().Query()
+                        .Where(u => u.Id != user.Id && u.Status == UserStatus.Active
+                            && (u.Role == UserRole.Admin || u.Role == UserRole.SubAdmin || u.Role == UserRole.AdmissionTeam))
+                        .Select(u => new { u.FirstName, u.LastName })
+                        .ToListAsync(cancellationToken))
+                    .Select(u => $"{u.FirstName} {u.LastName}".Trim())
+                    .Where(n => n.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                // A name is only usable as a "this is staff" signal if nobody outside staff
+                // (a parent or a teacher) carries the same one — otherwise that person would be
+                // waved in from the waiting room too. Such a name falls back to a manual admit.
+                var firstNames = staff.Select(n => n.Split(' ')[0].ToLower()).Distinct().ToList();
+                var nonStaff = (await _unitOfWork.Repository<User>().Query()
+                        .Where(u => (u.Role == UserRole.Parent || u.Role == UserRole.Teacher) && firstNames.Contains(u.FirstName.ToLower()))
+                        .Select(u => new { u.FirstName, u.LastName })
+                        .ToListAsync(cancellationToken))
+                    .Select(u => $"{u.FirstName} {u.LastName}".Trim())
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                staffNames = staff.Where(n => !nonStaff.Contains(n)).ToList();
+            }
+
             return new JitsiJoinDto
             {
                 SessionId = session.Id,
@@ -1607,6 +1857,9 @@ namespace iucs.readernest.application.Services
                 Token = token,
                 ScheduledEndAtUtc = session.ScheduledEndAtUtc,
                 IsDemo = session.Type == SessionType.Demo,
+                DisplayName = $"{user.FirstName} {user.LastName}".Trim(),
+                IsMonitor = isMonitor,
+                StaffNames = staffNames,
             };
         }
 

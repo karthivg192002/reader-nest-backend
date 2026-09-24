@@ -47,6 +47,9 @@ namespace iucs.readernest.application.Mappings
                         Note = i.Note,
                         CreatedAtUtc = i.CreatedAtUtc,
                         RequiresReview = i.RequiresReview,
+                        ScheduledMinutes = i.ScheduledMinutes,
+                        DeliveredMinutes = i.DeliveredMinutes,
+                        ReviewDecision = i.ReviewDecision,
                     })
                     .ToList(),
             };

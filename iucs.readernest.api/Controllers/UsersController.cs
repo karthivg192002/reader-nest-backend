@@ -207,7 +207,7 @@ namespace iucs.readernest.api.Controllers
 
         /// <summary>
         /// A short, shareable link to the same room MyMeetingRoom builds -- the long form
-        /// (domain/room#jwt=&lt;huge signed token&gt;) reads as broken/suspicious pasted into
+        /// (domain/room?jwt=&lt;huge signed token&gt;) reads as broken/suspicious pasted into
         /// WhatsApp or email. Points at the in-app <c>/join/personal/{id}</c> guest page (backed
         /// by <see cref="MeetingRoomGuestJoin"/>) rather than straight at Jitsi, so a guest who
         /// opens it lands in the same branded, interactive classroom (whiteboard/quiz/roster) the
@@ -482,7 +482,7 @@ namespace iucs.readernest.api.Controllers
         /// credential rather than replacing one -- and every call is audit-logged.
         /// </summary>
         [HttpGet("{id:guid}/pin")]
-        [Authorize(Roles = nameof(UserRole.Admin))]
+        [HasPermission(PermissionModule.Settings, PermissionAction.Edit)]
         public async Task<ActionResult<RevealedPinDto>> RevealPin(Guid id, CancellationToken cancellationToken)
         {
             var pin = await _userService.RevealPinAsync(id, cancellationToken);

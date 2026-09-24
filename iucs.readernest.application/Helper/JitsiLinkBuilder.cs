@@ -35,7 +35,7 @@ namespace iucs.readernest.application.Helper
 
         /// <summary>
         /// Returns null when there's no meeting room to link to. When <paramref name="token"/> is
-        /// supplied (see IJitsiTokenService), it's appended as the "#jwt=" fragment Jitsi's web
+        /// supplied (see IJitsiTokenService), it's appended as the "?jwt=" query parameter Jitsi's web
         /// client reads to authenticate the join directly from an email link — once the
         /// deployment enforces token verification (see docs/JITSI_ARCHITECTURE.md), a link without
         /// a valid token for this exact room is refused instead of granting an open seat.
@@ -53,11 +53,14 @@ namespace iucs.readernest.application.Helper
 
             var domain = ResolveDomain(integrationConfigJson);
             var url = $"https://{domain}/{meetingRoomId}";
-            var hashParts = new List<string>();
+            // The token goes in the query string: Jitsi's web client reads `jwt` only from
+            // `?jwt=`, never from the `#` fragment, where it was silently ignored (verified live
+            // on UAT — a moderator token in the fragment still landed on the lobby screen).
             if (!string.IsNullOrWhiteSpace(token))
             {
-                hashParts.Add($"jwt={token}");
+                url += $"?jwt={Uri.EscapeDataString(token)}";
             }
+            var hashParts = new List<string>();
             if (!string.IsNullOrWhiteSpace(displayName))
             {
                 hashParts.Add($"userInfo.displayName={Uri.EscapeDataString($"\"{displayName}\"")}");

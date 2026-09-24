@@ -75,6 +75,9 @@ namespace iucs.readernest.api.Hubs
 
         private static string Group(string sessionId) => $"classroom-{sessionId}";
 
+        /// <summary>The SignalR group a session's live classroom clients join — for server-side pushes via IHubContext.</summary>
+        public static string GroupFor(Guid sessionId) => Group(sessionId.ToString());
+
         private bool IsTeacher =>
             Context.User?.IsInRole(nameof(UserRole.Teacher)) == true
             || Context.User?.IsInRole(nameof(UserRole.Admin)) == true;

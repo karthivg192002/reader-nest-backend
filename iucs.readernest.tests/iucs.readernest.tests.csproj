@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\iucs.readernest.application\iucs.readernest.application.csproj" />
+    <ProjectReference Include="../iucs.readernest.api/iucs.readernest.api.csproj" />
   </ItemGroup>
 
 </Project>

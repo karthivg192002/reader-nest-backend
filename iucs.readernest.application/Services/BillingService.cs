@@ -7,7 +7,9 @@ using iucs.readernest.application.Dto.Common;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Common;
 using iucs.readernest.domain.Entities.Academics;
+using iucs.readernest.domain.Entities.Admission;
 using iucs.readernest.domain.Entities.Billing;
+using iucs.readernest.domain.Entities.Integrations;
 using iucs.readernest.domain.Entities.Settings;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
@@ -772,6 +774,16 @@ namespace iucs.readernest.application.Services
                 invoice.Status = InvoiceStatus.Paid;
                 invoice.PaidAtUtc = DateTime.UtcNow;
 
+                // A demo admitted manually waits in PaymentPending on this invoice
+                // (ManualAdmissionService) — the fee is in, so it's now a real enrollment.
+                var awaitingBookings = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
+                    .Where(b => b.InvoiceId == invoice.Id && b.ConversionStatus == ConversionStatus.PaymentPending)
+                    .ToListAsync(cancellationToken);
+                foreach (var awaiting in awaitingBookings)
+                {
+                    awaiting.ConversionStatus = ConversionStatus.Enrolled;
+                }
+
                 // Access restoration: full payment on THIS invoice auto-lifts the matching fee
                 // suspension -- but only when nothing else in that same scope is outstanding.
                 // A child-specific invoice (ChildId set) only ever checks/lifts that child's own
@@ -862,6 +874,33 @@ namespace iucs.readernest.application.Services
         }
 
 
+        /// <summary>
+        /// The amount a parent pay-now attempt charges: the whole outstanding balance when they
+        /// didn't pick one, otherwise their chosen installment -- which must be at least 1 and
+        /// never more than what's still owed (a gateway would happily take the overpayment; the
+        /// invoice must not).
+        /// </summary>
+        private static decimal ResolveChargeAmount(decimal outstanding, decimal? requested)
+        {
+            if (requested is null)
+            {
+                return outstanding;
+            }
+
+            var amount = Math.Round(requested.Value, 2, MidpointRounding.AwayFromZero);
+            if (amount < 1m)
+            {
+                throw new DomainValidationException("Enter an amount of at least 1.");
+            }
+
+            if (amount > outstanding)
+            {
+                throw new DomainValidationException($"The amount can't be more than the outstanding balance of {outstanding:0.00}.");
+            }
+
+            return amount;
+        }
+
         public async Task<ParentPaymentResultDto> InitiateParentPaymentAsync(
             Guid parentUserId,
             Guid invoiceId,
@@ -882,7 +921,10 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException($"Invoice '{invoice.InvoiceNumber}' is already {invoice.Status}.");
             }
 
-            var remaining = invoice.Amount - invoice.AmountPaid;
+            var outstanding = invoice.Amount - invoice.AmountPaid;
+            // Installment plans: the parent may pay any part of the balance now. Cash intents and
+            // gateway checkouts below both charge this amount, not the whole balance.
+            var remaining = ResolveChargeAmount(outstanding, request.Amount);
             var methodKey = request.MethodKey.Trim().ToLowerInvariant();
 
             if (methodKey == "cash")
@@ -932,7 +974,7 @@ namespace iucs.readernest.application.Services
             var account = await _unitOfWork.Repository<PaymentAccount>().GetByIdAsync(invoice.PaymentAccountId, cancellationToken)
                 ?? throw new NotFoundException(nameof(PaymentAccount), invoice.PaymentAccountId);
 
-            var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, methodKey, cancellationToken);
+            var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, methodKey, remaining, cancellationToken);
 
             // Chosen gateway can't start a checkout (turned off / missing keys) → surface the
             // actionable reason; no pending transaction is created.
@@ -995,6 +1037,7 @@ namespace iucs.readernest.application.Services
             var account = await _unitOfWork.Repository<PaymentAccount>().GetByIdAsync(invoice.PaymentAccountId, cancellationToken)
                 ?? throw new NotFoundException(nameof(PaymentAccount), invoice.PaymentAccountId);
 
+            var chargeAmount = ResolveChargeAmount(invoice.Amount - invoice.AmountPaid, request.Amount);
             var checkout = await _paymentGateway.CreateInlineCheckoutAsync(
                 invoice,
                 account,
@@ -1005,6 +1048,7 @@ namespace iucs.readernest.application.Services
                     Email = parent.User.Email,
                     Contact = parent.User.Phone,
                 },
+                chargeAmount,
                 cancellationToken);
 
             if (checkout.UnavailableReason is not null)
@@ -1018,7 +1062,7 @@ namespace iucs.readernest.application.Services
                 {
                     InvoiceId = invoice.Id,
                     PaymentAccountId = invoice.PaymentAccountId,
-                    Amount = invoice.Amount - invoice.AmountPaid,
+                    Amount = chargeAmount,
                     Currency = invoice.Currency,
                     Status = TransactionStatus.Pending,
                     GatewayTransactionId = checkout.OrderId,
@@ -1826,7 +1870,54 @@ namespace iucs.readernest.application.Services
             var account = await _unitOfWork.Repository<PaymentAccount>().GetByIdAsync(invoice.PaymentAccountId, cancellationToken)
                 ?? throw new NotFoundException(nameof(PaymentAccount), invoice.PaymentAccountId);
 
-            var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, cancellationToken: cancellationToken);
+            // Most department accounts are "Cash" (no gateway of their own). A link staff send a
+            // parent must still be a real online checkout, so fall back to whichever online
+            // gateway is live — the same routing parent Pay Now already does by method key.
+            var providerLive = !string.Equals(account.GatewayProvider, "cash", StringComparison.OrdinalIgnoreCase)
+                && await _paymentGateway.IsMethodConfiguredAsync(account.GatewayProvider, cancellationToken);
+            string? methodKey = null;
+            if (!providerLive)
+            {
+                var gatewayKeys = await _unitOfWork.Repository<Integration>().Query()
+                    .Where(i => i.Category == IntegrationCategory.PaymentGateway && i.IsEnabled && i.Key != "cash")
+                    .OrderBy(i => i.Name)
+                    .Select(i => i.Key)
+                    .ToListAsync(cancellationToken);
+                foreach (var key in gatewayKeys)
+                {
+                    if (await _paymentGateway.IsMethodConfiguredAsync(key, cancellationToken))
+                    {
+                        methodKey = key;
+                        break;
+                    }
+                }
+            }
+
+            var outstanding = invoice.Amount - invoice.AmountPaid;
+            var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, methodKey, cancellationToken: cancellationToken);
+            if (link.UnavailableReason is not null)
+            {
+                throw new DomainValidationException(link.UnavailableReason);
+            }
+
+            // The gateway's "paid" webhook (and the parent's own status check) settle a payment
+            // only through a pending transaction carrying the link's reference. Without this a
+            // parent paying a staff-sent link was never credited. Not recorded for the portal
+            // fallback link (no gateway live) — that just opens Pay Now, which records its own.
+            if (providerLive || methodKey is not null)
+            {
+                await _unitOfWork.Repository<PaymentTransaction>().AddAsync(
+                    new PaymentTransaction
+                    {
+                        InvoiceId = invoice.Id,
+                        PaymentAccountId = invoice.PaymentAccountId,
+                        Amount = outstanding,
+                        Currency = invoice.Currency,
+                        Status = TransactionStatus.Pending,
+                        GatewayTransactionId = link.GatewayReference,
+                    },
+                    cancellationToken);
+            }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(Invoice), invoice.Id.ToString(),
                 changesJson: $"{{\"paymentLinkRef\":\"{link.GatewayReference}\"}}", cancellationToken: cancellationToken);

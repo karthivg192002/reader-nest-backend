@@ -94,6 +94,7 @@ builder.Services.AddScoped<IPaymentGateway, iucs.readernest.api.Services.Payment
 builder.Services.AddHostedService<BillingBackgroundService>();
 // Session reminders, delayed-session alerts
 builder.Services.AddHostedService<SessionReminderBackgroundService>();
+builder.Services.AddHostedService<AbandonedClassCompletionBackgroundService>();
 // Automatic no-show detection: flags a session once its grace period elapses with one
 // side never having joined, instead of relying solely on a human clicking "Mark No-Show"
 builder.Services.AddHostedService<NoShowDetectionBackgroundService>();
@@ -198,7 +199,27 @@ builder.Services
                 }
 
                 var authService = context.HttpContext.RequestServices.GetRequiredService<IAuthService>();
-                var access = await authService.GetCurrentAccessAsync(userId);
+                iucs.readernest.application.Dto.Auth.CurrentAccessSnapshot? access;
+                try
+                {
+                    access = await authService.GetCurrentAccessAsync(userId, context.HttpContext.RequestAborted);
+                }
+                catch (Exception ex) when (!context.HttpContext.RequestAborted.IsCancellationRequested)
+                {
+                    // A DB hiccup here (slow query, exhausted connection pool under class-time
+                    // load) used to throw out of this handler, which JwtBearer turns into a 401 —
+                    // and the frontend treats any 401 as "session over": it clears the token and
+                    // hard-redirects to /login, tearing down a live class mid-lesson. Reported
+                    // live as "the LMS kept throwing me out" during an evening batch. The token
+                    // itself already passed signature + lifetime validation, so fall back to the
+                    // claims it was issued with for this one request; the next request that
+                    // reaches the DB re-applies any revocation as before.
+                    context.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>()
+                        .CreateLogger("JwtBearer")
+                        .LogWarning(ex, "Live access re-check failed for user {UserId}; using token claims for this request.", userId);
+                    return;
+                }
+
                 if (access is null || access.Status != UserStatus.Active)
                 {
                     context.Fail("This account is no longer active.");
@@ -405,5 +426,12 @@ app.MapGet("/m/{slug}", async (
 });
 
 await DatabaseInitializer.InitializeAsync(app.Services, app.Configuration);
+
+// Browser-direct (multipart) uploads need the bucket itself to allow the portal's origin.
+if (app.Services.GetService<iucs.readernest.application.Common.Interfaces.IDirectUploadStorage>() is iucs.readernest.api.Services.S3FileStorage s3Storage)
+{
+    _ = Task.Run(() => s3Storage.EnsureBrowserUploadCorsAsync(
+        allowedOrigins, app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("BucketCors")));
+}
 
 app.Run();

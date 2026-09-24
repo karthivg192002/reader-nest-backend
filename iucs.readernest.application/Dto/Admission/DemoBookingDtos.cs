@@ -5,6 +5,10 @@ namespace iucs.readernest.application.Dto.Admission
 {
     public class DemoParticipantDto
     {
+        /// <summary>Existing participant's id — set on reads, and echoed back on an edit so the
+        /// invitee keeps their own join link (it's keyed by this id). Null for a new invitee.</summary>
+        public Guid? Id { get; set; }
+
         [Required]
         [MaxLength(200)]
         public string Name { get; set; } = null!;
@@ -30,10 +34,10 @@ namespace iucs.readernest.application.Dto.Admission
         [MaxLength(200)]
         public string ParentName { get; set; } = null!;
 
-        [Required]
-        [EmailAddress]
+        /// <summary>Optional: some parents want everything on WhatsApp. When blank,
+        /// <see cref="ParentPhone"/> is required (it becomes their portal login).</summary>
         [MaxLength(256)]
-        public string ParentEmail { get; set; } = null!;
+        public string? ParentEmail { get; set; }
 
         [MaxLength(20)]
         public string? ParentPhone { get; set; }
@@ -57,6 +61,39 @@ namespace iucs.readernest.application.Dto.Admission
         public DateTime ScheduledEndAtUtc { get; set; }
 
         /// <summary>Additional invitees — demos are flexible for more than one parent to join.</summary>
+        public List<DemoParticipantDto> Participants { get; set; } = [];
+    }
+
+    /// <summary>
+    /// Corrects a booking's parent/child details (a mistyped email being the usual case) without
+    /// touching its slot, teacher or pipeline stage — those have their own endpoints (reschedule,
+    /// reassign, conversion-status). <see cref="Participants"/> replaces the extra-invitee list:
+    /// entries carrying an existing Id are updated in place, new ones are added, and any not sent
+    /// back are removed.
+    /// </summary>
+    public class UpdateDemoBookingRequest
+    {
+        [Required]
+        [MaxLength(200)]
+        public string ParentName { get; set; } = null!;
+
+        /// <summary>Optional: some parents want everything on WhatsApp. When blank,
+        /// <see cref="ParentPhone"/> is required (it becomes their portal login).</summary>
+        [MaxLength(256)]
+        public string? ParentEmail { get; set; }
+
+        [MaxLength(20)]
+        public string? ParentPhone { get; set; }
+
+        [Required]
+        [MaxLength(200)]
+        public string ChildName { get; set; } = null!;
+
+        [Range(1, 18)]
+        public int? ChildAge { get; set; }
+
+        public Guid? DepartmentId { get; set; }
+
         public List<DemoParticipantDto> Participants { get; set; } = [];
     }
 
@@ -122,6 +159,21 @@ namespace iucs.readernest.application.Dto.Admission
         public DateTime? ParentJoinedAtUtc { get; set; }
 
         public IReadOnlyList<DemoParticipantDto> Participants { get; set; } = [];
+
+        /// <summary>Only on the response that just created a no-email parent's mobile login
+        /// (moving the lead to ReadyForEnrollment): the PIN for staff to send on WhatsApp.</summary>
+        public IssuedParentLoginDto? IssuedLogin { get; set; }
+    }
+
+    public class IssuedParentLoginDto
+    {
+        public string LoginId { get; set; } = null!;
+
+        public string TemporaryPin { get; set; } = null!;
+
+        public string LoginUrl { get; set; } = null!;
+
+        public string WhatsAppMessage { get; set; } = null!;
     }
 
     public class ReassignTeacherRequest

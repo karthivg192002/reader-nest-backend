@@ -105,6 +105,16 @@ namespace iucs.readernest.api.Controllers
             return File(stream, mimeType, $"{resource.Title}{Path.GetExtension(resource.FileUrl)}");
         }
 
+        /// <summary>Files a registered class recording into a Content and Resources folder by
+        /// reference (no copy), so it can be shared to many parents/batches like any other file.</summary>
+        [HttpPost("from-recording")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
+        [HasPermission(PermissionModule.ContentAccessManagement, PermissionAction.Create)]
+        public async Task<ActionResult<ResourceDto>> AddFromRecording(AddRecordingResourceRequest request, CancellationToken cancellationToken)
+        {
+            return Ok(await _resourceService.CreateFromRecordingAsync(request, cancellationToken));
+        }
+
         [HttpPost]
         [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
         [HasPermission(PermissionModule.ContentAccessManagement, PermissionAction.Create)]
@@ -209,6 +219,16 @@ namespace iucs.readernest.api.Controllers
         public async Task<IActionResult> Download(Guid id, CancellationToken cancellationToken)
         {
             var resource = await _resourceService.GetForDownloadAsync(id, cancellationToken);
+
+            // A recording filed into Resources by reference points at the recording's own https
+            // URL, not a key in this app's storage — hand that URL back as JSON (the client
+            // fetches this with an auth header, which a cross-origin redirect would break).
+            if (Uri.TryCreate(resource.FileUrl, UriKind.Absolute, out var external)
+                && (external.Scheme == Uri.UriSchemeHttps || external.Scheme == Uri.UriSchemeHttp))
+            {
+                return Ok(new { externalUrl = external.ToString() });
+            }
+
             var stream = await _fileStorage.OpenReadAsync(resource.FileUrl, cancellationToken);
 
             if (stream is null)
@@ -218,6 +238,53 @@ namespace iucs.readernest.api.Controllers
 
             var mimeType = string.IsNullOrWhiteSpace(resource.MimeType) ? "application/octet-stream" : resource.MimeType;
             return File(stream, mimeType, $"{resource.Title}{Path.GetExtension(resource.FileUrl)}");
+        }
+
+        /// <summary>
+        /// A short-lived direct link to view the file inline. Opening a big PDF by first pulling
+        /// every byte through this API into the browser left the new tab blank for as long as that
+        /// took (or forever on a slow link); a presigned storage URL streams straight from the
+        /// bucket. Null when the file isn't something a browser shows inline (Word, PowerPoint...)
+        /// — the client then falls back to /download.
+        /// </summary>
+        [HttpGet("{id:guid}/view-url")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
+        [HasPermission(PermissionModule.ContentAccessManagement, PermissionAction.View)]
+        public async Task<ActionResult<ResourceViewUrlDto>> ViewUrl(Guid id, CancellationToken cancellationToken)
+        {
+            var resource = await _resourceService.GetForDownloadAsync(id, cancellationToken);
+
+            if (Uri.TryCreate(resource.FileUrl, UriKind.Absolute, out var external)
+                && (external.Scheme == Uri.UriSchemeHttps || external.Scheme == Uri.UriSchemeHttp))
+            {
+                return Ok(new ResourceViewUrlDto { Url = external.ToString() });
+            }
+
+            var mime = resource.MimeType ?? string.Empty;
+            var inline = mime == "application/pdf" || mime.StartsWith("image/") || mime.StartsWith("video/")
+                || mime.StartsWith("audio/") || mime == "text/plain";
+            if (!inline)
+            {
+                return Ok(new ResourceViewUrlDto());
+            }
+
+            try
+            {
+                return Ok(new ResourceViewUrlDto { Url = _directUploads.GetReadUrl(resource.FileUrl, TimeSpan.FromMinutes(30), resource.MimeType) });
+            }
+            catch (NotSupportedException)
+            {
+                return Ok(new ResourceViewUrlDto());
+            }
+        }
+
+        [HttpDelete("{id:guid}")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
+        [HasPermission(PermissionModule.ContentAccessManagement, PermissionAction.Delete)]
+        public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
+        {
+            await _resourceService.DeleteAsync(id, cancellationToken);
+            return NoContent();
         }
 
         [HttpPut("{id:guid}")]
