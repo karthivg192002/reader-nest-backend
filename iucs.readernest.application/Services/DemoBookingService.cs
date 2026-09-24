@@ -1,3 +1,4 @@
+using iucs.readernest.application.Common;
 using System.Text.Json;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
@@ -25,7 +26,6 @@ namespace iucs.readernest.application.Services
     {
         private const string ReassignmentAuditEntityName = "DemoBookingTeacherReassignment";
         private const string FollowUpAuditEntityName = "DemoBookingFollowUp";
-        private const string RelationshipManagerRoleName = "Parent Relationship Manager";
 
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
@@ -1429,23 +1429,8 @@ namespace iucs.readernest.application.Services
         /// whole team's. Null for everyone else (Admin, Management, Coordinator, ...) and for
         /// system/background callers with no signed-in user, who keep the unrestricted view.
         /// </summary>
-        private async Task<Guid?> CreatorScopeAsync(CancellationToken cancellationToken)
-        {
-            var userId = _currentUser?.UserId;
-            if (userId is null)
-            {
-                return null;
-            }
-
-            var user = await _unitOfWork.Repository<User>().Query()
-                .Include(u => u.RoleDefinition)
-                .FirstOrDefaultAsync(u => u.Id == userId.Value, cancellationToken);
-            var scoped = user is not null
-                && (user.Role == UserRole.AdmissionTeam
-                    || (user.Role == UserRole.SubAdmin
-                        && string.Equals(user.RoleDefinition?.Name, RelationshipManagerRoleName, StringComparison.OrdinalIgnoreCase)));
-            return scoped ? userId : null;
-        }
+        private Task<Guid?> CreatorScopeAsync(CancellationToken cancellationToken) =>
+            DemoOwnershipScope.GetAsync(_unitOfWork, _currentUser?.UserId, cancellationToken);
 
         /// <summary>Throws NotFound (not Forbidden -- don't confirm it exists) when a scoped user
         /// touches a demo somebody else scheduled.</summary>

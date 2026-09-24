@@ -89,6 +89,18 @@ namespace iucs.readernest.application.Services
                 query = query.Where(s => s.BatchId == batchId.Value);
             }
 
+            // Demos are account-specific (DemoOwnershipScope): an Admission Counselor or RM sees
+            // only the demos they scheduled on Sessions/Calendar/dashboards too, not just on the
+            // demo list — regular classes stay visible to the whole team. A demo's owner is whoever
+            // booked it (DemoBooking.CreatedBy), or whoever scheduled the bare demo session.
+            if (await DemoOwnershipScope.GetAsync(_unitOfWork, _currentUser.UserId, cancellationToken) is { } owner)
+            {
+                var bookings = _unitOfWork.Repository<DemoBooking>().Query();
+                query = query.Where(s => s.Type != SessionType.Demo
+                    || bookings.Any(b => b.ClassSessionId == s.Id && b.CreatedBy == owner)
+                    || (!bookings.Any(b => b.ClassSessionId == s.Id) && s.CreatedBy == owner));
+            }
+
             var sessions = await query.OrderBy(s => s.ScheduledStartAtUtc).ToListAsync(cancellationToken);
             var activeRecordings = await SessionRecordingLookup.ActiveRecordingsBySessionAsync(
                 _unitOfWork, sessions.Select(s => s.Id), cancellationToken);

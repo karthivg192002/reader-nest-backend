@@ -1360,6 +1360,69 @@ namespace iucs.readernest.tests
 
         /// <summary>Seeds a Demo (no batch) session + its DemoBooking, mirroring how the store
         /// flow and admission team create one — used by the demo-join tests below.</summary>
+        /// <summary>
+        /// Client requirement: a demo is visible only to the Admission Counselor or Relationship
+        /// Manager who scheduled it — on the demo list AND on every class list (Sessions, Calendar,
+        /// dashboards). The RM check used to compare RoleDefinition.Name against the preset's
+        /// DisplayName ("Parent Relationship Manager"), so it never matched and RMs saw every demo.
+        /// </summary>
+        [Fact]
+        public async Task Demos_AreVisibleOnlyToTheCounselorOrRmWhoScheduledThem()
+        {
+            var rmRole = await _db.Context.RoleDefinitions.FirstOrDefaultAsync(r => r.Name == DemoOwnershipScope.RelationshipManagerRoleName);
+            if (rmRole is null)
+            {
+                rmRole = new domain.Entities.Users.RoleDefinition { Name = DemoOwnershipScope.RelationshipManagerRoleName, DisplayName = "Parent Relationship Manager", DefaultRoute = "/subadmin" };
+                _db.Context.RoleDefinitions.Add(rmRole);
+            }
+            var counselorA = await _db.SeedUserAsync($"ac-a-{Guid.NewGuid():N}@test.com", "x", UserRole.AdmissionTeam);
+            var counselorB = await _db.SeedUserAsync($"ac-b-{Guid.NewGuid():N}@test.com", "x", UserRole.AdmissionTeam);
+            var rm = await _db.SeedUserAsync($"rm-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
+            rm.RoleDefinitionId = rmRole.Id;
+            var admin = await _db.SeedUserAsync($"adm-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            await _db.Context.SaveChangesAsync();
+
+            _db.CurrentUser.UserId = counselorA.Id;
+            var (demoA, bookingA) = await SeedDemoSessionAsync($"lead-a-{Guid.NewGuid():N}@test.com");
+            _db.CurrentUser.UserId = rm.Id;
+            var (demoR, bookingR) = await SeedDemoSessionAsync($"lead-r-{Guid.NewGuid():N}@test.com");
+            var (_, _, regular) = await SeedBatchWithSessionAsync(totalSessions: 1);
+
+            var from = DateTime.UtcNow.AddDays(-1);
+            var to = DateTime.UtcNow.AddDays(3);
+            async Task<(List<Guid> Demos, List<Guid> Sessions)> SeenBy(Guid userId)
+            {
+                _db.CurrentUser.UserId = userId;
+                var demoService = new DemoBookingService(_db.UnitOfWork, _auditLog, _emailSender, _emailTemplates, new FakeCrmNotifier(), new FakeJitsiTokenService(), _notifications, CreateUserService(), CreateSessionService(), new ConfigurationBuilder().Build(), NullLogger<DemoBookingService>.Instance, _db.CurrentUser);
+                var demos = (await demoService.ListAsync(null)).Select(d => d.Id).ToList();
+                var sessions = (await CreateSessionService().ListAsync(from, to, null, null)).Select(s => s.Id).ToList();
+                return (demos, sessions);
+            }
+
+            var a = await SeenBy(counselorA.Id);
+            Assert.Contains(bookingA.Id, a.Demos);
+            Assert.DoesNotContain(bookingR.Id, a.Demos);
+            Assert.Contains(demoA.Id, a.Sessions);
+            Assert.DoesNotContain(demoR.Id, a.Sessions);
+            Assert.Contains(regular.Id, a.Sessions); // regular classes stay visible to the team
+
+            var r = await SeenBy(rm.Id);
+            Assert.Contains(bookingR.Id, r.Demos);
+            Assert.DoesNotContain(bookingA.Id, r.Demos);
+            Assert.Contains(demoR.Id, r.Sessions);
+            Assert.DoesNotContain(demoA.Id, r.Sessions);
+
+            var b = await SeenBy(counselorB.Id);
+            Assert.DoesNotContain(bookingA.Id, b.Demos);
+            Assert.DoesNotContain(demoA.Id, b.Sessions);
+
+            var all = await SeenBy(admin.Id);
+            Assert.Contains(bookingA.Id, all.Demos);
+            Assert.Contains(bookingR.Id, all.Demos);
+            Assert.Contains(demoA.Id, all.Sessions);
+            Assert.Contains(demoR.Id, all.Sessions);
+        }
+
         private async Task<(ClassSession Session, DemoBooking Booking)> SeedDemoSessionAsync(
             string parentEmail, string? participantEmail = null, DateTime? startAtUtc = null)
         {
