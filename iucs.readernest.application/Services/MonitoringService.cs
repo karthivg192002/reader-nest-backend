@@ -70,6 +70,13 @@ namespace iucs.readernest.application.Services
             // concurrently (confirmed live: this exact crash took down the whole /summary
             // endpoint, not just this one field, the first time these ran side by side).
             var todayRecordings = await GetTodayRecordingSummaryAsync(cancellationToken);
+            var rawAlerts = await alertsTask;
+            // Also sequential for the same shared-DbContext reason as above.
+            var roomLabels = await GetRoomLabelsAsync(
+                rawAlerts.Select(a => a.Labels.TryGetValue("room", out var room) ? room : null)
+                    .OfType<string>()
+                    .ToList(),
+                cancellationToken);
 
             return new MonitoringSummaryDto
             {
@@ -85,13 +92,13 @@ namespace iucs.readernest.application.Services
                 CallQualityIncidentsLookSystemic = CallQualityIncidentParser.LooksSystemic(callQualityIncidents),
                 ConcurrentClassroomUsers = _presenceTracker.TotalConnectedUsers,
                 ActiveClassCount = _presenceTracker.ActiveClassCount,
-                ActiveAlerts = (await alertsTask)
+                ActiveAlerts = rawAlerts
                     .Select(a => new AlertDto
                     {
                         Name = a.Name,
                         Severity = a.Severity,
-                        Summary = a.Summary,
-                        Description = a.Description,
+                        Summary = WithRoomLabel(a.Summary, a.Labels, roomLabels),
+                        Description = WithRoomLabel(a.Description, a.Labels, roomLabels),
                         State = a.State,
                         ActiveSince = a.ActiveSince,
                         Instance = a.Labels.TryGetValue("instance", out var instance) ? instance : null,
@@ -102,6 +109,57 @@ namespace iucs.readernest.application.Services
                 TodayRecordings = todayRecordings,
                 GeneratedAtUtc = DateTime.UtcNow,
             };
+        }
+
+        /// <summary>
+        /// Maps Jitsi room names (the `room` label on call-quality alerts, e.g. PoorConnection) to
+        /// something an admin recognises: the class session's course/batch/teacher, or the owner of a
+        /// personal meeting room. Rooms that match neither are simply left out.
+        /// </summary>
+        private async Task<Dictionary<string, string>> GetRoomLabelsAsync(List<string> rooms, CancellationToken cancellationToken)
+        {
+            var labels = new Dictionary<string, string>();
+            rooms = rooms.Distinct().ToList();
+            if (rooms.Count == 0)
+            {
+                return labels;
+            }
+
+            var sessions = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.MeetingRoomId != null && rooms.Contains(s.MeetingRoomId))
+                .Include(s => s.Batch!).ThenInclude(b => b.Course)
+                .Include(s => s.TeacherProfile).ThenInclude(t => t.User)
+                .ToListAsync(cancellationToken);
+            foreach (var session in sessions.OrderBy(s => s.ScheduledStartAtUtc))
+            {
+                var course = session.Batch?.Course.Name ?? "Demo session";
+                var batch = session.Batch is null ? "" : $" – {session.Batch.Name}";
+                var teacher = $"{session.TeacherProfile.User.FirstName} {session.TeacherProfile.User.LastName}".Trim();
+                // Later sessions win if a room is ever reused.
+                labels[session.MeetingRoomId!] = teacher.Length > 0 ? $"{course}{batch} ({teacher})" : $"{course}{batch}";
+            }
+
+            var personalRooms = rooms.Where(r => !labels.ContainsKey(r)).ToList();
+            if (personalRooms.Count > 0)
+            {
+                var owners = await _unitOfWork.Repository<User>().Query()
+                    .Where(u => u.PersonalMeetingRoomId != null && personalRooms.Contains(u.PersonalMeetingRoomId))
+                    .Select(u => new { u.PersonalMeetingRoomId, u.FirstName, u.LastName })
+                    .ToListAsync(cancellationToken);
+                foreach (var owner in owners)
+                {
+                    labels[owner.PersonalMeetingRoomId!] = $"{$"{owner.FirstName} {owner.LastName}".Trim()}'s personal room";
+                }
+            }
+
+            return labels;
+        }
+
+        private static string WithRoomLabel(string text, IReadOnlyDictionary<string, string> alertLabels, Dictionary<string, string> roomLabels)
+        {
+            return alertLabels.TryGetValue("room", out var room) && roomLabels.TryGetValue(room, out var label)
+                ? text.Replace(room, label)
+                : text;
         }
 
         /// <summary>
