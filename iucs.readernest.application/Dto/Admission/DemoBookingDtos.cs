@@ -159,6 +159,21 @@ namespace iucs.readernest.application.Dto.Admission
         public DateTime? ParentJoinedAtUtc { get; set; }
 
         public IReadOnlyList<DemoParticipantDto> Participants { get; set; } = [];
+
+        /// <summary>Only on the response that just created a no-email parent's mobile login
+        /// (moving the lead to ReadyForEnrollment): the PIN for staff to send on WhatsApp.</summary>
+        public IssuedParentLoginDto? IssuedLogin { get; set; }
+    }
+
+    public class IssuedParentLoginDto
+    {
+        public string LoginId { get; set; } = null!;
+
+        public string TemporaryPin { get; set; } = null!;
+
+        public string LoginUrl { get; set; } = null!;
+
+        public string WhatsAppMessage { get; set; } = null!;
     }
 
     public class ReassignTeacherRequest

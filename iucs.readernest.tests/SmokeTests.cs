@@ -25,6 +25,7 @@ using iucs.readernest.domain.Entities.Admission;
 using iucs.readernest.domain.Entities.Auditing;
 using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Communication;
+using iucs.readernest.domain.Entities.Integrations;
 using iucs.readernest.domain.Entities.Payouts;
 using iucs.readernest.domain.Entities.Quizzes;
 using iucs.readernest.domain.Entities.Resources;
@@ -3895,6 +3896,79 @@ namespace iucs.readernest.tests
             var discounted = await Admit("9222222222", 8000, 2);
             Assert.Equal(8000, discounted.AmountDue);
             Assert.Equal(ConversionStatus.PaymentPending, discounted.Booking.ConversionStatus);
+        }
+
+        [Fact]
+        public async Task ReadyForEnrollment_ForNoEmailParent_HandsStaffTheNewMobileLoginPin()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Meena", ParentPhone = "9333333333", ChildName = "Kid",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+
+            var moved = await demoService.UpdateConversionStatusAsync(demo.Id,
+                new UpdateConversionStatusRequest { ConversionStatus = ConversionStatus.ReadyForEnrollment });
+
+            Assert.NotNull(moved.IssuedLogin);
+            Assert.Equal("9333333333", moved.IssuedLogin!.LoginId);
+            var login = await CreateAuthService().LoginAsync(new LoginRequest { Email = "9333333333", Pin = moved.IssuedLogin.TemporaryPin });
+            Assert.Equal(UserRole.Parent, login.User.Role);
+            Assert.Contains(moved.IssuedLogin.TemporaryPin, moved.IssuedLogin.WhatsAppMessage);
+
+            // Only on the move that created it — a later save never re-shows a PIN.
+            var again = await demoService.UpdateConversionStatusAsync(demo.Id,
+                new UpdateConversionStatusRequest { ConversionStatus = ConversionStatus.ReadyForEnrollment, Note = "follow up" });
+            Assert.Null(again.IssuedLogin);
+        }
+
+        [Fact]
+        public async Task ForgotPin_ByMobileForNoEmailParent_AlertsStaffWhoCanResetPins()
+        {
+            var admin = await _db.SeedUserAsync($"adm-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            var parent = await _db.SeedUserAsync(ParentLogin.PlaceholderEmail("9444444444"), "x", UserRole.Parent);
+            parent.Phone = "9444444444";
+            await _db.Context.SaveChangesAsync();
+            _emailSender.Sent.Clear();
+
+            await CreateAuthService().RequestPinResetAsync(new ForgotPinRequest { Email = "+91 94444 44444" });
+
+            Assert.Contains(_emailSender.Sent, m => m.To == admin.Email && m.Subject.Contains("PIN reset requested"));
+            Assert.DoesNotContain(_emailSender.Sent, m => m.To == parent.Email);
+            Assert.False(await _db.Context.Set<PinResetToken>().AnyAsync(t => t.UserId == parent.Id));
+        }
+
+        [Fact]
+        public async Task StaffPaymentLink_WhenPaid_IsCreditedByTheGatewayWebhook()
+        {
+            // Regression: a link made by staff (Payments "Payment link", manual admission) had no
+            // pending transaction, so the gateway's "paid" webhook found nothing and the parent's
+            // money was never credited to the invoice.
+            var parentUser = await _db.SeedUserAsync($"lnk-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            _db.Context.AddRange(parentProfile,
+                new PaymentAccount { Name = "Phonics Cash", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "Cash", GatewayAccountRef = "c" },
+                new Integration { Key = "razorpay", Name = "Razorpay", Category = IntegrationCategory.PaymentGateway, IsEnabled = true, ConfigJson = "{}" });
+            await _db.Context.SaveChangesAsync();
+            var billing = CreateBillingService();
+            var invoice = await billing.CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = parentProfile.Id, DepartmentId = WellKnownDepartments.Phonics,
+                Amount = 3000, DueDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(7),
+            });
+
+            var link = await billing.CreatePaymentLinkAsync(invoice.Id);
+            await billing.SettleGatewayTransactionAsync(link.GatewayReference, true, "pay_link_1", null);
+
+            var paid = await _db.Context.Invoices.AsNoTracking().SingleAsync(i => i.Id == invoice.Id);
+            Assert.Equal(InvoiceStatus.Paid, paid.Status);
+            Assert.Equal(3000, paid.AmountPaid);
         }
 
         [Fact]

@@ -155,16 +155,52 @@ namespace iucs.readernest.application.Services
             return candidates.Count == 1 ? candidates[0] : null;
         }
 
+        /// <summary>
+        /// Alerts everyone able to reset a PIN (Admins, and Sub Admins with User Management edit)
+        /// in their notification feed — the forgot-PIN path for parents with no email.
+        /// </summary>
+        private async Task NotifyPinResetStaffAsync(User parent, CancellationToken cancellationToken)
+        {
+            var module = PermissionModule.UserManagement.ToString();
+            var editors = _unitOfWork.Repository<SubAdminPermission>().Query()
+                .Where(p => p.Module == module && p.CanEdit)
+                .Select(p => p.UserId);
+            var staff = await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.Status == UserStatus.Active
+                    && (u.Role == UserRole.Admin || (u.Role == UserRole.SubAdmin && editors.Contains(u.Id))))
+                .ToListAsync(cancellationToken);
+
+            var name = $"{parent.FirstName} {parent.LastName}".Trim();
+            var subject = $"PIN reset requested: {name} ({parent.Phone})";
+            var body =
+                $"<p>{System.Net.WebUtility.HtmlEncode(name)} (mobile {System.Net.WebUtility.HtmlEncode(parent.Phone ?? "")}) " +
+                "tapped <b>Forgot PIN</b> but has no email to receive a reset link.</p>" +
+                "<p>Open <b>Users</b>, find this parent, use <b>Reset PIN</b> and send them the new PIN on WhatsApp.</p>";
+            foreach (var member in staff)
+            {
+                await _notificationService.SendEmailAsync(
+                    member.Id, member.Email, NotificationType.General, subject, body, cancellationToken: cancellationToken);
+            }
+        }
+
         public async Task RequestPinResetAsync(ForgotPinRequest request, CancellationToken cancellationToken = default)
         {
-            var email = request.Email.Trim().ToLowerInvariant();
-            var user = await _unitOfWork.Repository<User>()
-                .FirstOrDefaultAsync(u => u.Email == email, cancellationToken);
+            // Same identifier as the login box: email, or a parent's mobile number.
+            var user = await FindLoginUserAsync(request.Email, cancellationToken);
 
             // Deliberately silent on "no such account" / inactive — an anonymous caller must
             // never be able to use this endpoint to discover which emails have accounts here.
             if (user is null || user.Status == UserStatus.Inactive)
             {
+                return;
+            }
+
+            // A WhatsApp-only parent has no email to receive a reset link (and SMS/WhatsApp
+            // sending may be off), so ask the staff who can reset PINs to do it and send the new
+            // one on WhatsApp. The response is identical either way (no account discovery).
+            if (!ParentLogin.IsDeliverable(user.Email))
+            {
+                await NotifyPinResetStaffAsync(user, cancellationToken);
                 return;
             }
 

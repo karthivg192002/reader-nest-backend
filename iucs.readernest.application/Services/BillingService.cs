@@ -9,6 +9,7 @@ using iucs.readernest.domain.Common;
 using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Admission;
 using iucs.readernest.domain.Entities.Billing;
+using iucs.readernest.domain.Entities.Integrations;
 using iucs.readernest.domain.Entities.Settings;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
@@ -1869,7 +1870,54 @@ namespace iucs.readernest.application.Services
             var account = await _unitOfWork.Repository<PaymentAccount>().GetByIdAsync(invoice.PaymentAccountId, cancellationToken)
                 ?? throw new NotFoundException(nameof(PaymentAccount), invoice.PaymentAccountId);
 
-            var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, cancellationToken: cancellationToken);
+            // Most department accounts are "Cash" (no gateway of their own). A link staff send a
+            // parent must still be a real online checkout, so fall back to whichever online
+            // gateway is live — the same routing parent Pay Now already does by method key.
+            var providerLive = !string.Equals(account.GatewayProvider, "cash", StringComparison.OrdinalIgnoreCase)
+                && await _paymentGateway.IsMethodConfiguredAsync(account.GatewayProvider, cancellationToken);
+            string? methodKey = null;
+            if (!providerLive)
+            {
+                var gatewayKeys = await _unitOfWork.Repository<Integration>().Query()
+                    .Where(i => i.Category == IntegrationCategory.PaymentGateway && i.IsEnabled && i.Key != "cash")
+                    .OrderBy(i => i.Name)
+                    .Select(i => i.Key)
+                    .ToListAsync(cancellationToken);
+                foreach (var key in gatewayKeys)
+                {
+                    if (await _paymentGateway.IsMethodConfiguredAsync(key, cancellationToken))
+                    {
+                        methodKey = key;
+                        break;
+                    }
+                }
+            }
+
+            var outstanding = invoice.Amount - invoice.AmountPaid;
+            var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, methodKey, cancellationToken: cancellationToken);
+            if (link.UnavailableReason is not null)
+            {
+                throw new DomainValidationException(link.UnavailableReason);
+            }
+
+            // The gateway's "paid" webhook (and the parent's own status check) settle a payment
+            // only through a pending transaction carrying the link's reference. Without this a
+            // parent paying a staff-sent link was never credited. Not recorded for the portal
+            // fallback link (no gateway live) — that just opens Pay Now, which records its own.
+            if (providerLive || methodKey is not null)
+            {
+                await _unitOfWork.Repository<PaymentTransaction>().AddAsync(
+                    new PaymentTransaction
+                    {
+                        InvoiceId = invoice.Id,
+                        PaymentAccountId = invoice.PaymentAccountId,
+                        Amount = outstanding,
+                        Currency = invoice.Currency,
+                        Status = TransactionStatus.Pending,
+                        GatewayTransactionId = link.GatewayReference,
+                    },
+                    cancellationToken);
+            }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(Invoice), invoice.Id.ToString(),
                 changesJson: $"{{\"paymentLinkRef\":\"{link.GatewayReference}\"}}", cancellationToken: cancellationToken);
