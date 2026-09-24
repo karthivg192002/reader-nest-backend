@@ -44,11 +44,12 @@ namespace iucs.readernest.api.Services.Payments
             Invoice invoice,
             PaymentAccount account,
             IReadOnlyDictionary<string, string?> config,
+            decimal? amount,
             CancellationToken cancellationToken)
         {
             var keyId = KeyId(config)!;
             var keySecret = KeySecret(config)!;
-            var remaining = invoice.Amount - invoice.AmountPaid;
+            var remaining = amount ?? invoice.Amount - invoice.AmountPaid;
             var brandName = await BrandSettings.GetNameAsync(_unitOfWork, cancellationToken);
 
             var payload = JsonSerializer.Serialize(new
@@ -100,11 +101,12 @@ namespace iucs.readernest.api.Services.Payments
             PaymentAccount account,
             InlinePayerInfo payer,
             IReadOnlyDictionary<string, string?> config,
+            decimal? amount,
             CancellationToken cancellationToken)
         {
             var keyId = KeyId(config)!;
             var keySecret = KeySecret(config)!;
-            var remaining = invoice.Amount - invoice.AmountPaid;
+            var remaining = amount ?? invoice.Amount - invoice.AmountPaid;
             var amountMinor = (long)Math.Round(remaining * 100m); // paise
             var brandName = await BrandSettings.GetNameAsync(_unitOfWork, cancellationToken);
 

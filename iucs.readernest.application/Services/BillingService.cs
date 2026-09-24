@@ -862,6 +862,33 @@ namespace iucs.readernest.application.Services
         }
 
 
+        /// <summary>
+        /// The amount a parent pay-now attempt charges: the whole outstanding balance when they
+        /// didn't pick one, otherwise their chosen installment -- which must be at least 1 and
+        /// never more than what's still owed (a gateway would happily take the overpayment; the
+        /// invoice must not).
+        /// </summary>
+        private static decimal ResolveChargeAmount(decimal outstanding, decimal? requested)
+        {
+            if (requested is null)
+            {
+                return outstanding;
+            }
+
+            var amount = Math.Round(requested.Value, 2, MidpointRounding.AwayFromZero);
+            if (amount < 1m)
+            {
+                throw new DomainValidationException("Enter an amount of at least 1.");
+            }
+
+            if (amount > outstanding)
+            {
+                throw new DomainValidationException($"The amount can't be more than the outstanding balance of {outstanding:0.00}.");
+            }
+
+            return amount;
+        }
+
         public async Task<ParentPaymentResultDto> InitiateParentPaymentAsync(
             Guid parentUserId,
             Guid invoiceId,
@@ -882,7 +909,10 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException($"Invoice '{invoice.InvoiceNumber}' is already {invoice.Status}.");
             }
 
-            var remaining = invoice.Amount - invoice.AmountPaid;
+            var outstanding = invoice.Amount - invoice.AmountPaid;
+            // Installment plans: the parent may pay any part of the balance now. Cash intents and
+            // gateway checkouts below both charge this amount, not the whole balance.
+            var remaining = ResolveChargeAmount(outstanding, request.Amount);
             var methodKey = request.MethodKey.Trim().ToLowerInvariant();
 
             if (methodKey == "cash")
@@ -932,7 +962,7 @@ namespace iucs.readernest.application.Services
             var account = await _unitOfWork.Repository<PaymentAccount>().GetByIdAsync(invoice.PaymentAccountId, cancellationToken)
                 ?? throw new NotFoundException(nameof(PaymentAccount), invoice.PaymentAccountId);
 
-            var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, methodKey, cancellationToken);
+            var link = await _paymentGateway.CreatePaymentLinkAsync(invoice, account, methodKey, remaining, cancellationToken);
 
             // Chosen gateway can't start a checkout (turned off / missing keys) → surface the
             // actionable reason; no pending transaction is created.
@@ -995,6 +1025,7 @@ namespace iucs.readernest.application.Services
             var account = await _unitOfWork.Repository<PaymentAccount>().GetByIdAsync(invoice.PaymentAccountId, cancellationToken)
                 ?? throw new NotFoundException(nameof(PaymentAccount), invoice.PaymentAccountId);
 
+            var chargeAmount = ResolveChargeAmount(invoice.Amount - invoice.AmountPaid, request.Amount);
             var checkout = await _paymentGateway.CreateInlineCheckoutAsync(
                 invoice,
                 account,
@@ -1005,6 +1036,7 @@ namespace iucs.readernest.application.Services
                     Email = parent.User.Email,
                     Contact = parent.User.Phone,
                 },
+                chargeAmount,
                 cancellationToken);
 
             if (checkout.UnavailableReason is not null)
@@ -1018,7 +1050,7 @@ namespace iucs.readernest.application.Services
                 {
                     InvoiceId = invoice.Id,
                     PaymentAccountId = invoice.PaymentAccountId,
-                    Amount = invoice.Amount - invoice.AmountPaid,
+                    Amount = chargeAmount,
                     Currency = invoice.Currency,
                     Status = TransactionStatus.Pending,
                     GatewayTransactionId = checkout.OrderId,
