@@ -107,6 +107,8 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("Demo end time must be after the start time.");
             }
 
+            var parentEmail = ParentLogin.ResolveLoginEmail(request.ParentEmail, request.ParentPhone);
+
             // Picking a free teacher and booking them into the slot is one indivisible decision:
             // the "nobody overlaps this slot" read is only worth anything if no one else can
             // slip a conflicting session in before this one is committed. There is no single
@@ -169,8 +171,8 @@ namespace iucs.readernest.application.Services
                 {
                     ClassSession = newSession,
                     ParentName = request.ParentName.Trim(),
-                    ParentEmail = request.ParentEmail.Trim().ToLowerInvariant(),
-                    ParentPhone = request.ParentPhone,
+                    ParentEmail = parentEmail,
+                    ParentPhone = string.IsNullOrWhiteSpace(request.ParentPhone) ? null : request.ParentPhone.Trim(),
                     ChildName = request.ChildName.Trim(),
                     ChildAge = request.ChildAge,
                     DepartmentId = request.DepartmentId,
@@ -250,7 +252,7 @@ namespace iucs.readernest.application.Services
             // usually a mistyped parent email, so the corrected one needs the link sent to it.
             var newAddresses = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            var parentEmail = request.ParentEmail.Trim().ToLowerInvariant();
+            var parentEmail = ParentLogin.ResolveLoginEmail(request.ParentEmail, request.ParentPhone);
             if (parentEmail != booking.ParentEmail)
             {
                 newAddresses.Add(parentEmail);
@@ -565,6 +567,8 @@ namespace iucs.readernest.application.Services
         /// </summary>
         private async Task EnsureParentAccountAsync(DemoBooking booking, CancellationToken cancellationToken)
         {
+            // A no-email parent's booking already carries their internal login key
+            // (ParentLogin.ResolveLoginEmail), so they get a mobile-number login the same way.
             var email = booking.ParentEmail.Trim().ToLowerInvariant();
             var alreadyHasAccount = await _unitOfWork.Repository<User>().ExistsAsync(u => u.Email == email, cancellationToken);
             if (alreadyHasAccount)

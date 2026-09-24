@@ -34,10 +34,10 @@ namespace iucs.readernest.application.Dto.Admission
         [MaxLength(200)]
         public string ParentName { get; set; } = null!;
 
-        [Required]
-        [EmailAddress]
+        /// <summary>Optional: some parents want everything on WhatsApp. When blank,
+        /// <see cref="ParentPhone"/> is required (it becomes their portal login).</summary>
         [MaxLength(256)]
-        public string ParentEmail { get; set; } = null!;
+        public string? ParentEmail { get; set; }
 
         [MaxLength(20)]
         public string? ParentPhone { get; set; }
@@ -77,10 +77,10 @@ namespace iucs.readernest.application.Dto.Admission
         [MaxLength(200)]
         public string ParentName { get; set; } = null!;
 
-        [Required]
-        [EmailAddress]
+        /// <summary>Optional: some parents want everything on WhatsApp. When blank,
+        /// <see cref="ParentPhone"/> is required (it becomes their portal login).</summary>
         [MaxLength(256)]
-        public string ParentEmail { get; set; } = null!;
+        public string? ParentEmail { get; set; }
 
         [MaxLength(20)]
         public string? ParentPhone { get; set; }

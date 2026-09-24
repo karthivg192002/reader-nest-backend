@@ -1,3 +1,4 @@
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Auth;
@@ -48,9 +49,7 @@ namespace iucs.readernest.application.Services
 
         public async Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default)
         {
-            var email = request.Email.Trim().ToLowerInvariant();
-            var user = await _unitOfWork.Repository<User>()
-                .FirstOrDefaultAsync(u => u.Email == email, cancellationToken);
+            var user = await FindLoginUserAsync(request.Email, cancellationToken);
 
             if (user is not null && user.LockoutEndUtc is { } lockoutEnd && lockoutEnd > DateTime.UtcNow)
             {
@@ -70,7 +69,7 @@ namespace iucs.readernest.application.Services
                     await _unitOfWork.SaveChangesAsync(cancellationToken);
                 }
 
-                throw new UnauthorizedException("Invalid email or PIN.");
+                throw new UnauthorizedException("Invalid email/mobile number or PIN.");
             }
 
             if (user.Status == UserStatus.Inactive)
@@ -128,6 +127,32 @@ namespace iucs.readernest.application.Services
                 Status = user.Status,
                 Permissions = await LoadPermissionClaimsAsync(user, cancellationToken),
             };
+        }
+
+        /// <summary>
+        /// The login box takes an email OR a parent's mobile number — parents with no email are
+        /// set up to sign in with their phone (ParentLogin). Phone login is for Parent accounts
+        /// only; a number shared by more than one parent account is ambiguous, so it returns
+        /// null (the caller's generic "invalid" error) rather than guessing which account.
+        /// Tracked, because a failed attempt updates the lockout counters on it.
+        /// </summary>
+        private async Task<User?> FindLoginUserAsync(string identifier, CancellationToken cancellationToken)
+        {
+            var value = identifier.Trim();
+            if (!ParentLogin.LooksLikePhone(value))
+            {
+                var email = value.ToLowerInvariant();
+                return await _unitOfWork.Repository<User>().FirstOrDefaultAsync(u => u.Email == email, cancellationToken);
+            }
+
+            var phone = ParentLogin.NormalizePhone(value)!;
+            var lastFour = phone[^4..];
+            var candidates = (await _unitOfWork.Repository<User>().TrackedQuery()
+                    .Where(u => u.Role == UserRole.Parent && u.Phone != null && u.Phone.Contains(lastFour))
+                    .ToListAsync(cancellationToken))
+                .Where(u => ParentLogin.NormalizePhone(u.Phone) == phone)
+                .ToList();
+            return candidates.Count == 1 ? candidates[0] : null;
         }
 
         public async Task RequestPinResetAsync(ForgotPinRequest request, CancellationToken cancellationToken = default)

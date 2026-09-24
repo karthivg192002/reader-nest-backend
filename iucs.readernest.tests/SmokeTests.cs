@@ -3209,6 +3209,39 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task Login_ParentCanSignInWithMobileNumber_InAnyFormat()
+        {
+            var parent = await _db.SeedUserAsync(ParentLogin.PlaceholderEmail("9876543210"), _hasher.Hash("4821"), UserRole.Parent);
+            parent.Phone = "+91 98765 43210";
+            await _db.Context.SaveChangesAsync();
+
+            var response = await CreateAuthService().LoginAsync(new LoginRequest { Email = "09876-543210", Pin = "4821" });
+            Assert.Equal(parent.Id, response.User.Id);
+
+            await Assert.ThrowsAsync<UnauthorizedException>(() =>
+                CreateAuthService().LoginAsync(new LoginRequest { Email = "9876543210", Pin = "0000" }));
+        }
+
+        [Fact]
+        public async Task Login_ByMobileNumber_IsParentOnly_AndRefusesAnAmbiguousNumber()
+        {
+            var staff = await _db.SeedUserAsync("staff@test.com", _hasher.Hash("4821"), UserRole.Teacher);
+            staff.Phone = "9000000001";
+            var a = await _db.SeedUserAsync("a@test.com", _hasher.Hash("4821"), UserRole.Parent);
+            var b = await _db.SeedUserAsync("b@test.com", _hasher.Hash("4821"), UserRole.Parent);
+            a.Phone = "9000000002";
+            b.Phone = "+91 9000000002";
+            await _db.Context.SaveChangesAsync();
+
+            await Assert.ThrowsAsync<UnauthorizedException>(() =>
+                CreateAuthService().LoginAsync(new LoginRequest { Email = "9000000001", Pin = "4821" }));
+            await Assert.ThrowsAsync<UnauthorizedException>(() =>
+                CreateAuthService().LoginAsync(new LoginRequest { Email = "9000000002", Pin = "4821" }));
+            // Email login is unaffected.
+            Assert.Equal(a.Id, (await CreateAuthService().LoginAsync(new LoginRequest { Email = "a@test.com", Pin = "4821" })).User.Id);
+        }
+
+        [Fact]
         public async Task Login_Fails_WithWrongPin()
         {
             await _db.SeedUserAsync("admin@test.com", _hasher.Hash("4821"), UserRole.Admin);
@@ -3730,6 +3763,86 @@ namespace iucs.readernest.tests
             // go stale (and 404) independently of the teacher's own always-fresh join.
             var email = Assert.Single(_emailSender.Sent, e => e.To == "lead@test.com");
             Assert.Contains($"https://api.thereadernest.in/api/demo-bookings/{dto.Id}/join", email.Body);
+        }
+
+        [Fact]
+        public async Task CreateDemoBooking_WithoutEmail_NeedsAMobileNumber_AndKeysTheLeadByIt()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+            var start = DateTime.UtcNow.AddDays(1);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => CreateDemoBookingService().CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "No Contact", ChildName = "Kid", TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            }));
+
+            var dto = await CreateDemoBookingService().CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "WhatsApp Parent", ParentEmail = "", ParentPhone = "+91 98765 43210", ChildName = "Kid",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+            Assert.Equal(ParentLogin.PlaceholderEmail("9876543210"), dto.ParentEmail);
+            Assert.False(ParentLogin.IsDeliverable(dto.ParentEmail));
+        }
+
+        [Fact]
+        public async Task ManualAdmission_ForNoEmailParent_CreatesPhoneLogin_InvoiceAndLink_ThenEnrollsOnFullPayment()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var plan = new PackagePlan { Name = "Monthly", BillingType = BillingType.Subscription, BillingCycle = BillingCycle.Monthly, Price = 2000 };
+            var account = new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" };
+            _db.Context.AddRange(teacher, plan, account);
+            await _db.Context.SaveChangesAsync();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demoService = CreateDemoBookingService();
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Asha Rao", ParentPhone = "9876543210", ChildName = "Riya",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+
+            var billing = CreateBillingService();
+            var admission = new ManualAdmissionService(
+                _db.UnitOfWork, demoService, CreateUserService(), CreateEnrollmentService(), billing,
+                _auditLog, new ConfigurationBuilder().Build(), NullLogger<ManualAdmissionService>.Instance);
+            var result = await admission.AdmitAsync(demo.Id, new ManualAdmissionRequest
+            {
+                ParentName = "Asha Rao", ParentPhone = "9876543210",
+                ChildFirstName = "Riya", ChildLastName = "Rao", ChildDateOfBirth = new DateOnly(2018, 5, 1),
+                PackagePlanId = plan.Id,
+            });
+
+            Assert.Equal("9876543210", result.LoginId);
+            Assert.Matches(@"^\d{4}$", result.TemporaryPin!);
+            Assert.Equal(2000, result.AmountDue);
+            Assert.NotNull(result.PaymentLinkUrl);
+            Assert.Contains(result.PaymentLinkUrl!, result.WhatsAppMessage);
+            Assert.Contains(result.TemporaryPin!, result.WhatsAppMessage);
+            Assert.Equal(ConversionStatus.PaymentPending, result.Booking.ConversionStatus);
+
+            // The parent signs in with their mobile number and the PIN from the WhatsApp message.
+            var login = await CreateAuthService().LoginAsync(new LoginRequest { Email = "98765 43210", Pin = result.TemporaryPin! });
+            Assert.Equal(result.ParentUserId, login.User.Id);
+            var child = await _db.Context.Children.SingleAsync(c => c.Id == result.ChildId);
+            Assert.True(child.IsActive);
+
+            // Can't admit the same demo twice.
+            await Assert.ThrowsAsync<DomainValidationException>(() => admission.AdmitAsync(demo.Id, new ManualAdmissionRequest
+            {
+                ParentName = "Asha Rao", ParentPhone = "9876543210", ChildFirstName = "Riya",
+                ChildDateOfBirth = new DateOnly(2018, 5, 1), PackagePlanId = plan.Id,
+            }));
+
+            // Part payment keeps it pending; the full fee makes it a real enrollment.
+            await billing.RecordPaymentAsync(result.InvoiceId!.Value, new RecordPaymentRequest { Amount = 500 });
+            Assert.Equal(ConversionStatus.PaymentPending, (await demoService.GetAsync(demo.Id)).ConversionStatus);
+            await billing.RecordPaymentAsync(result.InvoiceId!.Value, new RecordPaymentRequest { Amount = 1500 });
+            Assert.Equal(ConversionStatus.Enrolled, (await demoService.GetAsync(demo.Id)).ConversionStatus);
         }
 
         [Fact]

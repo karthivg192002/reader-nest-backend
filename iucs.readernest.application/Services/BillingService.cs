@@ -7,6 +7,7 @@ using iucs.readernest.application.Dto.Common;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Common;
 using iucs.readernest.domain.Entities.Academics;
+using iucs.readernest.domain.Entities.Admission;
 using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Settings;
 using iucs.readernest.domain.Entities.Users;
@@ -771,6 +772,16 @@ namespace iucs.readernest.application.Services
             {
                 invoice.Status = InvoiceStatus.Paid;
                 invoice.PaidAtUtc = DateTime.UtcNow;
+
+                // A demo admitted manually waits in PaymentPending on this invoice
+                // (ManualAdmissionService) — the fee is in, so it's now a real enrollment.
+                var awaitingBookings = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
+                    .Where(b => b.InvoiceId == invoice.Id && b.ConversionStatus == ConversionStatus.PaymentPending)
+                    .ToListAsync(cancellationToken);
+                foreach (var awaiting in awaitingBookings)
+                {
+                    awaiting.ConversionStatus = ConversionStatus.Enrolled;
+                }
 
                 // Access restoration: full payment on THIS invoice auto-lifts the matching fee
                 // suspension -- but only when nothing else in that same scope is outstanding.

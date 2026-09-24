@@ -17,6 +17,11 @@ namespace iucs.readernest.api.Services
 
         public Task SendAsync(string toEmail, string subject, string body, CancellationToken cancellationToken = default)
         {
+            if (!application.Common.ParentLogin.IsDeliverable(toEmail))
+            {
+                return Task.CompletedTask; // no-email parent — see SmtpEmailSender
+            }
+
             _logger.LogInformation("EMAIL to {To} | {Subject}\n{Body}", toEmail, subject, body);
             return Task.CompletedTask;
         }

@@ -45,6 +45,7 @@ namespace iucs.readernest.application
             services.AddScoped<IClassSessionEventLogService, ClassSessionEventLogService>();
             services.AddScoped<IClassSessionLogService, ClassSessionLogService>();
             services.AddScoped<IEnrollmentService, EnrollmentService>();
+            services.AddScoped<IManualAdmissionService, ManualAdmissionService>();
             services.AddScoped<IUserDeletionService, UserDeletionService>();
             services.AddScoped<IParentPortalService, ParentPortalService>();
             services.AddScoped<IReportsService, ReportsService>();

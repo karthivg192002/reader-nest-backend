@@ -129,6 +129,33 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _demoBookingService.UpdateAsync(id, request, cancellationToken));
         }
 
+        /// <summary>
+        /// "Admit manually" — counselor completes admission for a parent who shares nothing by
+        /// email: creates their login (mobile number + PIN when no email), the child, the first
+        /// invoice and a payment link, and returns a WhatsApp-ready message with all of it.
+        /// </summary>
+        [HttpGet("manual-admission/options")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<ManualAdmissionOptionsDto>> ManualAdmissionOptions(
+            [FromServices] IManualAdmissionService manualAdmissionService,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await manualAdmissionService.GetOptionsAsync(cancellationToken));
+        }
+
+        [HttpPost("{id:guid}/manual-admission")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<ManualAdmissionResultDto>> ManualAdmission(
+            Guid id,
+            ManualAdmissionRequest request,
+            [FromServices] IManualAdmissionService manualAdmissionService,
+            CancellationToken cancellationToken)
+        {
+            var result = await manualAdmissionService.AdmitAsync(id, request, cancellationToken);
+            Response.Headers.CacheControl = "no-store"; // may carry a new parent's PIN
+            return Ok(result);
+        }
+
         [HttpPut("{id:guid}/reschedule")]
         [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
         public async Task<ActionResult<DemoBookingDto>> Reschedule(
