@@ -1114,11 +1114,19 @@ namespace iucs.readernest.application.Services
             var course = await _unitOfWork.Repository<Course>().GetByIdAsync(batch.CourseId, cancellationToken)
                 ?? throw new NotFoundException(nameof(Course), batch.CourseId);
 
-            var hasSessions = await _unitOfWork.Repository<ClassSession>()
-                .ExistsAsync(s => s.BatchId == batchId, cancellationToken);
-            if (hasSessions)
+            // Only refused while sessions are still upcoming (those are adjusted via the
+            // future-schedule edit). Once every existing session is completed or cancelled --
+            // e.g. a 12-session block delivered and the parent has now paid for the next block --
+            // more can be appended; this used to refuse forever after the first generation, so a
+            // finished batch could never be extended.
+            var now = DateTime.UtcNow;
+            var hasUpcomingSessions = await _unitOfWork.Repository<ClassSession>()
+                .ExistsAsync(s => s.BatchId == batchId
+                    && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                    && s.ScheduledStartAtUtc > now, cancellationToken);
+            if (hasUpcomingSessions)
             {
-                throw new DomainValidationException("This batch already has scheduled sessions; reschedule or cancel them individually.");
+                throw new DomainValidationException("This batch already has upcoming sessions; adjust the remaining schedule instead.");
             }
 
             var slotDays = request.Slots.Select(s => s.DayOfWeek).ToList();
