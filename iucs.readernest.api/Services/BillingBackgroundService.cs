@@ -207,6 +207,31 @@ namespace iucs.readernest.api.Services
                     .Select(i => new { i.ParentProfileId, i.ChildId, i.Id, i.InvoiceNumber })
                     .ToListAsync(cancellationToken);
 
+                // Client rule: never suspend while the child still has a paid class to come -- only
+                // once the classes already paid for are used up (PaidClasses). Those invoices are
+                // left out of the sweep, and a suspension already standing on one is lifted.
+                var withClassesLeft = await PaidClasses.WithClassesLeftAsync(
+                    unitOfWork, overdueInvoices.Select(o => o.Id).ToList(), cancellationToken);
+                if (withClassesLeft.Count > 0)
+                {
+                    var standing = await unitOfWork.Repository<FeeSuspension>().TrackedQuery()
+                        .Where(s => s.Status == SuspensionStatus.Active && s.InvoiceId != null && withClassesLeft.Contains(s.InvoiceId.Value))
+                        .ToListAsync(cancellationToken);
+                    foreach (var suspension in standing)
+                    {
+                        suspension.Status = SuspensionStatus.Lifted;
+                        suspension.LiftedAtUtc = now;
+                        // AutoRestored marks this as the system's lift, not an admin waiver, so the
+                        // invoice can be suspended again once the paid classes are used up.
+                        suspension.AutoRestored = true;
+                    }
+                    if (standing.Count > 0)
+                    {
+                        await unitOfWork.SaveChangesAsync(cancellationToken);
+                    }
+                    overdueInvoices = overdueInvoices.Where(o => !withClassesLeft.Contains(o.Id)).ToList();
+                }
+
                 // One query for every already-suspended parent, instead of an ExistsAsync per
                 // overdue (parent, child) pair — that loop scaled its round trips with the size of
                 // the overdue book, which is exactly the population that grows when collections are
@@ -225,7 +250,7 @@ namespace iucs.readernest.api.Services
                     .Where(s => overdueParentIds.Contains(s.ParentProfileId)
                         && (s.Status == SuspensionStatus.Active
                             || (s.Status == SuspensionStatus.Lifted && s.InvoiceId != null && overdueInvoiceIds.Contains(s.InvoiceId.Value))))
-                    .Select(s => new { s.ParentProfileId, s.ChildId, s.Status, s.InvoiceId })
+                    .Select(s => new { s.ParentProfileId, s.ChildId, s.Status, s.InvoiceId, s.AutoRestored })
                     .ToListAsync(cancellationToken);
 
                 // Caught live: NotificationType.FeeSuspension existed in the enum with zero templates
@@ -240,10 +265,11 @@ namespace iucs.readernest.api.Services
                     // of which child it's for; a same-child suspension only covers an exact match.
                     // A Lifted suspension only counts as covering it when it was for this exact
                     // invoice -- an admin restore shouldn't waive a *different*, newer overdue bill.
+                    // Only an admin's lift waives it; a system lift (paid classes were left) doesn't.
                     var alreadyCovered = existingSuspensions.Any(s =>
                         s.ParentProfileId == group.Key.ParentProfileId
                         && (s.ChildId == null || s.ChildId == group.Key.ChildId)
-                        && (s.Status == SuspensionStatus.Active || s.InvoiceId == first.Id));
+                        && (s.Status == SuspensionStatus.Active || (s.InvoiceId == first.Id && !s.AutoRestored)));
                     if (alreadyCovered)
                     {
                         continue;

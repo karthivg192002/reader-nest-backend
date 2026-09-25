@@ -3979,6 +3979,72 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task FeeSuspension_WaitsUntilThePaidClassesAreUsedUp()
+        {
+            // Client rule: an overdue invoice must not suspend a child while even one class
+            // they've paid for is still to come. 4-class course, half paid = 2 paid classes.
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Four Class Course", Type = CourseType.Group,
+                DurationMinutes = 45, Price = 4000, TotalSessions = 4, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            var batch = new Batch { Course = course, TeacherProfile = teacher, Name = "B", Capacity = 5 };
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var child = new Child { ParentProfile = parentProfile, FirstName = "Kid", LastName = "One", IsActive = true };
+            var unpaidChild = new Child { ParentProfile = parentProfile, FirstName = "Kid", LastName = "Two", IsActive = true };
+            _db.Context.AddRange(teacher, category, course, batch, parentProfile, child, unpaidChild,
+                new PaymentAccount { Name = "P", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "t", GatewayAccountRef = "p" });
+            await _db.Context.SaveChangesAsync();
+            _db.Context.AddRange(
+                new BatchEnrollment { BatchId = batch.Id, ChildId = child.Id, Status = EnrollmentStatus.Active },
+                new BatchEnrollment { BatchId = batch.Id, ChildId = unpaidChild.Id, Status = EnrollmentStatus.Active });
+            await _db.Context.SaveChangesAsync();
+
+            var billing = CreateBillingService();
+            async Task<Guid> Invoice(Guid childId, Guid? courseId, decimal paid)
+            {
+                var dto = await billing.CreateInvoiceAsync(new CreateInvoiceRequest
+                {
+                    ParentProfileId = parentProfile.Id, ChildId = childId, CourseId = courseId,
+                    DepartmentId = WellKnownDepartments.Phonics, Amount = 4000,
+                    DueDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-10),
+                });
+                var entity = await _db.Context.Invoices.SingleAsync(i => i.Id == dto.Id);
+                entity.AmountPaid = paid;
+                await _db.Context.SaveChangesAsync();
+                return dto.Id;
+            }
+            var halfPaid = await Invoice(child.Id, course.Id, 2000);
+            var nothingPaid = await Invoice(unpaidChild.Id, course.Id, 0);
+            var noCourse = await Invoice(child.Id, null, 2000);
+
+            async Task CompleteClass(int day)
+            {
+                _db.Context.Add(new ClassSession
+                {
+                    BatchId = batch.Id, TeacherProfileId = teacher.Id, Status = SessionStatus.Completed,
+                    ScheduledStartAtUtc = DateTime.UtcNow.AddDays(day), ScheduledEndAtUtc = DateTime.UtcNow.AddDays(day).AddMinutes(45),
+                });
+                await _db.Context.SaveChangesAsync();
+            }
+
+            var ids = new[] { halfPaid, nothingPaid, noCourse };
+            await CompleteClass(1);
+            var exempt = await PaidClasses.WithClassesLeftAsync(_db.UnitOfWork, ids);
+            Assert.Contains(halfPaid, exempt);           // 1 of 2 paid classes done → not suspended
+            Assert.DoesNotContain(nothingPaid, exempt);  // nothing paid → no paid classes
+            Assert.DoesNotContain(noCourse, exempt);     // can't be measured in classes
+
+            await CompleteClass(2);
+            exempt = await PaidClasses.WithClassesLeftAsync(_db.UnitOfWork, ids);
+            Assert.DoesNotContain(halfPaid, exempt);     // both paid classes done → suspend now
+        }
+
+        [Fact]
         public async Task StaffPaymentLink_WhenPaid_IsCreditedByTheGatewayWebhook()
         {
             // Regression: a link made by staff (Payments "Payment link", manual admission) had no
