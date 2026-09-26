@@ -3970,6 +3970,46 @@ namespace iucs.readernest.tests
             Assert.Equal(1500, result.AmountDue);
             var subscription = await _db.Context.Subscriptions.SingleAsync(s => s.ChildId == result.ChildId);
             Assert.Equal(1500, subscription.PriceOverride);
+
+            // Renewal bills the agreed amount, not the plan's listed price.
+            var billing = CreateBillingService();
+            await billing.CancelSubscriptionAsync(subscription.Id);
+            await billing.RenewSubscriptionAsync(subscription.Id);
+            var amounts = await _db.Context.Invoices.AsNoTracking()
+                .Where(i => i.SubscriptionId == subscription.Id).Select(i => i.Amount).ToListAsync();
+            Assert.Equal(2, amounts.Count);
+            Assert.All(amounts, a => Assert.Equal(1500, a));
+        }
+
+        [Fact]
+        public async Task ManualAdmission_PlanAtZero_LeavesAPaidInvoice_NotAPendingOne()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var plan = new PackagePlan { Name = "Monthly", BillingType = BillingType.Subscription, BillingCycle = BillingCycle.Monthly, Price = 2000 };
+            _db.Context.AddRange(teacher, plan,
+                new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" });
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Zed", ParentPhone = "9876511111", ChildName = "Kid",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+            var admission = new ManualAdmissionService(
+                _db.UnitOfWork, demoService, CreateUserService(), CreateEnrollmentService(), CreateBillingService(), CreateBatchService(),
+                _auditLog, new ConfigurationBuilder().Build(), NullLogger<ManualAdmissionService>.Instance);
+
+            var result = await admission.AdmitAsync(demo.Id, new ManualAdmissionRequest
+            {
+                ParentName = "Zed", ParentPhone = "9876511111", ChildFirstName = "Kid",
+                ChildDateOfBirth = new DateOnly(2018, 5, 1), PackagePlanId = plan.Id, Amount = 0,
+            });
+
+            Assert.Equal(0, result.AmountDue);
+            var status = await _db.Context.Invoices.AsNoTracking().Where(i => i.Id == result.InvoiceId).Select(i => i.Status).SingleAsync();
+            Assert.Equal(InvoiceStatus.Paid, status);
         }
 
         [Fact]

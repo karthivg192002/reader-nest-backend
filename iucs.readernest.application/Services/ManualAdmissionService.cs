@@ -316,9 +316,16 @@ namespace iucs.readernest.application.Services
             // A plan agreed at ₹0: don't leave a Pending ₹0 invoice that would go overdue.
             if (plan is not null && invoice is not null && invoice.Amount == 0 && invoice.Status != InvoiceStatus.Paid)
             {
-                invoice.Status = InvoiceStatus.Paid;
-                invoice.PaidAtUtc = DateTime.UtcNow;
-                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                // Query() above is no-tracking, so load the row tracked or the change never saves.
+                var zeroInvoice = await _unitOfWork.Repository<Invoice>()
+                    .FirstOrDefaultAsync(i => i.Id == invoice.Id, cancellationToken);
+                if (zeroInvoice is not null)
+                {
+                    zeroInvoice.Status = InvoiceStatus.Paid;
+                    zeroInvoice.PaidAtUtc = DateTime.UtcNow;
+                    _unitOfWork.Repository<Invoice>().Update(zeroInvoice);
+                    await _unitOfWork.SaveChangesAsync(cancellationToken);
+                }
             }
 
             string? paymentLinkUrl = null;
