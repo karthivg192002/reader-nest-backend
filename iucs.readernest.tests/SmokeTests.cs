@@ -3055,7 +3055,15 @@ namespace iucs.readernest.tests
             var parentUser = await _db.SeedUserAsync($"lp-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
             var parentProfile = new ParentProfile { UserId = parentUser.Id };
             var child = new Child { ParentProfile = parentProfile, FirstName = "Kid", LastName = "L", IsActive = true };
-            _db.Context.AddRange(parentProfile, child,
+            // "Affected" parents = families whose class the leave actually cancels, so the
+            // leave window covers one of this batch's classes.
+            var covered = new ClassSession
+            {
+                BatchId = batch.Id, TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(12).AddHours(1),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(12).AddHours(2),
+            };
+            _db.Context.AddRange(parentProfile, child, covered,
                 new BatchEnrollment { BatchId = batch.Id, Child = child, Status = EnrollmentStatus.Active });
             await _db.Context.SaveChangesAsync();
 
@@ -3976,6 +3984,53 @@ namespace iucs.readernest.tests
             Assert.Contains(_emailSender.Sent, m => m.To == admin.Email && m.Subject.Contains("PIN reset requested"));
             Assert.DoesNotContain(_emailSender.Sent, m => m.To == parent.Email);
             Assert.False(await _db.Context.Set<PinResetToken>().AnyAsync(t => t.UserId == parent.Id));
+        }
+
+        [Fact]
+        public async Task ClassWiseLeave_CanCancelAMakeUpClass_AndOnlyTellsThatBatchsParents()
+        {
+            // Two bugs caught live: a make-up (CarriedForward) class showed as pickable but the
+            // server refused it, and a single cancelled class emailed every parent in every one
+            // of the teacher's batches.
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "C", Type = CourseType.Group,
+                DurationMinutes = 45, Price = 100, TotalSessions = 4, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            var batchA = new Batch { Course = course, TeacherProfile = teacher, Name = "A", Capacity = 5 };
+            var batchB = new Batch { Course = course, TeacherProfile = teacher, Name = "B", Capacity = 5 };
+            var parentA = await _db.SeedUserAsync($"pa-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentB = await _db.SeedUserAsync($"pb-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var childA = new Child { ParentProfile = new ParentProfile { UserId = parentA.Id }, FirstName = "A", LastName = "Kid", IsActive = true };
+            var childB = new Child { ParentProfile = new ParentProfile { UserId = parentB.Id }, FirstName = "B", LastName = "Kid", IsActive = true };
+            var makeUp = new ClassSession
+            {
+                Batch = batchA, TeacherProfile = teacher, Status = SessionStatus.CarriedForward,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddHours(2), ScheduledEndAtUtc = DateTime.UtcNow.AddHours(2).AddMinutes(45),
+            };
+            _db.Context.AddRange(teacher, category, course, batchA, batchB, childA, childB, makeUp);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.AddRange(
+                new BatchEnrollment { BatchId = batchA.Id, ChildId = childA.Id, Status = EnrollmentStatus.Active },
+                new BatchEnrollment { BatchId = batchB.Id, ChildId = childB.Id, Status = EnrollmentStatus.Active });
+            await _db.Context.SaveChangesAsync();
+
+            var ops = CreateAcademicOpsService();
+            await ops.SetLeaveAllowanceAsync(new SaveLeaveAllowanceRequest { MonthlyAllowance = 5 });
+            _emailSender.Sent.Clear();
+
+            var leave = await ops.SubmitLeaveAsync(teacherUser.Id, new SubmitLeaveRequest
+            {
+                SessionIds = [makeUp.Id], Reason = "Urgent family situation",
+            });
+
+            Assert.Equal(LeaveStatus.Approved, leave.Status);
+            Assert.Equal(SessionStatus.Cancelled, (await _db.Context.ClassSessions.AsNoTracking().SingleAsync(s => s.Id == makeUp.Id)).Status);
+            Assert.Contains(_emailSender.Sent, m => m.To == parentA.Email);
+            Assert.DoesNotContain(_emailSender.Sent, m => m.To == parentB.Email);
         }
 
         [Fact]
