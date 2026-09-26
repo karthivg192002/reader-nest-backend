@@ -570,7 +570,7 @@ namespace iucs.readernest.application.Services
         public async Task<bool> IsTermsAcceptanceRequiredAsync(Guid parentUserId, CancellationToken cancellationToken = default)
         {
             var parent = await GetParentAsync(parentUserId, cancellationToken);
-            return parent.TermsAcceptedAtUtc is null;
+            return await TermsRule.IsAcceptanceRequiredAsync(_unitOfWork, parent, cancellationToken);
         }
 
         public async Task AcceptTermsAsync(Guid parentUserId, CancellationToken cancellationToken = default)

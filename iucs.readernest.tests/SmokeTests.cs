@@ -10271,6 +10271,30 @@ namespace iucs.readernest.tests
             Assert.Equal(first, (await _db.Context.ParentProfiles.AsNoTracking().SingleAsync(p => p.UserId == parent.Id)).TermsAcceptedAtUtc);
         }
 
+        [Fact]
+        public async Task ParentTerms_AreNotAskedOfExistingParentsWhoHavePaidBefore()
+        {
+            // Client: T&C only for parents enrolling for the first time, not existing parents.
+            var parent = await _db.SeedUserAsync($"pe-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var profile = new ParentProfile { UserId = parent.Id };
+            _db.Context.AddRange(profile,
+                new PaymentAccount { Name = "P", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "t", GatewayAccountRef = "p" });
+            await _db.Context.SaveChangesAsync();
+            var portal = new ParentPortalService(_db.UnitOfWork);
+            Assert.True(await portal.IsTermsAcceptanceRequiredAsync(parent.Id)); // new parent, nothing paid
+
+            var invoice = await CreateBillingService().CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = profile.Id, DepartmentId = WellKnownDepartments.Phonics,
+                Amount = 5000, DueDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            });
+            (await _db.Context.Invoices.SingleAsync(i => i.Id == invoice.Id)).AmountPaid = 2500;
+            await _db.Context.SaveChangesAsync();
+
+            Assert.False(await portal.IsTermsAcceptanceRequiredAsync(parent.Id)); // existing, has paid
+            Assert.Null((await _db.Context.ParentProfiles.AsNoTracking().SingleAsync(p => p.Id == profile.Id)).TermsAcceptedAtUtc);
+        }
+
         private async Task<(User Parent, ClassSession Session)> SeedParentOwnedUpcomingClassAsync()
         {
             var (batch, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1); // tomorrow, Scheduled

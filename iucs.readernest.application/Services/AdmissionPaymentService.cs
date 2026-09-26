@@ -358,18 +358,16 @@ namespace iucs.readernest.application.Services
         }
 
         /// <summary>
-        /// Terms and Conditions are asked once, at the parent's first payment: required only while
-        /// their account has no recorded acceptance. Until the account exists (it is made when the
-        /// link is issued, so it normally does) the answer is "required".
+        /// Terms and Conditions are asked once, only of a parent enrolling for the first time (see
+        /// TermsRule): an existing parent who has paid before is never asked. Until the account exists
+        /// (it is made when the link is issued, so it normally does) the answer is "required".
         /// </summary>
         private async Task<bool> IsTermsRequiredAsync(DemoBooking booking, CancellationToken cancellationToken)
         {
             var email = booking.ParentEmail.Trim().ToLowerInvariant();
-            var accepted = await _unitOfWork.Repository<ParentProfile>().Query()
-                .Where(p => p.User.Email == email)
-                .Select(p => p.TermsAcceptedAtUtc)
-                .FirstOrDefaultAsync(cancellationToken);
-            return accepted is null;
+            var parent = await _unitOfWork.Repository<ParentProfile>().Query()
+                .FirstOrDefaultAsync(p => p.User.Email == email, cancellationToken);
+            return await TermsRule.IsAcceptanceRequiredAsync(_unitOfWork, parent, cancellationToken);
         }
 
         /// <summary>The parent's account (silent, no email) and profile, reused if one exists.</summary>
