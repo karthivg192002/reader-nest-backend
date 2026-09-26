@@ -1490,6 +1490,8 @@ namespace iucs.readernest.application.Services
             return _unitOfWork.Repository<DemoBooking>().Query()
                 .Include(b => b.ClassSession!).ThenInclude(s => s.TeacherProfile).ThenInclude(t => t.User)
                 .Include(b => b.Participants)
+                .Include(b => b.Invoice)
+                .Include(b => b.Course)
                 .Include(b => b.Department);
         }
     }

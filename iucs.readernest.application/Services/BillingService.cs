@@ -777,11 +777,18 @@ namespace iucs.readernest.application.Services
                 // A demo admitted manually waits in PaymentPending on this invoice
                 // (ManualAdmissionService) — the fee is in, so it's now a real enrollment.
                 var awaitingBookings = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
-                    .Where(b => b.InvoiceId == invoice.Id && b.ConversionStatus == ConversionStatus.PaymentPending)
+                    .Where(b => b.InvoiceId == invoice.Id
+                        && (b.ConversionStatus == ConversionStatus.PaymentPending
+                            || (b.PaymentToken != null && b.ConversionStatus == ConversionStatus.PartiallyPaid)))
                     .ToListAsync(cancellationToken);
                 foreach (var awaiting in awaitingBookings)
                 {
-                    awaiting.ConversionStatus = ConversionStatus.Enrolled;
+                    // Portal admission flow (payment link -> counsellor verification): a fully-paid
+                    // lead waits for the counsellor to verify and click Enroll. The manual-admission
+                    // path has no token and its child is already enrolled, so it stays as it was.
+                    awaiting.ConversionStatus = awaiting.PaymentToken is not null
+                        ? ConversionStatus.PaymentReceived
+                        : ConversionStatus.Enrolled;
                 }
 
                 // Access restoration: full payment on THIS invoice auto-lifts the matching fee
@@ -847,6 +854,17 @@ namespace iucs.readernest.application.Services
             else
             {
                 invoice.Status = InvoiceStatus.PartiallyPaid;
+
+                // Portal admission flow: a part payment is flagged on the counsellor's board rather
+                // than sitting silently under "Payment Pending".
+                var partBookings = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
+                    .Where(b => b.InvoiceId == invoice.Id && b.PaymentToken != null
+                        && b.ConversionStatus == ConversionStatus.PaymentPending)
+                    .ToListAsync(cancellationToken);
+                foreach (var part in partBookings)
+                {
+                    part.ConversionStatus = ConversionStatus.PartiallyPaid;
+                }
             }
         }
 

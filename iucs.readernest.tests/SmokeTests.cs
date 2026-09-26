@@ -9948,6 +9948,114 @@ namespace iucs.readernest.tests
             await Assert.ThrowsAsync<NotFoundException>(() => folders.SetBatchAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderBatchAccessRequest { AddBatchIds = [Guid.NewGuid()] }));
         }
 
+        [Fact]
+        public async Task ParentCancel_IsClosedInsideTheCutoff_AndTheCutoffIsConfigurable()
+        {
+            var (parent, session) = await SeedParentOwnedUpcomingClassAsync();
+            var tracked = await _db.Context.ClassSessions.FirstAsync(s => s.Id == session.Id);
+            tracked.ScheduledStartAtUtc = DateTime.UtcNow.AddMinutes(30);
+            tracked.ScheduledEndAtUtc = DateTime.UtcNow.AddMinutes(75);
+            await _db.Context.SaveChangesAsync();
+
+            // Default cut-off is 60 minutes: a class 30 minutes away can no longer be cancelled online.
+            var ex = await Assert.ThrowsAsync<DomainValidationException>(
+                () => CreateSessionService().CancelByParentAsync(parent.Id, session.Id, "Unwell"));
+            Assert.Contains("60 minutes", ex.Message);
+            Assert.Equal(SessionStatus.Scheduled, (await _db.Context.ClassSessions.AsNoTracking().FirstAsync(s => s.Id == session.Id)).Status);
+
+            // An admin lowers the cut-off to 15 minutes: the same class is now cancellable.
+            _db.Context.AppSettings.Add(new AppSetting { Category = SettingCategory.Notifications, Key = PolicySettings.CancelCutoffMinutesKey, Value = "15", IsPublic = true });
+            await _db.Context.SaveChangesAsync();
+            await CreateSessionService().CancelByParentAsync(parent.Id, session.Id, "Unwell");
+            Assert.Equal(SessionStatus.Cancelled, (await _db.Context.ClassSessions.AsNoTracking().FirstAsync(s => s.Id == session.Id)).Status);
+        }
+
+        [Fact]
+        public async Task AdmissionPayment_LinkToPaymentToCounsellorEnroll_CreatesTheLoginAndSendsTheWelcomeEmail()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Super Reader", Type = CourseType.Group,
+                DurationMinutes = 45, Price = 16000, TotalSessions = 36, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            _db.Context.AddRange(teacher, category, course,
+                new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" });
+            await _db.Context.SaveChangesAsync();
+
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Asha Rao", ParentEmail = "asha.parent@example.com", ParentPhone = "9876543210", ChildName = "Riya",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+
+            var billing = CreateBillingService();
+            var admission = new AdmissionPaymentService(
+                _db.UnitOfWork, demoService, CreateUserService(), billing, _notifications, _auditLog, new ConfigurationBuilder().Build());
+
+            // Nothing to verify before a link exists; a discount can't exceed the course fee.
+            await Assert.ThrowsAsync<DomainValidationException>(() => admission.VerifyAndEnrollAsync(demo.Id));
+            await Assert.ThrowsAsync<DomainValidationException>(() => admission.SendPaymentLinkAsync(
+                demo.Id, new SendAdmissionPaymentLinkRequest { CourseId = course.Id, Amount = 17000 }));
+
+            // Counsellor issues the link at the agreed, discounted amount.
+            _emailSender.Sent.Clear();
+            var link = await admission.SendPaymentLinkAsync(
+                demo.Id, new SendAdmissionPaymentLinkRequest { CourseId = course.Id, Amount = 14000 });
+            Assert.Equal(16000, link.ListPrice);
+            Assert.Equal(14000, link.Amount);
+            Assert.Contains("/pay/", link.PaymentUrl);
+            Assert.Equal(ConversionStatus.PaymentPending, link.Booking.ConversionStatus);
+            Assert.Equal(14000, link.Booking.InvoiceAmount);
+
+            // The account exists (the invoice needs it) but the parent is NOT sent a login yet.
+            var parentUser = await _db.Context.Users.SingleAsync(u => u.Email == "asha.parent@example.com");
+            Assert.DoesNotContain(_emailSender.Sent, m => m.To == parentUser.Email && (m.Subject.Contains("account is ready") || m.Subject.Contains("login details")));
+
+            // The parent's page shows the discounted amount and won't start until the terms are accepted.
+            var token = link.PaymentUrl.Split("/pay/")[1];
+            var page = await admission.GetPublicPaymentAsync(token);
+            Assert.Equal(14000, page.Amount);
+            Assert.False(page.IsPaid);
+            await Assert.ThrowsAsync<DomainValidationException>(
+                () => admission.StartPublicPaymentAsync(token, new StartPublicAdmissionPaymentRequest { TermsAccepted = false }));
+            var started = await admission.StartPublicPaymentAsync(token, new StartPublicAdmissionPaymentRequest { TermsAccepted = true });
+            Assert.False(string.IsNullOrEmpty(started.Url));
+            Assert.NotNull((await demoService.GetAsync(demo.Id)).TermsAcceptedAtUtc);
+            await Assert.ThrowsAsync<NotFoundException>(() => admission.GetPublicPaymentAsync("not-a-real-token"));
+
+            // A part payment is flagged and can't be enrolled; the rest makes it Paid, not "pending".
+            var invoiceId = link.Booking.InvoiceId!.Value;
+            await billing.RecordPaymentAsync(invoiceId, new RecordPaymentRequest { Amount = 4000 });
+            Assert.Equal(ConversionStatus.PartiallyPaid, (await demoService.GetAsync(demo.Id)).ConversionStatus);
+            await Assert.ThrowsAsync<DomainValidationException>(() => admission.VerifyAndEnrollAsync(demo.Id));
+
+            await billing.RecordPaymentAsync(invoiceId, new RecordPaymentRequest { Amount = 10000 });
+            Assert.Equal(InvoiceStatus.Paid, (await _db.Context.Invoices.AsNoTracking().SingleAsync(i => i.Id == invoiceId)).Status);
+            Assert.Equal(ConversionStatus.PaymentReceived, (await demoService.GetAsync(demo.Id)).ConversionStatus);
+
+            // Counsellor verifies and clicks Enroll: the welcome email goes out automatically.
+            _emailSender.Sent.Clear();
+            var enrolled = await admission.VerifyAndEnrollAsync(demo.Id);
+            Assert.Equal(ConversionStatus.ReadyForEnrollment, enrolled.ConversionStatus);
+            Assert.NotNull(enrolled.PaymentVerifiedAtUtc);
+            var welcome = Assert.Single(_emailSender.Sent, m => m.To == parentUser.Email && m.Subject.Contains("login details"));
+            var pin = await CreateUserService().RevealPinAsync(parentUser.Id);
+            Assert.Contains(pin, welcome.Body);
+            Assert.Contains("asha.parent@example.com", welcome.Body);
+            Assert.Contains("child", welcome.Body, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Forgot your PIN", welcome.Body);
+
+            // The parent signs in with the emailed PIN, and can't be enrolled twice.
+            var login = await CreateAuthService().LoginAsync(new LoginRequest { Email = parentUser.Email, Pin = pin });
+            Assert.Equal(UserRole.Parent, login.User.Role);
+            await Assert.ThrowsAsync<DomainValidationException>(() => admission.VerifyAndEnrollAsync(demo.Id));
+        }
+
         private async Task<(User Parent, ClassSession Session)> SeedParentOwnedUpcomingClassAsync()
         {
             var (batch, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1); // tomorrow, Scheduled

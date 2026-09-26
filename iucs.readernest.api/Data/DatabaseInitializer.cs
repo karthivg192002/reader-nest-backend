@@ -2479,7 +2479,7 @@ namespace iucs.readernest.api.Data
         /// <summary>Inserts the support-ticket, short-class payout-approval, parent-cancellation and staff-leave templates into a DB seeded before they existed.</summary>
         private static async Task EnsureSupportTicketEmailTemplatesAsync(ReaderNestDbContext context)
         {
-            foreach (var key in new[] { "support-ticket-raised", "support-ticket-parent-replied", "support-ticket-updated", "short-class-payout-approval", "class-cancelled-by-parent", "staff-leave-submitted", "staff-leave-reviewed" })
+            foreach (var key in new[] { "support-ticket-raised", "support-ticket-parent-replied", "support-ticket-updated", "short-class-payout-approval", "class-cancelled-by-parent", "staff-leave-submitted", "staff-leave-reviewed", "parent-enrollment-welcome" })
             {
                 if (context.EmailTemplates.Local.Any(t => t.Key == key) || await context.EmailTemplates.AnyAsync(t => t.Key == key))
                 {

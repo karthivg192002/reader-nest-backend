@@ -436,6 +436,16 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("This class has already started, so it can't be cancelled.");
             }
 
+            // Cut-off: cancelling/applying for leave closes a set time before the class (default
+            // 60 minutes; Settings -> parent.cancelCutoffMinutes). After it the class stays as
+            // scheduled and the parent must contact the centre.
+            var cutoffMinutes = await PolicySettings.GetCancelCutoffMinutesAsync(_unitOfWork, cancellationToken);
+            if (session.ScheduledStartAtUtc - DateTime.UtcNow < TimeSpan.FromMinutes(cutoffMinutes))
+            {
+                throw new DomainValidationException(
+                    $"Cancellations close {cutoffMinutes} minutes before the class starts, so this class can no longer be cancelled online.");
+            }
+
             // No admin approval: a parent's cancellation takes effect immediately, the mirror of a
             // teacher's cancellation reaching parents automatically.
             var parentName = $"{parent.FirstName} {parent.LastName}".Trim();
