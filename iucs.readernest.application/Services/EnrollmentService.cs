@@ -241,6 +241,21 @@ namespace iucs.readernest.application.Services
                         linkedBooking.ConversionStatus = ConversionStatus.Enrolled;
                         _unitOfWork.Repository<DemoBooking>().Update(linkedBooking);
                     }
+
+                    // Portal admission flow: the course fee was paid before this child existed, so
+                    // its invoice is family-level. Attach it to the child now so their fee status
+                    // and paid classes show against them rather than as an unassigned family invoice.
+                    if (linkedBooking?.InvoiceId is { } paidInvoiceId && child is not null)
+                    {
+                        var paidInvoice = await _unitOfWork.Repository<Invoice>()
+                            .GetByIdAsync(paidInvoiceId, cancellationToken);
+                        if (paidInvoice is not null && paidInvoice.ChildId is null
+                            && paidInvoice.ParentProfileId == form.ParentProfileId)
+                        {
+                            paidInvoice.ChildId = child.Id;
+                            _unitOfWork.Repository<Invoice>().Update(paidInvoice);
+                        }
+                    }
                 }
             }
             else

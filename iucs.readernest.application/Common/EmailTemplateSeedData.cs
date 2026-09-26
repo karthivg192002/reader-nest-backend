@@ -67,6 +67,22 @@ namespace iucs.readernest.application.Common
                     """,
                     "FirstName", "Email", "TemporaryPin"),
 
+                New("parent-enrollment-welcome", "Parent Welcome (After Enrollment)",
+                    "Sent automatically when the admission counsellor verifies the payment and clicks Enroll: portal link, registered email, PIN and what to do next.",
+                    NotificationType.General, "Welcome to {{OrgName}} - your login details",
+                    """
+                    <p>Hello {{FirstName}},</p>
+                    <p>Welcome to {{OrgName}}! Your admission is confirmed and your parent account is ready.</p>
+                    <table style="width:100%;background:#F9FAFB;border-radius:6px;margin:16px 0;">
+                      <tr><td style="padding:12px 16px;color:#6B7280;">Portal</td><td style="padding:12px 16px;font-weight:600;"><a href="{{LoginUrl}}">{{PortalUrl}}</a></td></tr>
+                      <tr><td style="padding:12px 16px;color:#6B7280;">Registered email</td><td style="padding:12px 16px;font-weight:600;">{{Email}}</td></tr>
+                      <tr><td style="padding:12px 16px;color:#6B7280;">PIN</td><td style="padding:12px 16px;font-weight:600;">{{TemporaryPin}}</td></tr>
+                    </table>
+                    <p><strong>Next step:</strong> after you log in, please fill in your child's details. Our team will review them and then set up your child's class schedule.</p>
+                    <p style="font-size:13px;color:#6B7280;">Having trouble logging in? Choose "Forgot your PIN" on the login page - a link to set a new PIN will be sent to this same email address.</p>
+                    """,
+                    "FirstName", "Email", "TemporaryPin", "PortalUrl", "LoginUrl"),
+
                 New("pin-reset", "Self-Service PIN Reset",
                     "Sent when someone requests a PIN reset from the login page's \"Forgot your PIN\" link.",
                     NotificationType.General, "Reset your {{OrgName}} PIN",

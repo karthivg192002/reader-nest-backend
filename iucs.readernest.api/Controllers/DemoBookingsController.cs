@@ -156,6 +156,36 @@ namespace iucs.readernest.api.Controllers
             return Ok(result);
         }
 
+        /// <summary>
+        /// Portal admission flow: the counsellor issues the parent's payment link for a course at
+        /// the agreed (possibly discounted) amount. The parent pays on a page that first asks them
+        /// to accept the Terms and Conditions.
+        /// </summary>
+        [HttpPost("{id:guid}/payment-link")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<AdmissionPaymentLinkDto>> SendPaymentLink(
+            Guid id,
+            SendAdmissionPaymentLinkRequest request,
+            [FromServices] IAdmissionPaymentService admissionPaymentService,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await admissionPaymentService.SendPaymentLinkAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>
+        /// The counsellor has verified the parent's payment and clicks Enroll: the parent's login
+        /// is emailed automatically and the lead moves on to ReadyForEnrollment.
+        /// </summary>
+        [HttpPost("{id:guid}/enroll")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<DemoBookingDto>> Enroll(
+            Guid id,
+            [FromServices] IAdmissionPaymentService admissionPaymentService,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await admissionPaymentService.VerifyAndEnrollAsync(id, cancellationToken));
+        }
+
         [HttpPut("{id:guid}/reschedule")]
         [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
         public async Task<ActionResult<DemoBookingDto>> Reschedule(

@@ -277,6 +277,17 @@ builder.Services.AddRateLimiter(options =>
             }));
     // Anti-spam on the public store "Enroll now" form — same shape as "login" but a
     // looser limit, since this is legitimate-traffic throttling, not brute-force defense.
+    // Anonymous /pay/{token} admission payment page: legitimate parents open it a handful of
+    // times, so this only needs to blunt token guessing and gateway-link spam.
+    options.AddPolicy("admission-payment", httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
+                Window = TimeSpan.FromMinutes(5),
+                QueueLimit = 0,
+            }));
     options.AddPolicy("store-inquiry", httpContext =>
         RateLimitPartition.GetFixedWindowLimiter(
             partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
