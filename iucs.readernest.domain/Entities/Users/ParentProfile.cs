@@ -23,6 +23,12 @@ namespace iucs.readernest.domain.Entities.Users
         public bool EnrollmentFormCompleted { get; set; }
 
         /// <summary>
+        /// When this parent accepted the Terms and Conditions. Asked once, at their first payment
+        /// (the /pay page or Pay Now), and never again -- client decision 2026-09-26.
+        /// </summary>
+        public DateTime? TermsAcceptedAtUtc { get; set; }
+
+        /// <summary>
         /// Optional admin override pinning this parent's payments to a specific
         /// department payment account; null routes by the invoice's own department.
         /// </summary>

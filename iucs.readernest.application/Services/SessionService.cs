@@ -773,6 +773,34 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
+        /// <summary>
+        /// The unattended-class rule: Completed, no carry-forward (make-up) session, and no payout
+        /// item at all -- so the teacher's pay for it is zero. Deliberately does not go through
+        /// <see cref="CompleteCoreAsync"/>: that would accrue the normal session earning and email
+        /// a class summary to the parents for a class nobody attended.
+        /// </summary>
+        private async Task<ClassSessionDto> CompleteUnattendedClassAsync(
+            ClassSession session,
+            string? note,
+            CancellationToken cancellationToken)
+        {
+            session.Status = SessionStatus.Completed;
+            session.Summary = "Marked completed: the family did not join and had not cancelled before the cut-off. No make-up class is given.";
+
+            // Still recorded on the class session log so the miss is visible, best-effort.
+            await _eventLog.LogNoShowAsync(session, NoShowParty.Student, cancellationToken);
+
+            // The class counts towards the course like any completed one.
+            await MoveBatchToDormantIfCourseCompletedAsync(session, cancellationToken);
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
+                changesJson: "{\"unattended\":\"completed\",\"makeUp\":false,\"teacherPay\":0}",
+                cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return await GetAsync(session.Id, cancellationToken);
+        }
+
         private async Task<ClassSessionDto> MarkNoShowCoreAsync(
             ClassSession session,
             NoShowParty party,
@@ -782,6 +810,15 @@ namespace iucs.readernest.application.Services
             if (TerminalStatuses.Contains(session.Status))
             {
                 throw new DomainValidationException($"A session in status '{session.Status}' cannot be marked as a no-show.");
+            }
+
+            // Client policy (2026-09-26): a batch class the family neither cancelled before the
+            // cut-off nor joined counts as Completed -- the class is used up, no make-up is given
+            // and the teacher earns nothing for it. (A parent who DID cancel is handled by
+            // CancelByParentAsync and never reaches here.) Demos keep the old no-show handling.
+            if (party == NoShowParty.Student && session.BatchId.HasValue)
+            {
+                return await CompleteUnattendedClassAsync(session, note, cancellationToken);
             }
 
             session.Status = party == NoShowParty.Teacher

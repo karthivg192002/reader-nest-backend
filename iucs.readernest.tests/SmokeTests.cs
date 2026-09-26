@@ -1616,21 +1616,22 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
-        public async Task MarkNoShowSystemAsync_AppliesSameCarryForwardAndPayout_ButSkipsTheOwnershipCheck()
+        public async Task MarkNoShowSystemAsync_UnattendedClass_IsCompleted_NoMakeUp_AndSkipsTheOwnershipCheck()
         {
             // The background no-show detector has no signed-in caller to check — this is the
-            // method it calls instead of the human-facing MarkNoShowAsync.
+            // method it calls instead of the human-facing MarkNoShowAsync. Client policy: a class
+            // the family neither cancelled nor joined is Completed, no make-up, teacher earns 0.
             var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
             _db.CurrentUser.UserId = null; // no "current user" at all, as in a background job
 
-            var carried = await CreateSessionService().MarkNoShowSystemAsync(
+            var result = await CreateSessionService().MarkNoShowSystemAsync(
                 session.Id, NoShowParty.Student, "Auto-detected: no student/parent joined.");
 
+            Assert.Equal(SessionStatus.Completed, result.Status);
             var original = await _db.Context.ClassSessions.FindAsync(session.Id);
-            Assert.Equal(SessionStatus.StudentNoShow, original!.Status);
-            Assert.Equal(SessionStatus.CarriedForward, (await _db.Context.ClassSessions.FindAsync(carried.Id))!.Status);
-            var item = Assert.Single(_db.Context.PayoutItems.ToList());
-            Assert.Equal(PayoutItemType.StudentNoShowWaiting, item.Type);
+            Assert.Equal(SessionStatus.Completed, original!.Status);
+            Assert.DoesNotContain(_db.Context.ClassSessions.ToList(), s => s.CarriedForwardFromSessionId == session.Id);
+            Assert.Empty(_db.Context.PayoutItems.ToList());
         }
 
         [Fact]
@@ -5051,7 +5052,7 @@ namespace iucs.readernest.tests
             await _db.Context.SaveChangesAsync();
 
             var carried = await CreateSessionService().MarkNoShowAsync(
-                session.Id, new MarkNoShowRequest { Party = NoShowParty.Student });
+                session.Id, new MarkNoShowRequest { Party = NoShowParty.Teacher });
 
             Assert.Equal(SessionStatus.CarriedForward, carried.Status);
             Assert.NotEqual(oneWeekOut, DateOnly.FromDateTime(carried.ScheduledStartAtUtc));
@@ -5765,8 +5766,11 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
-        public async Task StudentNoShow_AddsWaitingAmount_AndCarriesSessionForward()
+        public async Task StudentNoShow_OnABatchClass_IsCompleted_WithNoMakeUp_AndZeroTeacherPay()
         {
+            // Client policy (2026-09-26): unattended (not cancelled before the cut-off, not joined)
+            // = Completed, no make-up class, and the teacher earns nothing for it -- even with a
+            // pay rate configured.
             var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
             await CreatePayoutService().SetRateAsync(new SavePayoutRateRequest
             {
@@ -5775,15 +5779,13 @@ namespace iucs.readernest.tests
                 EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
             });
 
-            var carried = await CreateSessionService().MarkNoShowAsync(
+            var result = await CreateSessionService().MarkNoShowAsync(
                 session.Id, new MarkNoShowRequest { Party = NoShowParty.Student });
 
-            var original = await _db.Context.ClassSessions.FindAsync(session.Id);
-            Assert.Equal(SessionStatus.StudentNoShow, original!.Status);
-            Assert.Equal(session.ScheduledStartAtUtc.AddDays(7), carried.ScheduledStartAtUtc);
-            var item = Assert.Single(_db.Context.PayoutItems.ToList());
-            Assert.Equal(PayoutItemType.StudentNoShowWaiting, item.Type);
-            Assert.Equal(49500, item.Amount); // 1100/min * 45 min
+            Assert.Equal(SessionStatus.Completed, result.Status);
+            Assert.Equal(SessionStatus.Completed, (await _db.Context.ClassSessions.FindAsync(session.Id))!.Status);
+            Assert.DoesNotContain(_db.Context.ClassSessions.ToList(), s => s.CarriedForwardFromSessionId == session.Id);
+            Assert.Empty(_db.Context.PayoutItems.ToList());
         }
 
         [Fact]
@@ -10100,21 +10102,29 @@ namespace iucs.readernest.tests
             Assert.NotNull((await demoService.GetAsync(demo.Id)).TermsAcceptedAtUtc);
             await Assert.ThrowsAsync<NotFoundException>(() => admission.GetPublicPaymentAsync("not-a-real-token"));
 
-            // A part payment is flagged and can't be enrolled; the rest makes it Paid, not "pending".
+            // Terms are asked once, at the first payment: now accepted, the page no longer asks.
+            Assert.False((await admission.GetPublicPaymentAsync(token)).TermsRequired);
+            Assert.False(string.IsNullOrEmpty(
+                (await admission.StartPublicPaymentAsync(token, new StartPublicAdmissionPaymentRequest { TermsAccepted = false })).Url));
+
+            // Nothing to Enroll until a payment has actually been received.
             var invoiceId = link.Booking.InvoiceId!.Value;
-            await billing.RecordPaymentAsync(invoiceId, new RecordPaymentRequest { Amount = 4000 });
-            Assert.Equal(ConversionStatus.PartiallyPaid, (await demoService.GetAsync(demo.Id)).ConversionStatus);
             await Assert.ThrowsAsync<DomainValidationException>(() => admission.VerifyAndEnrollAsync(demo.Id));
 
-            await billing.RecordPaymentAsync(invoiceId, new RecordPaymentRequest { Amount = 10000 });
-            Assert.Equal(InvoiceStatus.Paid, (await _db.Context.Invoices.AsNoTracking().SingleAsync(i => i.Id == invoiceId)).Status);
+            // Client rule: even a PART payment counts as received -- no separate verification --
+            // and the counsellor can Enroll straight away. The balance stays due on the invoice.
+            await billing.RecordPaymentAsync(invoiceId, new RecordPaymentRequest { Amount = 4000 });
             Assert.Equal(ConversionStatus.PaymentReceived, (await demoService.GetAsync(demo.Id)).ConversionStatus);
+            var partInvoice = await _db.Context.Invoices.AsNoTracking().SingleAsync(i => i.Id == invoiceId);
+            Assert.Equal(InvoiceStatus.PartiallyPaid, partInvoice.Status);
+            Assert.Equal(4000, partInvoice.AmountPaid);
 
-            // Counsellor verifies and clicks Enroll: the welcome email goes out automatically.
+            // Counsellor clicks Enroll: the welcome email goes out automatically.
             _emailSender.Sent.Clear();
             var enrolled = await admission.VerifyAndEnrollAsync(demo.Id);
             Assert.Equal(ConversionStatus.ReadyForEnrollment, enrolled.ConversionStatus);
             Assert.NotNull(enrolled.PaymentVerifiedAtUtc);
+            Assert.Null(enrolled.IssuedLogin); // an email parent gets their login by email, not WhatsApp
             var welcome = Assert.Single(_emailSender.Sent, m => m.To == parentUser.Email && m.Subject.Contains("login details"));
             var pin = await CreateUserService().RevealPinAsync(parentUser.Id);
             Assert.Contains(pin, welcome.Body);
@@ -10126,6 +10136,72 @@ namespace iucs.readernest.tests
             var login = await CreateAuthService().LoginAsync(new LoginRequest { Email = parentUser.Email, Pin = pin });
             Assert.Equal(UserRole.Parent, login.User.Role);
             await Assert.ThrowsAsync<DomainValidationException>(() => admission.VerifyAndEnrollAsync(demo.Id));
+
+            // The rest of the fee later completes the invoice without disturbing the enrollment.
+            await billing.RecordPaymentAsync(invoiceId, new RecordPaymentRequest { Amount = 10000 });
+            Assert.Equal(InvoiceStatus.Paid, (await _db.Context.Invoices.AsNoTracking().SingleAsync(i => i.Id == invoiceId)).Status);
+            Assert.Equal(ConversionStatus.ReadyForEnrollment, (await demoService.GetAsync(demo.Id)).ConversionStatus);
+        }
+
+        [Fact]
+        public async Task AdmissionPayment_PhoneOnlyParent_IsEnrolledWithAWhatsAppPin_AndNoEmail()
+        {
+            // Client rule: email is NOT mandatory -- a parent without one logs in with their mobile
+            // number and the counsellor sends the PIN on WhatsApp, exactly as before.
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Super Reader", Type = CourseType.Group,
+                DurationMinutes = 45, Price = 9000, TotalSessions = 36, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            _db.Context.AddRange(teacher, category, course,
+                new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" });
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Meena Iyer", ParentPhone = "9444444444", ChildName = "Kabir",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+            var billing = CreateBillingService();
+            var admission = new AdmissionPaymentService(
+                _db.UnitOfWork, demoService, CreateUserService(), billing, _notifications, _auditLog, new ConfigurationBuilder().Build());
+
+            var link = await admission.SendPaymentLinkAsync(demo.Id, new SendAdmissionPaymentLinkRequest { CourseId = course.Id });
+            Assert.Equal(9000, link.Amount); // no discount typed: the course fee
+            await billing.RecordPaymentAsync(link.Booking.InvoiceId!.Value, new RecordPaymentRequest { Amount = 9000 });
+
+            _emailSender.Sent.Clear();
+            var enrolled = await admission.VerifyAndEnrollAsync(demo.Id);
+
+            Assert.Equal(ConversionStatus.ReadyForEnrollment, enrolled.ConversionStatus);
+            Assert.NotNull(enrolled.IssuedLogin);
+            Assert.Equal("9444444444", enrolled.IssuedLogin!.LoginId);
+            Assert.Contains(enrolled.IssuedLogin.TemporaryPin, enrolled.IssuedLogin.WhatsAppMessage);
+            Assert.DoesNotContain(_emailSender.Sent, m => m.Subject.Contains("login details")); // nothing emailed
+            var login = await CreateAuthService().LoginAsync(new LoginRequest { Email = "9444444444", Pin = enrolled.IssuedLogin.TemporaryPin });
+            Assert.Equal(UserRole.Parent, login.User.Role);
+        }
+
+        [Fact]
+        public async Task ParentTerms_AreAskedOnlyUntilTheFirstAcceptance()
+        {
+            var parent = await _db.SeedUserAsync($"pt-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            _db.Context.Add(new ParentProfile { UserId = parent.Id });
+            await _db.Context.SaveChangesAsync();
+            var portal = new ParentPortalService(_db.UnitOfWork);
+
+            Assert.True(await portal.IsTermsAcceptanceRequiredAsync(parent.Id));
+            await portal.AcceptTermsAsync(parent.Id);
+            Assert.False(await portal.IsTermsAcceptanceRequiredAsync(parent.Id));
+
+            // Idempotent: a later call keeps the original acceptance time.
+            var first = (await _db.Context.ParentProfiles.AsNoTracking().SingleAsync(p => p.UserId == parent.Id)).TermsAcceptedAtUtc;
+            await portal.AcceptTermsAsync(parent.Id);
+            Assert.Equal(first, (await _db.Context.ParentProfiles.AsNoTracking().SingleAsync(p => p.UserId == parent.Id)).TermsAcceptedAtUtc);
         }
 
         private async Task<(User Parent, ClassSession Session)> SeedParentOwnedUpcomingClassAsync()

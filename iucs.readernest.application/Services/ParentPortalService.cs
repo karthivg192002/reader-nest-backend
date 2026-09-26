@@ -567,6 +567,25 @@ namespace iucs.readernest.application.Services
                 .ToList();
         }
 
+        public async Task<bool> IsTermsAcceptanceRequiredAsync(Guid parentUserId, CancellationToken cancellationToken = default)
+        {
+            var parent = await GetParentAsync(parentUserId, cancellationToken);
+            return parent.TermsAcceptedAtUtc is null;
+        }
+
+        public async Task AcceptTermsAsync(Guid parentUserId, CancellationToken cancellationToken = default)
+        {
+            var parent = await GetParentAsync(parentUserId, cancellationToken);
+            if (parent.TermsAcceptedAtUtc is not null)
+            {
+                return;
+            }
+
+            parent.TermsAcceptedAtUtc = DateTime.UtcNow;
+            _unitOfWork.Repository<ParentProfile>().Update(parent);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
         private async Task<ParentProfile> GetParentAsync(Guid parentUserId, CancellationToken cancellationToken)
         {
             return await _unitOfWork.Repository<ParentProfile>()

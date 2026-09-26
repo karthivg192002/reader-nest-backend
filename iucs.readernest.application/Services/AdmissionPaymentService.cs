@@ -89,12 +89,6 @@ namespace iucs.readernest.application.Services
                     $"This lead is already {booking.ConversionStatus}; a new payment link can't be issued.");
             }
 
-            if (ParentLogin.IsPlaceholderEmail(booking.ParentEmail))
-            {
-                throw new DomainValidationException(
-                    "Add the parent's email address to this demo first (Edit demo) -- the login and welcome email are sent to it.");
-            }
-
             // A manual admission already invoiced this lead through its own path (the child exists
             // and a fee invoice is outstanding); a second invoice here would bill the family twice.
             if (booking.InvoiceId.HasValue && booking.PaymentToken is null)
@@ -201,6 +195,7 @@ namespace iucs.readernest.application.Services
                 AmountPaid = invoice.AmountPaid,
                 Currency = invoice.Currency,
                 IsPaid = invoice.Status == InvoiceStatus.Paid,
+                TermsRequired = await IsTermsRequiredAsync(booking, cancellationToken),
                 TermsUrl = await PolicySettings.GetAsync(_unitOfWork, PolicySettings.TermsUrlKey, cancellationToken),
                 TermsText = await PolicySettings.GetAsync(_unitOfWork, PolicySettings.TermsTextKey, cancellationToken),
             };
@@ -211,11 +206,6 @@ namespace iucs.readernest.application.Services
             StartPublicAdmissionPaymentRequest request,
             CancellationToken cancellationToken = default)
         {
-            if (!request.TermsAccepted)
-            {
-                throw new DomainValidationException("Please accept the Terms & Conditions to continue with the payment.");
-            }
-
             var booking = await LoadByTokenAsync(token, cancellationToken);
             var invoice = booking.Invoice!;
             if (invoice.Status == InvoiceStatus.Paid)
@@ -223,12 +213,31 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("This payment has already been completed. Thank you!");
             }
 
-            var tracked = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
-                .FirstAsync(b => b.Id == booking.Id, cancellationToken);
-            tracked.TermsAcceptedAtUtc = DateTime.UtcNow;
-            await _auditLog.StageAsync(AuditAction.Update, nameof(DemoBooking), tracked.Id.ToString(),
-                "{\"note\":\"Parent accepted the Terms & Conditions before paying\"}", cancellationToken);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            // Terms are only asked at the parent's FIRST payment; after that (this or a later
+            // admission, or Pay Now) they are never asked again.
+            if (await IsTermsRequiredAsync(booking, cancellationToken))
+            {
+                if (!request.TermsAccepted)
+                {
+                    throw new DomainValidationException("Please accept the Terms & Conditions to continue with the payment.");
+                }
+
+                var tracked = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
+                    .FirstAsync(b => b.Id == booking.Id, cancellationToken);
+                tracked.TermsAcceptedAtUtc = DateTime.UtcNow;
+
+                var email = booking.ParentEmail.Trim().ToLowerInvariant();
+                var parentProfile = await _unitOfWork.Repository<ParentProfile>().TrackedQuery()
+                    .FirstOrDefaultAsync(p => p.User.Email == email, cancellationToken);
+                if (parentProfile is not null && parentProfile.TermsAcceptedAtUtc is null)
+                {
+                    parentProfile.TermsAcceptedAtUtc = tracked.TermsAcceptedAtUtc;
+                }
+
+                await _auditLog.StageAsync(AuditAction.Update, nameof(DemoBooking), tracked.Id.ToString(),
+                    "{\"note\":\"Parent accepted the Terms & Conditions at their first payment\"}", cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
 
             var link = await _billingService.CreatePaymentLinkAsync(invoice.Id, cancellationToken);
             return new StartPublicAdmissionPaymentResultDto { Url = link.Url };
@@ -251,10 +260,13 @@ namespace iucs.readernest.application.Services
             {
                 throw new DomainValidationException("This lead is already enrolled.");
             }
-            if (booking.Invoice.Status != InvoiceStatus.Paid)
+            // No separate verification step and no need for the full amount (client decision
+            // 2026-09-26): the counsellor can Enroll as soon as ANY payment has been received.
+            // The balance of a part payment simply stays due on the invoice.
+            if (booking.Invoice.AmountPaid <= 0)
             {
                 throw new DomainValidationException(
-                    $"The payment isn't complete yet ({booking.Invoice.Currency} {booking.Invoice.AmountPaid:0.##} of {booking.Invoice.Amount:0.##} received). Enroll once it's paid in full.");
+                    "No payment has been received for this lead yet. Enroll as soon as the parent's payment comes in.");
             }
 
             var email = booking.ParentEmail.Trim().ToLowerInvariant();
@@ -282,32 +294,81 @@ namespace iucs.readernest.application.Services
                 pinText = "Your existing PIN (you already have an account with us)";
             }
 
-            // Sent BEFORE the status moves, so a failed send leaves the lead in PaymentReceived
-            // for the counsellor to retry rather than "enrolled" with a parent who never got a login.
-            await _notificationService.SendTemplatedEmailAsync(
-                user.Id,
-                user.Email,
-                NotificationType.General,
-                "parent-enrollment-welcome",
-                new Dictionary<string, string>
-                {
-                    ["FirstName"] = user.FirstName,
-                    ["Email"] = user.Email,
-                    ["TemporaryPin"] = pinText,
-                    ["PortalUrl"] = BaseUrl(),
-                    ["LoginUrl"] = BaseUrl() + "/login",
-                },
-                cancellationToken);
+            // A parent without an email logs in with their mobile number: there is no address to send
+            // the welcome email to, so the counsellor is handed the PIN once, to send on WhatsApp as
+            // they do today. Everyone else gets the welcome email automatically.
+            var phoneOnly = ParentLogin.IsPlaceholderEmail(user.Email);
+            if (!phoneOnly)
+            {
+                // Sent BEFORE the status moves, so a failed send leaves the lead un-enrolled for the
+                // counsellor to retry rather than "enrolled" with a parent who never got a login.
+                await _notificationService.SendTemplatedEmailAsync(
+                    user.Id,
+                    user.Email,
+                    NotificationType.General,
+                    "parent-enrollment-welcome",
+                    new Dictionary<string, string>
+                    {
+                        ["FirstName"] = user.FirstName,
+                        ["Email"] = user.Email,
+                        ["TemporaryPin"] = pinText,
+                        ["PortalUrl"] = BaseUrl(),
+                        ["LoginUrl"] = BaseUrl() + "/login",
+                    },
+                    cancellationToken);
+            }
 
             var tracked = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
                 .FirstAsync(b => b.Id == demoBookingId, cancellationToken);
             tracked.ConversionStatus = ConversionStatus.ReadyForEnrollment;
             tracked.PaymentVerifiedAtUtc = DateTime.UtcNow;
             await _auditLog.StageAsync(AuditAction.Update, nameof(DemoBooking), tracked.Id.ToString(),
-                "{\"note\":\"Payment verified and lead enrolled by counsellor; welcome email sent\"}", cancellationToken);
+                phoneOnly
+                    ? "{\"note\":\"Enrolled by counsellor after payment; phone-only parent, PIN handed to staff for WhatsApp\"}"
+                    : "{\"note\":\"Enrolled by counsellor after payment; welcome email sent\"}",
+                cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            return await _demoBookingService.GetAsync(demoBookingId, cancellationToken);
+            var result = await _demoBookingService.GetAsync(demoBookingId, cancellationToken);
+            if (phoneOnly)
+            {
+                var loginId = booking.ParentPhone ?? string.Empty;
+                var loginUrl = BaseUrl() + "/login";
+                result.IssuedLogin = new IssuedParentLoginDto
+                {
+                    LoginId = loginId,
+                    TemporaryPin = pinText,
+                    LoginUrl = loginUrl,
+                    WhatsAppMessage = string.Join("\n",
+                        $"Hello {booking.ParentName},",
+                        "",
+                        "Your The Reader Nest parent portal login:",
+                        loginUrl,
+                        $"Login: {loginId}",
+                        $"PIN: {pinText}",
+                        "",
+                        "After logging in, please fill in your child's details.",
+                        "",
+                        "Thank you!"),
+                };
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Terms and Conditions are asked once, at the parent's first payment: required only while
+        /// their account has no recorded acceptance. Until the account exists (it is made when the
+        /// link is issued, so it normally does) the answer is "required".
+        /// </summary>
+        private async Task<bool> IsTermsRequiredAsync(DemoBooking booking, CancellationToken cancellationToken)
+        {
+            var email = booking.ParentEmail.Trim().ToLowerInvariant();
+            var accepted = await _unitOfWork.Repository<ParentProfile>().Query()
+                .Where(p => p.User.Email == email)
+                .Select(p => p.TermsAcceptedAtUtc)
+                .FirstOrDefaultAsync(cancellationToken);
+            return accepted is null;
         }
 
         /// <summary>The parent's account (silent, no email) and profile, reused if one exists.</summary>

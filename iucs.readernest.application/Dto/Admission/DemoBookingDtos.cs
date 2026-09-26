@@ -34,15 +34,14 @@ namespace iucs.readernest.application.Dto.Admission
         [MaxLength(200)]
         public string ParentName { get; set; } = null!;
 
-        /// <summary>Mandatory: admission runs entirely on the portal now, so the parent's account
-        /// (and its welcome email with the PIN) is created from this address on Enroll. Enforced at
-        /// the API boundary only -- the service still tolerates a phone-only lead for the older
-        /// callers (store inquiries, imports) that build this request in code.</summary>
-        [Required]
-        [EmailAddress]
+        /// <summary>Optional (client decision 2026-09-26): a parent with no email still logs in with
+        /// their mobile number and gets their PIN over WhatsApp. When blank,
+        /// <see cref="ParentPhone"/> becomes their portal login.</summary>
         [MaxLength(256)]
         public string? ParentEmail { get; set; }
 
+        /// <summary>Mandatory: the counsellor's contact number for the parent, and the login for a
+        /// parent without an email. Enforced at the API boundary only.</summary>
         [Required]
         [MaxLength(20)]
         public string? ParentPhone { get; set; }

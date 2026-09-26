@@ -50,6 +50,12 @@ namespace iucs.readernest.application.Dto.Admission
         /// <summary>True once the invoice is fully paid -- the page then shows a thank-you instead.</summary>
         public bool IsPaid { get; set; }
 
+        /// <summary>
+        /// Whether this parent still has to accept the Terms and Conditions. Only their first payment
+        /// asks; a parent who accepted earlier (e.g. a sibling's admission) is not asked again.
+        /// </summary>
+        public bool TermsRequired { get; set; }
+
         public string? TermsUrl { get; set; }
 
         public string? TermsText { get; set; }
@@ -57,7 +63,7 @@ namespace iucs.readernest.application.Dto.Admission
 
     public class StartPublicAdmissionPaymentRequest
     {
-        /// <summary>Must be true: payment can't start until the Terms &amp; Conditions are accepted.</summary>
+        /// <summary>Must be true when the page said terms are required (the parent's first payment).</summary>
         public bool TermsAccepted { get; set; }
     }
 

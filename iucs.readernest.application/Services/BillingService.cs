@@ -862,15 +862,16 @@ namespace iucs.readernest.application.Services
             {
                 invoice.Status = InvoiceStatus.PartiallyPaid;
 
-                // Portal admission flow: a part payment is flagged on the counsellor's board rather
-                // than sitting silently under "Payment Pending".
+                // Portal admission flow: any payment received -- even part of the agreed amount --
+                // counts as verified (client decision 2026-09-26), so the counsellor can Enroll
+                // right away. The balance stays due on the invoice.
                 var partBookings = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
                     .Where(b => b.InvoiceId == invoice.Id && b.PaymentToken != null
                         && b.ConversionStatus == ConversionStatus.PaymentPending)
                     .ToListAsync(cancellationToken);
                 foreach (var part in partBookings)
                 {
-                    part.ConversionStatus = ConversionStatus.PartiallyPaid;
+                    part.ConversionStatus = ConversionStatus.PaymentReceived;
                 }
             }
         }
