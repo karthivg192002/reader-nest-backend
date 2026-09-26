@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using iucs.readernest.domain.Data;
@@ -11,9 +12,11 @@ using iucs.readernest.domain.Data;
 namespace iucs.readernest.domain.Migrations
 {
     [DbContext(typeof(ReaderNestDbContext))]
-    partial class ReaderNestDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260926075646_AddAdmissionPaymentFlow")]
+    partial class AddAdmissionPaymentFlow
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1990,11 +1993,6 @@ namespace iucs.readernest.domain.Migrations
                     b.Property<Guid>("ParentProfileId")
                         .HasColumnType("uuid")
                         .HasColumnName("parent_profile_id");
-
-                    b.Property<decimal?>("PriceOverride")
-                        .HasPrecision(12, 2)
-                        .HasColumnType("numeric(12,2)")
-                        .HasColumnName("price_override");
 
                     b.Property<DateOnly>("StartDate")
                         .HasColumnType("date")
@@ -4561,10 +4559,6 @@ namespace iucs.readernest.domain.Migrations
                     b.Property<Guid?>("PaymentAccountId")
                         .HasColumnType("uuid")
                         .HasColumnName("payment_account_id");
-
-                    b.Property<DateTime?>("TermsAcceptedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("terms_accepted_at_utc");
 
                     b.Property<DateTime?>("UpdatedAtUtc")
                         .HasColumnType("timestamp with time zone")

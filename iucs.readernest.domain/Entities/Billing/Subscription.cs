@@ -39,5 +39,11 @@ namespace iucs.readernest.domain.Entities.Billing
         public DateTime? NextBillingAtUtc { get; set; }
 
         public DateTime? CancelledAtUtc { get; set; }
+
+        /// <summary>
+        /// Agreed per-cycle amount that replaces PackagePlan.Price for this subscription only
+        /// (e.g. a fee negotiated at manual admission). Null bills the plan's listed price.
+        /// </summary>
+        public decimal? PriceOverride { get; set; }
     }
 }

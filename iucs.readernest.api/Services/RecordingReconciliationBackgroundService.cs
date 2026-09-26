@@ -76,6 +76,9 @@ namespace iucs.readernest.api.Services
             var windowStart = now.Subtract(MaxAge);
             var candidates = await unitOfWork.Repository<ClassSession>().Query()
                 .Where(s => s.Status == SessionStatus.Completed
+                            // A class auto-completed as unattended (nobody joined, so it never started
+                            // and has no actual start time) has nothing to record -- not a missing recording.
+                            && s.ActualStartAtUtc != null
                             && s.RecordingMissingAlertSentAtUtc == null
                             && s.ScheduledEndAtUtc >= windowStart
                             && s.ScheduledEndAtUtc <= windowEnd)

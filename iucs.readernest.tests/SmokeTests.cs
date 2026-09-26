@@ -1616,21 +1616,22 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
-        public async Task MarkNoShowSystemAsync_AppliesSameCarryForwardAndPayout_ButSkipsTheOwnershipCheck()
+        public async Task MarkNoShowSystemAsync_UnattendedClass_IsCompleted_NoMakeUp_AndSkipsTheOwnershipCheck()
         {
             // The background no-show detector has no signed-in caller to check — this is the
-            // method it calls instead of the human-facing MarkNoShowAsync.
+            // method it calls instead of the human-facing MarkNoShowAsync. Client policy: a class
+            // the family neither cancelled nor joined is Completed, no make-up, teacher earns 0.
             var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
             _db.CurrentUser.UserId = null; // no "current user" at all, as in a background job
 
-            var carried = await CreateSessionService().MarkNoShowSystemAsync(
+            var result = await CreateSessionService().MarkNoShowSystemAsync(
                 session.Id, NoShowParty.Student, "Auto-detected: no student/parent joined.");
 
+            Assert.Equal(SessionStatus.Completed, result.Status);
             var original = await _db.Context.ClassSessions.FindAsync(session.Id);
-            Assert.Equal(SessionStatus.StudentNoShow, original!.Status);
-            Assert.Equal(SessionStatus.CarriedForward, (await _db.Context.ClassSessions.FindAsync(carried.Id))!.Status);
-            var item = Assert.Single(_db.Context.PayoutItems.ToList());
-            Assert.Equal(PayoutItemType.StudentNoShowWaiting, item.Type);
+            Assert.Equal(SessionStatus.Completed, original!.Status);
+            Assert.DoesNotContain(_db.Context.ClassSessions.ToList(), s => s.CarriedForwardFromSessionId == session.Id);
+            Assert.Empty(_db.Context.PayoutItems.ToList());
         }
 
         [Fact]
@@ -3851,7 +3852,7 @@ namespace iucs.readernest.tests
 
             var billing = CreateBillingService();
             var admission = new ManualAdmissionService(
-                _db.UnitOfWork, demoService, CreateUserService(), CreateEnrollmentService(), billing,
+                _db.UnitOfWork, demoService, CreateUserService(), CreateEnrollmentService(), billing, CreateBatchService(),
                 _auditLog, new ConfigurationBuilder().Build(), NullLogger<ManualAdmissionService>.Instance);
             var result = await admission.AdmitAsync(demo.Id, new ManualAdmissionRequest
             {
@@ -3906,7 +3907,7 @@ namespace iucs.readernest.tests
             await _db.Context.SaveChangesAsync();
             var demoService = CreateDemoBookingService();
             var admission = new ManualAdmissionService(
-                _db.UnitOfWork, demoService, CreateUserService(), CreateEnrollmentService(), CreateBillingService(),
+                _db.UnitOfWork, demoService, CreateUserService(), CreateEnrollmentService(), CreateBillingService(), CreateBatchService(),
                 _auditLog, new ConfigurationBuilder().Build(), NullLogger<ManualAdmissionService>.Instance);
 
             var options = await admission.GetOptionsAsync();
@@ -3938,6 +3939,139 @@ namespace iucs.readernest.tests
             var discounted = await Admit("9222222222", 8000, 2);
             Assert.Equal(8000, discounted.AmountDue);
             Assert.Equal(ConversionStatus.PaymentPending, discounted.Booking.ConversionStatus);
+        }
+
+        [Fact]
+        public async Task ManualAdmission_PlanWithCustomAmount_BillsThatAmountNowAndOnRenewal()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var plan = new PackagePlan { Name = "Monthly", BillingType = BillingType.Subscription, BillingCycle = BillingCycle.Monthly, Price = 2000 };
+            _db.Context.AddRange(teacher, plan,
+                new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" });
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Asha Rao", ParentPhone = "9876500000", ChildName = "Riya",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+            var admission = new ManualAdmissionService(
+                _db.UnitOfWork, demoService, CreateUserService(), CreateEnrollmentService(), CreateBillingService(), CreateBatchService(),
+                _auditLog, new ConfigurationBuilder().Build(), NullLogger<ManualAdmissionService>.Instance);
+
+            var result = await admission.AdmitAsync(demo.Id, new ManualAdmissionRequest
+            {
+                ParentName = "Asha Rao", ParentPhone = "9876500000",
+                ChildFirstName = "Riya", ChildDateOfBirth = new DateOnly(2018, 5, 1),
+                PackagePlanId = plan.Id, Amount = 1500,
+            });
+
+            Assert.Equal(1500, result.AmountDue);
+            var subscription = await _db.Context.Subscriptions.SingleAsync(s => s.ChildId == result.ChildId);
+            Assert.Equal(1500, subscription.PriceOverride);
+
+            // Renewal bills the agreed amount, not the plan's listed price.
+            var billing = CreateBillingService();
+            await billing.CancelSubscriptionAsync(subscription.Id);
+            await billing.RenewSubscriptionAsync(subscription.Id);
+            var amounts = await _db.Context.Invoices.AsNoTracking()
+                .Where(i => i.SubscriptionId == subscription.Id).Select(i => i.Amount).ToListAsync();
+            Assert.Equal(2, amounts.Count);
+            Assert.All(amounts, a => Assert.Equal(1500, a));
+        }
+
+        [Fact]
+        public async Task ManualAdmission_PlanAtZero_LeavesAPaidInvoice_NotAPendingOne()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var plan = new PackagePlan { Name = "Monthly", BillingType = BillingType.Subscription, BillingCycle = BillingCycle.Monthly, Price = 2000 };
+            _db.Context.AddRange(teacher, plan,
+                new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" });
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Zed", ParentPhone = "9876511111", ChildName = "Kid",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+            var admission = new ManualAdmissionService(
+                _db.UnitOfWork, demoService, CreateUserService(), CreateEnrollmentService(), CreateBillingService(), CreateBatchService(),
+                _auditLog, new ConfigurationBuilder().Build(), NullLogger<ManualAdmissionService>.Instance);
+
+            var result = await admission.AdmitAsync(demo.Id, new ManualAdmissionRequest
+            {
+                ParentName = "Zed", ParentPhone = "9876511111", ChildFirstName = "Kid",
+                ChildDateOfBirth = new DateOnly(2018, 5, 1), PackagePlanId = plan.Id, Amount = 0,
+            });
+
+            Assert.Equal(0, result.AmountDue);
+            var status = await _db.Context.Invoices.AsNoTracking().Where(i => i.Id == result.InvoiceId).Select(i => i.Status).SingleAsync();
+            Assert.Equal(InvoiceStatus.Paid, status);
+        }
+
+        [Fact]
+        public async Task ReadyForEnrollment_ForEmailParent_SendsTheNewWelcomeEmail_NotTheGenericOne()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Nisha Rao", ParentEmail = "nisha.rao@example.com", ParentPhone = "9555555555", ChildName = "Ira",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+
+            _emailSender.Sent.Clear();
+            await demoService.UpdateConversionStatusAsync(demo.Id,
+                new UpdateConversionStatusRequest { ConversionStatus = ConversionStatus.ReadyForEnrollment });
+
+            Assert.DoesNotContain(_emailSender.Sent, m => m.To == "nisha.rao@example.com" && m.Subject.Contains("account is ready"));
+            var welcome = Assert.Single(_emailSender.Sent, m => m.To == "nisha.rao@example.com" && m.Subject.Contains("login details"));
+            Assert.Contains("Forgot your PIN", welcome.Body);
+            var user = await _db.Context.Users.SingleAsync(u => u.Email == "nisha.rao@example.com");
+            Assert.Contains(await CreateUserService().RevealPinAsync(user.Id), welcome.Body);
+        }
+
+        [Fact]
+        public async Task AdmissionInvoices_StopBeingExemptOnceTheLeadIsEnrolled()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Super Reader", Type = CourseType.Group,
+                DurationMinutes = 45, Price = 5000, TotalSessions = 36, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            _db.Context.AddRange(teacher, category, course,
+                new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" });
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Dev Shah", ParentEmail = "dev.shah@example.com", ParentPhone = "9666666666", ChildName = "Om",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+            var admission = new AdmissionPaymentService(
+                _db.UnitOfWork, demoService, CreateUserService(), CreateBillingService(), _notifications, _auditLog, new ConfigurationBuilder().Build());
+            var link = await admission.SendPaymentLinkAsync(demo.Id, new SendAdmissionPaymentLinkRequest { CourseId = course.Id });
+            var invoiceId = link.Booking.InvoiceId!.Value;
+
+            Assert.Contains(invoiceId, await AdmissionInvoices.ExemptFromOverdueHandlingAsync(_db.UnitOfWork));
+
+            var booking = await _db.Context.DemoBookings.SingleAsync(b => b.Id == demo.Id);
+            booking.ConversionStatus = ConversionStatus.Enrolled;
+            await _db.Context.SaveChangesAsync();
+
+            Assert.DoesNotContain(invoiceId, await AdmissionInvoices.ExemptFromOverdueHandlingAsync(_db.UnitOfWork));
         }
 
         [Fact]
@@ -4979,7 +5113,7 @@ namespace iucs.readernest.tests
             await _db.Context.SaveChangesAsync();
 
             var carried = await CreateSessionService().MarkNoShowAsync(
-                session.Id, new MarkNoShowRequest { Party = NoShowParty.Student });
+                session.Id, new MarkNoShowRequest { Party = NoShowParty.Teacher });
 
             Assert.Equal(SessionStatus.CarriedForward, carried.Status);
             Assert.NotEqual(oneWeekOut, DateOnly.FromDateTime(carried.ScheduledStartAtUtc));
@@ -5693,8 +5827,11 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
-        public async Task StudentNoShow_AddsWaitingAmount_AndCarriesSessionForward()
+        public async Task StudentNoShow_OnABatchClass_IsCompleted_WithNoMakeUp_AndZeroTeacherPay()
         {
+            // Client policy (2026-09-26): unattended (not cancelled before the cut-off, not joined)
+            // = Completed, no make-up class, and the teacher earns nothing for it -- even with a
+            // pay rate configured.
             var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
             await CreatePayoutService().SetRateAsync(new SavePayoutRateRequest
             {
@@ -5703,15 +5840,13 @@ namespace iucs.readernest.tests
                 EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
             });
 
-            var carried = await CreateSessionService().MarkNoShowAsync(
+            var result = await CreateSessionService().MarkNoShowAsync(
                 session.Id, new MarkNoShowRequest { Party = NoShowParty.Student });
 
-            var original = await _db.Context.ClassSessions.FindAsync(session.Id);
-            Assert.Equal(SessionStatus.StudentNoShow, original!.Status);
-            Assert.Equal(session.ScheduledStartAtUtc.AddDays(7), carried.ScheduledStartAtUtc);
-            var item = Assert.Single(_db.Context.PayoutItems.ToList());
-            Assert.Equal(PayoutItemType.StudentNoShowWaiting, item.Type);
-            Assert.Equal(49500, item.Amount); // 1100/min * 45 min
+            Assert.Equal(SessionStatus.Completed, result.Status);
+            Assert.Equal(SessionStatus.Completed, (await _db.Context.ClassSessions.FindAsync(session.Id))!.Status);
+            Assert.DoesNotContain(_db.Context.ClassSessions.ToList(), s => s.CarriedForwardFromSessionId == session.Id);
+            Assert.Empty(_db.Context.PayoutItems.ToList());
         }
 
         [Fact]
@@ -9948,6 +10083,218 @@ namespace iucs.readernest.tests
             await Assert.ThrowsAsync<NotFoundException>(() => folders.SetBatchAccessAsync(folder.Id, Guid.NewGuid(), new SetResourceFolderBatchAccessRequest { AddBatchIds = [Guid.NewGuid()] }));
         }
 
+        [Fact]
+        public async Task ParentCancel_IsClosedInsideTheCutoff_AndTheCutoffIsConfigurable()
+        {
+            var (parent, session) = await SeedParentOwnedUpcomingClassAsync();
+            var tracked = await _db.Context.ClassSessions.FirstAsync(s => s.Id == session.Id);
+            tracked.ScheduledStartAtUtc = DateTime.UtcNow.AddMinutes(30);
+            tracked.ScheduledEndAtUtc = DateTime.UtcNow.AddMinutes(75);
+            await _db.Context.SaveChangesAsync();
+
+            // Default cut-off is 60 minutes: a class 30 minutes away can no longer be cancelled online.
+            var ex = await Assert.ThrowsAsync<DomainValidationException>(
+                () => CreateSessionService().CancelByParentAsync(parent.Id, session.Id, "Unwell"));
+            Assert.Contains("60 minutes", ex.Message);
+            Assert.Equal(SessionStatus.Scheduled, (await _db.Context.ClassSessions.AsNoTracking().FirstAsync(s => s.Id == session.Id)).Status);
+
+            // An admin lowers the cut-off to 15 minutes: the same class is now cancellable.
+            _db.Context.AppSettings.Add(new AppSetting { Category = SettingCategory.Notifications, Key = PolicySettings.CancelCutoffMinutesKey, Value = "15", IsPublic = true });
+            await _db.Context.SaveChangesAsync();
+            await CreateSessionService().CancelByParentAsync(parent.Id, session.Id, "Unwell");
+            Assert.Equal(SessionStatus.Cancelled, (await _db.Context.ClassSessions.AsNoTracking().FirstAsync(s => s.Id == session.Id)).Status);
+        }
+
+        [Fact]
+        public async Task AdmissionPayment_LinkToPaymentToCounsellorEnroll_CreatesTheLoginAndSendsTheWelcomeEmail()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Super Reader", Type = CourseType.Group,
+                DurationMinutes = 45, Price = 16000, TotalSessions = 36, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            _db.Context.AddRange(teacher, category, course,
+                new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" });
+            await _db.Context.SaveChangesAsync();
+
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Asha Rao", ParentEmail = "asha.parent@example.com", ParentPhone = "9876543210", ChildName = "Riya",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+
+            var billing = CreateBillingService();
+            var admission = new AdmissionPaymentService(
+                _db.UnitOfWork, demoService, CreateUserService(), billing, _notifications, _auditLog, new ConfigurationBuilder().Build());
+
+            // Nothing to verify before a link exists; a discount can't exceed the course fee.
+            await Assert.ThrowsAsync<DomainValidationException>(() => admission.VerifyAndEnrollAsync(demo.Id));
+            await Assert.ThrowsAsync<DomainValidationException>(() => admission.SendPaymentLinkAsync(
+                demo.Id, new SendAdmissionPaymentLinkRequest { CourseId = course.Id, Amount = 17000 }));
+
+            // Counsellor issues the link at the agreed, discounted amount.
+            _emailSender.Sent.Clear();
+            var link = await admission.SendPaymentLinkAsync(
+                demo.Id, new SendAdmissionPaymentLinkRequest { CourseId = course.Id, Amount = 14000 });
+            Assert.Equal(16000, link.ListPrice);
+            Assert.Equal(14000, link.Amount);
+            Assert.Contains("/pay/", link.PaymentUrl);
+            Assert.Equal(ConversionStatus.PaymentPending, link.Booking.ConversionStatus);
+            Assert.Equal(14000, link.Booking.InvoiceAmount);
+
+            // The account exists (the invoice needs it) but the parent is NOT sent a login yet.
+            var parentUser = await _db.Context.Users.SingleAsync(u => u.Email == "asha.parent@example.com");
+            Assert.DoesNotContain(_emailSender.Sent, m => m.To == parentUser.Email && (m.Subject.Contains("account is ready") || m.Subject.Contains("login details")));
+            // ...and no "invoice issued" email either: they aren't enrolled (or logged in) yet.
+            Assert.DoesNotContain(_emailSender.Sent, m => m.To == parentUser.Email && m.Subject.StartsWith("Invoice "));
+
+            // Until the lead is Enrolled the payment-link invoice is exempt from overdue handling,
+            // reminders and fee suspension (a family-level invoice would otherwise block a sibling).
+            Assert.Contains(link.Booking.InvoiceId!.Value, await AdmissionInvoices.ExemptFromOverdueHandlingAsync(_db.UnitOfWork));
+
+            // The parent's page shows the discounted amount and won't start until the terms are accepted.
+            var token = link.PaymentUrl.Split("/pay/")[1];
+            var page = await admission.GetPublicPaymentAsync(token);
+            Assert.Equal(14000, page.Amount);
+            Assert.False(page.IsPaid);
+            await Assert.ThrowsAsync<DomainValidationException>(
+                () => admission.StartPublicPaymentAsync(token, new StartPublicAdmissionPaymentRequest { TermsAccepted = false }));
+            var started = await admission.StartPublicPaymentAsync(token, new StartPublicAdmissionPaymentRequest { TermsAccepted = true });
+            Assert.False(string.IsNullOrEmpty(started.Url));
+            Assert.NotNull((await demoService.GetAsync(demo.Id)).TermsAcceptedAtUtc);
+            await Assert.ThrowsAsync<NotFoundException>(() => admission.GetPublicPaymentAsync("not-a-real-token"));
+
+            // Terms are asked once, at the first payment: now accepted, the page no longer asks.
+            Assert.False((await admission.GetPublicPaymentAsync(token)).TermsRequired);
+            Assert.False(string.IsNullOrEmpty(
+                (await admission.StartPublicPaymentAsync(token, new StartPublicAdmissionPaymentRequest { TermsAccepted = false })).Url));
+
+            // Nothing to Enroll until a payment has actually been received.
+            var invoiceId = link.Booking.InvoiceId!.Value;
+            await Assert.ThrowsAsync<DomainValidationException>(() => admission.VerifyAndEnrollAsync(demo.Id));
+
+            // Client rule: even a PART payment counts as received -- no separate verification --
+            // and the counsellor can Enroll straight away. The balance stays due on the invoice.
+            await billing.RecordPaymentAsync(invoiceId, new RecordPaymentRequest { Amount = 4000 });
+            Assert.Equal(ConversionStatus.PaymentReceived, (await demoService.GetAsync(demo.Id)).ConversionStatus);
+            var partInvoice = await _db.Context.Invoices.AsNoTracking().SingleAsync(i => i.Id == invoiceId);
+            Assert.Equal(InvoiceStatus.PartiallyPaid, partInvoice.Status);
+            Assert.Equal(4000, partInvoice.AmountPaid);
+
+            // Counsellor clicks Enroll: the welcome email goes out automatically.
+            _emailSender.Sent.Clear();
+            var enrolled = await admission.VerifyAndEnrollAsync(demo.Id);
+            Assert.Equal(ConversionStatus.ReadyForEnrollment, enrolled.ConversionStatus);
+            Assert.NotNull(enrolled.PaymentVerifiedAtUtc);
+            Assert.Null(enrolled.IssuedLogin); // an email parent gets their login by email, not WhatsApp
+            var welcome = Assert.Single(_emailSender.Sent, m => m.To == parentUser.Email && m.Subject.Contains("login details"));
+            var pin = await CreateUserService().RevealPinAsync(parentUser.Id);
+            Assert.Contains(pin, welcome.Body);
+            Assert.Contains("asha.parent@example.com", welcome.Body);
+            Assert.Contains("child", welcome.Body, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Forgot your PIN", welcome.Body);
+
+            // The parent signs in with the emailed PIN, and can't be enrolled twice.
+            var login = await CreateAuthService().LoginAsync(new LoginRequest { Email = parentUser.Email, Pin = pin });
+            Assert.Equal(UserRole.Parent, login.User.Role);
+            await Assert.ThrowsAsync<DomainValidationException>(() => admission.VerifyAndEnrollAsync(demo.Id));
+
+            // The rest of the fee later completes the invoice without disturbing the enrollment.
+            await billing.RecordPaymentAsync(invoiceId, new RecordPaymentRequest { Amount = 10000 });
+            Assert.Equal(InvoiceStatus.Paid, (await _db.Context.Invoices.AsNoTracking().SingleAsync(i => i.Id == invoiceId)).Status);
+            Assert.Equal(ConversionStatus.ReadyForEnrollment, (await demoService.GetAsync(demo.Id)).ConversionStatus);
+        }
+
+        [Fact]
+        public async Task AdmissionPayment_PhoneOnlyParent_IsEnrolledWithAWhatsAppPin_AndNoEmail()
+        {
+            // Client rule: email is NOT mandatory -- a parent without one logs in with their mobile
+            // number and the counsellor sends the PIN on WhatsApp, exactly as before.
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Super Reader", Type = CourseType.Group,
+                DurationMinutes = 45, Price = 9000, TotalSessions = 36, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            _db.Context.AddRange(teacher, category, course,
+                new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" });
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Meena Iyer", ParentPhone = "9444444444", ChildName = "Kabir",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+            var billing = CreateBillingService();
+            var admission = new AdmissionPaymentService(
+                _db.UnitOfWork, demoService, CreateUserService(), billing, _notifications, _auditLog, new ConfigurationBuilder().Build());
+
+            var link = await admission.SendPaymentLinkAsync(demo.Id, new SendAdmissionPaymentLinkRequest { CourseId = course.Id });
+            Assert.Equal(9000, link.Amount); // no discount typed: the course fee
+            await billing.RecordPaymentAsync(link.Booking.InvoiceId!.Value, new RecordPaymentRequest { Amount = 9000 });
+
+            _emailSender.Sent.Clear();
+            var enrolled = await admission.VerifyAndEnrollAsync(demo.Id);
+
+            Assert.Equal(ConversionStatus.ReadyForEnrollment, enrolled.ConversionStatus);
+            Assert.NotNull(enrolled.IssuedLogin);
+            Assert.Equal("9444444444", enrolled.IssuedLogin!.LoginId);
+            Assert.Contains(enrolled.IssuedLogin.TemporaryPin, enrolled.IssuedLogin.WhatsAppMessage);
+            Assert.DoesNotContain(_emailSender.Sent, m => m.Subject.Contains("login details")); // nothing emailed
+            var login = await CreateAuthService().LoginAsync(new LoginRequest { Email = "9444444444", Pin = enrolled.IssuedLogin.TemporaryPin });
+            Assert.Equal(UserRole.Parent, login.User.Role);
+        }
+
+        [Fact]
+        public async Task ParentTerms_AreAskedOnlyUntilTheFirstAcceptance()
+        {
+            var parent = await _db.SeedUserAsync($"pt-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            _db.Context.Add(new ParentProfile { UserId = parent.Id });
+            await _db.Context.SaveChangesAsync();
+            var portal = new ParentPortalService(_db.UnitOfWork);
+
+            Assert.True(await portal.IsTermsAcceptanceRequiredAsync(parent.Id));
+            await portal.AcceptTermsAsync(parent.Id);
+            Assert.False(await portal.IsTermsAcceptanceRequiredAsync(parent.Id));
+
+            // Idempotent: a later call keeps the original acceptance time.
+            var first = (await _db.Context.ParentProfiles.AsNoTracking().SingleAsync(p => p.UserId == parent.Id)).TermsAcceptedAtUtc;
+            await portal.AcceptTermsAsync(parent.Id);
+            Assert.Equal(first, (await _db.Context.ParentProfiles.AsNoTracking().SingleAsync(p => p.UserId == parent.Id)).TermsAcceptedAtUtc);
+        }
+
+        [Fact]
+        public async Task ParentTerms_AreNotAskedOfExistingParentsWhoHavePaidBefore()
+        {
+            // Client: T&C only for parents enrolling for the first time, not existing parents.
+            var parent = await _db.SeedUserAsync($"pe-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var profile = new ParentProfile { UserId = parent.Id };
+            _db.Context.AddRange(profile,
+                new PaymentAccount { Name = "P", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "t", GatewayAccountRef = "p" });
+            await _db.Context.SaveChangesAsync();
+            var portal = new ParentPortalService(_db.UnitOfWork);
+            Assert.True(await portal.IsTermsAcceptanceRequiredAsync(parent.Id)); // new parent, nothing paid
+
+            var invoice = await CreateBillingService().CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = profile.Id, DepartmentId = WellKnownDepartments.Phonics,
+                Amount = 5000, DueDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            });
+            (await _db.Context.Invoices.SingleAsync(i => i.Id == invoice.Id)).AmountPaid = 2500;
+            await _db.Context.SaveChangesAsync();
+
+            Assert.False(await portal.IsTermsAcceptanceRequiredAsync(parent.Id)); // existing, has paid
+            Assert.Null((await _db.Context.ParentProfiles.AsNoTracking().SingleAsync(p => p.Id == profile.Id)).TermsAcceptedAtUtc);
+        }
+
         private async Task<(User Parent, ClassSession Session)> SeedParentOwnedUpcomingClassAsync()
         {
             var (batch, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1); // tomorrow, Scheduled
@@ -9957,6 +10304,46 @@ namespace iucs.readernest.tests
             _db.Context.AddRange(profile, child, new BatchEnrollment { BatchId = batch.Id, Child = child, Status = EnrollmentStatus.Active });
             await _db.Context.SaveChangesAsync();
             return (parent, session);
+        }
+
+        [Fact]
+        public async Task ParentCancel_OneToOne_AddsTheMakeUpAtTheEndOfTheCourse()
+        {
+            // T&C §6: a cancelled 1:1 class "will be adjusted at the end of the course".
+            var (parent, session) = await SeedParentOwnedUpcomingClassAsync();
+            var laterClass = new ClassSession
+            {
+                BatchId = session.BatchId, TeacherProfileId = session.TeacherProfileId,
+                ScheduledStartAtUtc = session.ScheduledStartAtUtc.AddDays(21),
+                ScheduledEndAtUtc = session.ScheduledEndAtUtc.AddDays(21),
+            };
+            _db.Context.Add(laterClass);
+            await _db.Context.SaveChangesAsync();
+
+            await CreateSessionService().CancelByParentAsync(parent.Id, session.Id, "Travelling");
+
+            var makeUp = await _db.Context.ClassSessions.AsNoTracking().SingleAsync(s => s.CarriedForwardFromSessionId == session.Id);
+            Assert.Equal(laterClass.ScheduledStartAtUtc.AddDays(7), makeUp.ScheduledStartAtUtc);
+        }
+
+        [Fact]
+        public async Task ParentCancel_GroupClass_IsCancelledOnlyWhenEveryChildHasCancelled()
+        {
+            // T&C §7: one family = absence only; once every enrolled child has cancelled, the
+            // group class itself is cancelled and made up.
+            var (parentA, session) = await SeedParentOwnedUpcomingClassAsync();
+            var parentB = await _db.SeedUserAsync($"pg-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var childB = new Child { ParentProfile = new ParentProfile { UserId = parentB.Id }, FirstName = "Mira", LastName = "B" };
+            _db.Context.AddRange(childB, new BatchEnrollment { BatchId = session.BatchId!.Value, Child = childB, Status = EnrollmentStatus.Active });
+            await _db.Context.SaveChangesAsync();
+            var service = CreateSessionService();
+
+            await service.CancelByParentAsync(parentA.Id, session.Id, "Unwell");
+            Assert.Equal(SessionStatus.Scheduled, (await _db.Context.ClassSessions.AsNoTracking().SingleAsync(s => s.Id == session.Id)).Status);
+
+            await service.CancelByParentAsync(parentB.Id, session.Id, "Travelling");
+            Assert.Equal(SessionStatus.Cancelled, (await _db.Context.ClassSessions.AsNoTracking().SingleAsync(s => s.Id == session.Id)).Status);
+            Assert.True(await _db.Context.ClassSessions.AnyAsync(s => s.CarriedForwardFromSessionId == session.Id));
         }
 
         [Fact]
@@ -9983,7 +10370,7 @@ namespace iucs.readernest.tests
             Assert.StartsWith("Class cancelled by parent", mail.Subject);
             Assert.Contains("Child is unwell", mail.Body);
             Assert.Contains("Izaan A", mail.Body);
-            Assert.Contains("make-up class has been scheduled", mail.Body);
+            Assert.Contains("make-up class has been added at the end of the course", mail.Body);
         }
 
         [Fact]

@@ -32,5 +32,13 @@ namespace iucs.readernest.application.Dto.Users
 
         /// <summary>Named role (preset) to assign immediately; only valid when Role is Sub Admin.</summary>
         public Guid? RoleDefinitionId { get; set; }
+
+        /// <summary>
+        /// Internal only (never bound from a request body): create the account without sending
+        /// the welcome email. The portal admission flow makes the parent's account when it issues
+        /// the payment link, but the parent only gets their login once the counsellor clicks Enroll.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonIgnore]
+        public bool SuppressWelcomeEmail { get; set; }
     }
 }

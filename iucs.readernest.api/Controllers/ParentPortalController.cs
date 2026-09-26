@@ -65,6 +65,20 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _parentPortal.GetInvoicesAsync(UserId(), cancellationToken));
         }
 
+        /// <summary>Whether the Terms and Conditions still need accepting -- only before a parent's first payment.</summary>
+        [HttpGet("terms-status")]
+        public async Task<ActionResult<TermsStatusDto>> TermsStatus(CancellationToken cancellationToken)
+        {
+            return Ok(new TermsStatusDto { Required = await _parentPortal.IsTermsAcceptanceRequiredAsync(UserId(), cancellationToken) });
+        }
+
+        [HttpPost("terms/accept")]
+        public async Task<IActionResult> AcceptTerms(CancellationToken cancellationToken)
+        {
+            await _parentPortal.AcceptTermsAsync(UserId(), cancellationToken);
+            return NoContent();
+        }
+
         /// <summary>Enabled payment methods (gateways + Cash) for the Pay Now popup, from Settings → Integrations.</summary>
         [HttpGet("payment-methods")]
         public async Task<ActionResult<IReadOnlyList<PaymentMethodOptionDto>>> PaymentMethods(CancellationToken cancellationToken)

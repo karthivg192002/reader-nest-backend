@@ -217,6 +217,10 @@ namespace iucs.readernest.application.Dto.Billing
 
         [Required]
         public DateOnly StartDate { get; set; }
+
+        /// <summary>Agreed amount per billing cycle instead of the plan's listed price; null = plan price.</summary>
+        [Range(0, 10000000)]
+        public decimal? PriceOverride { get; set; }
     }
 
     public class FeeSuspensionDto

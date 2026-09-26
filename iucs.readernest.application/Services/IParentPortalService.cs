@@ -22,6 +22,12 @@ namespace iucs.readernest.application.Services
 
         Task<IReadOnlyList<InvoiceDto>> GetInvoicesAsync(Guid parentUserId, CancellationToken cancellationToken = default);
 
+        /// <summary>Whether this parent still has to accept the Terms and Conditions (only their first payment asks).</summary>
+        Task<bool> IsTermsAcceptanceRequiredAsync(Guid parentUserId, CancellationToken cancellationToken = default);
+
+        /// <summary>Records the parent's Terms and Conditions acceptance (idempotent: the first time wins).</summary>
+        Task AcceptTermsAsync(Guid parentUserId, CancellationToken cancellationToken = default);
+
         /// <summary>
         /// Validates the grant, downloadability flag and suspension state before
         /// handing back the resource for a parent download.

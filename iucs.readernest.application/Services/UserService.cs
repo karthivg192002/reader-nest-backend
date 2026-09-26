@@ -269,18 +269,21 @@ namespace iucs.readernest.application.Services
 
             // Requirement: the account holder receives login credentials on creation.
             // The plain-text temp PIN lives only in this email, never in the database.
-            await _notifications.SendTemplatedEmailAsync(
-                user.Id,
-                user.Email,
-                NotificationType.General,
-                "welcome-credentials",
-                new Dictionary<string, string>
-                {
-                    ["FirstName"] = user.FirstName,
-                    ["Email"] = user.Email,
-                    ["TemporaryPin"] = temporaryPin,
-                },
-                cancellationToken);
+            if (!request.SuppressWelcomeEmail)
+            {
+                await _notifications.SendTemplatedEmailAsync(
+                    user.Id,
+                    user.Email,
+                    NotificationType.General,
+                    "welcome-credentials",
+                    new Dictionary<string, string>
+                    {
+                        ["FirstName"] = user.FirstName,
+                        ["Email"] = user.Email,
+                        ["TemporaryPin"] = temporaryPin,
+                    },
+                    cancellationToken);
+            }
 
             await _auditLog.StageAsync(AuditAction.Create, nameof(User), user.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);

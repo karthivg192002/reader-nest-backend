@@ -615,8 +615,34 @@ namespace iucs.readernest.application.Services
                     LastName = nameParts.Length > 1 ? nameParts[1] : string.Empty,
                     Phone = booking.ParentPhone,
                     Role = UserRole.Parent,
+                    // The generic "your account is ready" email is replaced by the parent welcome
+                    // email below (portal link, email, PIN and the child-details next step) -- the
+                    // same one the payment-link Enroll sends -- so every route into enrollment
+                    // welcomes the parent identically.
+                    SuppressWelcomeEmail = true,
                 },
                 cancellationToken);
+
+            if (ParentLogin.IsDeliverable(email))
+            {
+                var pin = await _userService.RevealPinAsync(created.Id, cancellationToken);
+                var portalUrl = (_configuration["Frontend:BaseUrl"] ?? "https://thereadernest.in").TrimEnd('/');
+                await _notificationService.SendTemplatedEmailAsync(
+                    created.Id,
+                    email,
+                    NotificationType.General,
+                    "parent-enrollment-welcome",
+                    new Dictionary<string, string>
+                    {
+                        ["FirstName"] = created.FirstName,
+                        ["Email"] = email,
+                        ["TemporaryPin"] = pin,
+                        ["PortalUrl"] = portalUrl,
+                        ["LoginUrl"] = portalUrl + "/login",
+                    },
+                    cancellationToken);
+            }
+
             return created.Id;
         }
 
@@ -1490,6 +1516,8 @@ namespace iucs.readernest.application.Services
             return _unitOfWork.Repository<DemoBooking>().Query()
                 .Include(b => b.ClassSession!).ThenInclude(s => s.TeacherProfile).ThenInclude(t => t.User)
                 .Include(b => b.Participants)
+                .Include(b => b.Invoice)
+                .Include(b => b.Course)
                 .Include(b => b.Department);
         }
     }

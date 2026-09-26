@@ -34,11 +34,15 @@ namespace iucs.readernest.application.Dto.Admission
         [MaxLength(200)]
         public string ParentName { get; set; } = null!;
 
-        /// <summary>Optional: some parents want everything on WhatsApp. When blank,
-        /// <see cref="ParentPhone"/> is required (it becomes their portal login).</summary>
+        /// <summary>Optional (client decision 2026-09-26): a parent with no email still logs in with
+        /// their mobile number and gets their PIN over WhatsApp. When blank,
+        /// <see cref="ParentPhone"/> becomes their portal login.</summary>
         [MaxLength(256)]
         public string? ParentEmail { get; set; }
 
+        /// <summary>Mandatory: the counsellor's contact number for the parent, and the login for a
+        /// parent without an email. Enforced at the API boundary only.</summary>
+        [Required]
         [MaxLength(20)]
         public string? ParentPhone { get; set; }
 
@@ -157,6 +161,25 @@ namespace iucs.readernest.application.Dto.Admission
         /// <summary>Join-based attendance capture for the primary parent — set the first time a
         /// signed-in account matching <see cref="ParentEmail"/> joins this demo's classroom hub.</summary>
         public DateTime? ParentJoinedAtUtc { get; set; }
+
+        // Portal admission flow (payment link -> counsellor verification -> Enroll).
+        public Guid? CourseId { get; set; }
+
+        public string? CourseName { get; set; }
+
+        /// <summary>Parent-facing payment page (/pay/{token}) the counsellor shares; null until issued.</summary>
+        public string? PaymentLinkUrl { get; set; }
+
+        public Guid? InvoiceId { get; set; }
+
+        /// <summary>The agreed (possibly discounted) amount the payment link bills.</summary>
+        public decimal? InvoiceAmount { get; set; }
+
+        public decimal? InvoiceAmountPaid { get; set; }
+
+        public DateTime? TermsAcceptedAtUtc { get; set; }
+
+        public DateTime? PaymentVerifiedAtUtc { get; set; }
 
         public IReadOnlyList<DemoParticipantDto> Participants { get; set; } = [];
 

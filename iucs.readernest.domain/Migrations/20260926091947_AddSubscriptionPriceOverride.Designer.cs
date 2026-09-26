@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using iucs.readernest.domain.Data;
@@ -11,9 +12,11 @@ using iucs.readernest.domain.Data;
 namespace iucs.readernest.domain.Migrations
 {
     [DbContext(typeof(ReaderNestDbContext))]
-    partial class ReaderNestDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260926091947_AddSubscriptionPriceOverride")]
+    partial class AddSubscriptionPriceOverride
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -852,10 +855,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("character varying(64)")
                         .HasColumnName("conversion_status");
 
-                    b.Property<Guid?>("CourseId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("course_id");
-
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at_utc");
@@ -915,19 +914,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("character varying(1000)")
                         .HasColumnName("payment_link_url");
 
-                    b.Property<string>("PaymentToken")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("payment_token");
-
-                    b.Property<DateTime?>("PaymentVerifiedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("payment_verified_at_utc");
-
-                    b.Property<DateTime?>("TermsAcceptedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("terms_accepted_at_utc");
-
                     b.Property<DateTime?>("UpdatedAtUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_at_utc");
@@ -945,19 +931,11 @@ namespace iucs.readernest.domain.Migrations
                     b.HasIndex("ConversionStatus")
                         .HasDatabaseName("ix_demo_bookings_conversion_status");
 
-                    b.HasIndex("CourseId")
-                        .HasDatabaseName("ix_demo_bookings_course_id");
-
                     b.HasIndex("DepartmentId")
                         .HasDatabaseName("ix_demo_bookings_department_id");
 
                     b.HasIndex("InvoiceId")
                         .HasDatabaseName("ix_demo_bookings_invoice_id");
-
-                    b.HasIndex("PaymentToken")
-                        .IsUnique()
-                        .HasDatabaseName("ix_demo_bookings_payment_token")
-                        .HasFilter("\"is_deleted\" = FALSE");
 
                     b.ToTable("demo_bookings");
                 });
@@ -4562,10 +4540,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("payment_account_id");
 
-                    b.Property<DateTime?>("TermsAcceptedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("terms_accepted_at_utc");
-
                     b.Property<DateTime?>("UpdatedAtUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_at_utc");
@@ -5364,12 +5338,6 @@ namespace iucs.readernest.domain.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .HasConstraintName("fk_demo_bookings_class_sessions_class_session_id");
 
-                    b.HasOne("iucs.readernest.domain.Entities.Academics.Course", "Course")
-                        .WithMany()
-                        .HasForeignKey("CourseId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .HasConstraintName("fk_demo_bookings_courses_course_id");
-
                     b.HasOne("iucs.readernest.domain.Entities.Academics.Department", "Department")
                         .WithMany()
                         .HasForeignKey("DepartmentId")
@@ -5383,8 +5351,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasConstraintName("fk_demo_bookings_invoices_invoice_id");
 
                     b.Navigation("ClassSession");
-
-                    b.Navigation("Course");
 
                     b.Navigation("Department");
 

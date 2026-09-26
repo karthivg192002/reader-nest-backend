@@ -436,6 +436,16 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("This class has already started, so it can't be cancelled.");
             }
 
+            // Cut-off: cancelling/applying for leave closes a set time before the class (default
+            // 60 minutes; Settings -> parent.cancelCutoffMinutes). After it the class stays as
+            // scheduled and the parent must contact the centre.
+            var cutoffMinutes = await PolicySettings.GetCancelCutoffMinutesAsync(_unitOfWork, cancellationToken);
+            if (session.ScheduledStartAtUtc - DateTime.UtcNow < TimeSpan.FromMinutes(cutoffMinutes))
+            {
+                throw new DomainValidationException(
+                    $"Cancellations close {cutoffMinutes} minutes before the class starts, so this class can no longer be cancelled online.");
+            }
+
             // No admin approval: a parent's cancellation takes effect immediately, the mirror of a
             // teacher's cancellation reaching parents automatically.
             var parentName = $"{parent.FirstName} {parent.LastName}".Trim();
@@ -444,7 +454,14 @@ namespace iucs.readernest.application.Services
             string headline;
             string outcome;
 
-            if (enrolled.Any(e => e.ParentUserId != parentUserId))
+            // T&C §7: a group class is cancelled only when every enrolled child has cancelled;
+            // a 1:1 (or siblings-only) class is the family's own and is cancelled outright.
+            var isGroupClass = enrolled.Any(e => e.ParentUserId != parentUserId);
+            var cancelWholeClass = !isGroupClass;
+            headline = string.Empty;
+            outcome = string.Empty;
+
+            if (isGroupClass)
             {
                 // A shared group class: one family can't call it off for everyone else, so their
                 // cancellation means "my child won't attend" — marked Absent up front (so the
@@ -479,20 +496,36 @@ namespace iucs.readernest.application.Services
 
                 headline = $"{childNames} won't attend";
                 outcome = $"{childNames} will not attend this class. It is a group class, so it still goes ahead as scheduled for the other students.";
+
+                // Every enrolled child has now cancelled → nobody is left to teach, so the group
+                // class itself is cancelled (and made up) exactly like a 1:1 cancellation.
+                var allChildIds = enrolled.Select(e => e.ChildId).Distinct().ToList();
+                var absentCount = await _unitOfWork.Repository<SessionAttendance>().Query()
+                    .CountAsync(a => a.ClassSessionId == session.Id && a.ChildId != null
+                        && allChildIds.Contains(a.ChildId.Value) && a.Status == AttendanceStatus.Absent, cancellationToken);
+                cancelWholeClass = absentCount >= allChildIds.Count;
             }
-            else
+
+            if (cancelWholeClass)
             {
-                // The family's own class (1:1, or siblings together): cancelled outright, with the
-                // reason recorded on the class so staff see who cancelled and why, and a make-up
-                // class placed automatically — a week later at the same time, skipping holidays and
-                // this batch's other classes, same placement as a carried-forward no-show.
+                // Cancelled outright, with the reason recorded on the class so staff see who
+                // cancelled and why. T&C §6: the class is not lost -- a make-up is added at the END
+                // of the course (after the batch's last scheduled class), skipping holidays and the
+                // batch's other classes.
                 session.Status = SessionStatus.Cancelled;
                 var storedReason = $"Cancelled by parent ({parentName}): {reason}";
                 session.CancellationReason = storedReason.Length <= 500 ? storedReason : storedReason[..500];
 
                 var duration = session.ScheduledEndAtUtc - session.ScheduledStartAtUtc;
+                var lastClassStart = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.BatchId == session.BatchId && s.Id != session.Id
+                        && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward))
+                    .MaxAsync(s => (DateTime?)s.ScheduledStartAtUtc, cancellationToken);
+                // Same weekday/time, one week after whichever is later: this class or the course's
+                // last remaining one.
+                var anchor = lastClassStart is { } last && last > session.ScheduledStartAtUtc ? last : session.ScheduledStartAtUtc;
                 var makeUpStart = await NextAvailableCarryForwardSlotAsync(
-                    session.ScheduledStartAtUtc.AddDays(7), session.BatchId, duration, cancellationToken);
+                    anchor.AddDays(7), session.BatchId, duration, cancellationToken);
                 var makeUp = new ClassSession
                 {
                     BatchId = session.BatchId,
@@ -510,8 +543,8 @@ namespace iucs.readernest.application.Services
                     changesJson: "{\"cancelledBy\":\"parent\",\"makeUpSession\":\"" + makeUp.Id + "\"}", cancellationToken: cancellationToken);
                 await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-                headline = "Class cancelled by parent";
-                outcome = $"The class has been cancelled and a make-up class has been scheduled for {DateTimeDisplay.ToLocalRange(makeUp.ScheduledStartAtUtc, makeUp.ScheduledEndAtUtc, teacher.TimeZoneId)}.";
+                headline = isGroupClass ? "Group class cancelled — every student cancelled" : "Class cancelled by parent";
+                outcome = $"The class has been cancelled and a make-up class has been added at the end of the course: {DateTimeDisplay.ToLocalRange(makeUp.ScheduledStartAtUtc, makeUp.ScheduledEndAtUtc, teacher.TimeZoneId)}.";
             }
 
             try
@@ -763,6 +796,34 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
+        /// <summary>
+        /// The unattended-class rule: Completed, no carry-forward (make-up) session, and no payout
+        /// item at all -- so the teacher's pay for it is zero. Deliberately does not go through
+        /// <see cref="CompleteCoreAsync"/>: that would accrue the normal session earning and email
+        /// a class summary to the parents for a class nobody attended.
+        /// </summary>
+        private async Task<ClassSessionDto> CompleteUnattendedClassAsync(
+            ClassSession session,
+            string? note,
+            CancellationToken cancellationToken)
+        {
+            session.Status = SessionStatus.Completed;
+            session.Summary = "Marked completed: the family did not join and had not cancelled before the cut-off. No make-up class is given.";
+
+            // Still recorded on the class session log so the miss is visible, best-effort.
+            await _eventLog.LogNoShowAsync(session, NoShowParty.Student, cancellationToken);
+
+            // The class counts towards the course like any completed one.
+            await MoveBatchToDormantIfCourseCompletedAsync(session, cancellationToken);
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
+                changesJson: "{\"unattended\":\"completed\",\"makeUp\":false,\"teacherPay\":0}",
+                cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return await GetAsync(session.Id, cancellationToken);
+        }
+
         private async Task<ClassSessionDto> MarkNoShowCoreAsync(
             ClassSession session,
             NoShowParty party,
@@ -772,6 +833,15 @@ namespace iucs.readernest.application.Services
             if (TerminalStatuses.Contains(session.Status))
             {
                 throw new DomainValidationException($"A session in status '{session.Status}' cannot be marked as a no-show.");
+            }
+
+            // Client policy (2026-09-26): a batch class the family neither cancelled before the
+            // cut-off nor joined counts as Completed -- the class is used up, no make-up is given
+            // and the teacher earns nothing for it. (A parent who DID cancel is handled by
+            // CancelByParentAsync and never reaches here.) Demos keep the old no-show handling.
+            if (party == NoShowParty.Student && session.BatchId.HasValue)
+            {
+                return await CompleteUnattendedClassAsync(session, note, cancellationToken);
             }
 
             session.Status = party == NoShowParty.Teacher
