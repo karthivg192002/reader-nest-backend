@@ -46,6 +46,7 @@ namespace iucs.readernest.application.Services
         private readonly IUserService _userService;
         private readonly IEnrollmentService _enrollmentService;
         private readonly IBillingService _billingService;
+        private readonly IBatchService _batchService;
         private readonly IAuditLogService _auditLog;
         private readonly IConfiguration _configuration;
         private readonly ILogger<ManualAdmissionService> _logger;
@@ -56,6 +57,7 @@ namespace iucs.readernest.application.Services
             IUserService userService,
             IEnrollmentService enrollmentService,
             IBillingService billingService,
+            IBatchService batchService,
             IAuditLogService auditLog,
             IConfiguration configuration,
             ILogger<ManualAdmissionService> logger)
@@ -65,6 +67,7 @@ namespace iucs.readernest.application.Services
             _userService = userService;
             _enrollmentService = enrollmentService;
             _billingService = billingService;
+            _batchService = batchService;
             _auditLog = auditLog;
             _configuration = configuration;
             _logger = logger;
@@ -82,7 +85,16 @@ namespace iucs.readernest.application.Services
                 .FirstOrDefaultAsync(b => b.Id == demoBookingId, cancellationToken)
                 ?? throw new NotFoundException(nameof(DemoBooking), demoBookingId);
 
-            if (booking.ConversionStatus == ConversionStatus.Enrolled || booking.InvoiceId.HasValue)
+            // A staff admission that died half-way (child created and demo flipped to Enrolled, but
+            // the plan/batch/invoice step failed) must be resumable, not dead-ended by the
+            // "already admitted" check. Only a demo that got its invoice, or was enrolled some
+            // other way, is truly done.
+            var priorForm = await _unitOfWork.Repository<EnrollmentForm>()
+                .FirstOrDefaultAsync(f => f.DemoBookingId == booking.Id
+                    && f.Status == EnrollmentFormStatus.Approved
+                    && f.ChildId != null
+                    && f.FormDataJson.Contains("enteredByStaff"), cancellationToken);
+            if (booking.InvoiceId.HasValue || (booking.ConversionStatus == ConversionStatus.Enrolled && priorForm is null))
             {
                 throw new DomainValidationException("This demo has already been admitted.");
             }
@@ -207,49 +219,80 @@ namespace iucs.readernest.application.Services
                 .FirstOrDefaultAsync(p => p.UserId == parent.Id, cancellationToken)
                 ?? throw new DomainValidationException("This parent account has no parent profile.");
 
-            // The enrollment form the parent would have filled in, filled in by staff, then
-            // approved through the normal review so every downstream step is identical.
-            var form = await _unitOfWork.Repository<EnrollmentForm>()
-                .FirstOrDefaultAsync(f => f.DemoBookingId == booking.Id && f.Status == EnrollmentFormStatus.Submitted, cancellationToken);
-            if (form is null)
+            Guid childId;
+            if (priorForm is not null)
             {
-                form = new EnrollmentForm
+                // Resume: the child already exists from the earlier attempt; finish only what's missing.
+                childId = priorForm.ChildId!.Value;
+                if (plan is not null && !await _unitOfWork.Repository<Subscription>().ExistsAsync(
+                        s => s.ChildId == childId && s.PackagePlanId == plan.Id && s.Status == SubscriptionStatus.Active, cancellationToken))
                 {
-                    ParentProfileId = parentProfile.Id,
-                    DemoBookingId = booking.Id,
-                    Status = EnrollmentFormStatus.Submitted,
-                    SubmittedAtUtc = DateTime.UtcNow,
-                    FormDataJson = JsonSerializer.Serialize(new
+                    await _billingService.CreateSubscriptionAsync(
+                        new CreateSubscriptionRequest
+                        {
+                            ParentProfileId = parentProfile.Id,
+                            ChildId = childId,
+                            PackagePlanId = plan.Id,
+                            StartDate = DateOnly.FromDateTime(DateTime.UtcNow),
+                            PriceOverride = request.Amount,
+                        },
+                        cancellationToken);
+                }
+                if (request.BatchId.HasValue && !await _unitOfWork.Repository<BatchEnrollment>().ExistsAsync(
+                        e => e.ChildId == childId && e.BatchId == request.BatchId.Value && e.Status == EnrollmentStatus.Active, cancellationToken))
+                {
+                    await _batchService.AssignStudentAsync(request.BatchId.Value, childId, cancellationToken);
+                }
+            }
+            else
+            {
+                // The enrollment form the parent would have filled in, filled in by staff, then
+                // approved through the normal review so every downstream step is identical.
+                var form = await _unitOfWork.Repository<EnrollmentForm>()
+                    .FirstOrDefaultAsync(f => f.DemoBookingId == booking.Id && f.Status == EnrollmentFormStatus.Submitted, cancellationToken);
+                if (form is null)
+                {
+                    form = new EnrollmentForm
                     {
-                        childName = $"{request.ChildFirstName.Trim()} {request.ChildLastName?.Trim()}".Trim(),
-                        parentName = request.ParentName.Trim(),
-                        parentPhone = phone,
-                        childDateOfBirth = request.ChildDateOfBirth.ToString("yyyy-MM-dd"),
-                        enteredByStaff = true,
-                    }),
-                };
-                await _unitOfWork.Repository<EnrollmentForm>().AddAsync(form, cancellationToken);
-                await _auditLog.StageAsync(AuditAction.Create, nameof(EnrollmentForm), form.Id.ToString(),
-                    "{\"note\":\"Manual admission after demo\"}", cancellationToken);
-                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                        ParentProfileId = parentProfile.Id,
+                        DemoBookingId = booking.Id,
+                        Status = EnrollmentFormStatus.Submitted,
+                        SubmittedAtUtc = DateTime.UtcNow,
+                        FormDataJson = JsonSerializer.Serialize(new
+                        {
+                            childName = $"{request.ChildFirstName.Trim()} {request.ChildLastName?.Trim()}".Trim(),
+                            parentName = request.ParentName.Trim(),
+                            parentPhone = phone,
+                            childDateOfBirth = request.ChildDateOfBirth.ToString("yyyy-MM-dd"),
+                            enteredByStaff = true,
+                        }),
+                    };
+                    await _unitOfWork.Repository<EnrollmentForm>().AddAsync(form, cancellationToken);
+                    await _auditLog.StageAsync(AuditAction.Create, nameof(EnrollmentForm), form.Id.ToString(),
+                        "{\"note\":\"Manual admission after demo\"}", cancellationToken);
+                    await _unitOfWork.SaveChangesAsync(cancellationToken);
+                }
+
+                var reviewed = await _enrollmentService.ReviewAsync(
+                    form.Id,
+                    new ReviewEnrollmentFormRequest
+                    {
+                        Approve = true,
+                        ChildFirstName = request.ChildFirstName.Trim(),
+                        ChildLastName = request.ChildLastName?.Trim(),
+                        ChildDateOfBirth = request.ChildDateOfBirth,
+                        PackagePlanId = request.PackagePlanId,
+                        PackagePlanPriceOverride = request.Amount,
+                        BatchId = request.BatchId,
+                    },
+                    cancellationToken);
+                childId = reviewed.ChildId
+                    ?? throw new InvalidOperationException("Approved enrollment form has no child.");
             }
 
-            var reviewed = await _enrollmentService.ReviewAsync(
-                form.Id,
-                new ReviewEnrollmentFormRequest
-                {
-                    Approve = true,
-                    ChildFirstName = request.ChildFirstName.Trim(),
-                    ChildLastName = request.ChildLastName?.Trim(),
-                    ChildDateOfBirth = request.ChildDateOfBirth,
-                    PackagePlanId = request.PackagePlanId,
-                    BatchId = request.BatchId,
-                },
-                cancellationToken);
-            var childId = reviewed.ChildId
-                ?? throw new InvalidOperationException("Approved enrollment form has no child.");
-
-            if (course is not null && feeAmount > 0)
+            var alreadyInvoiced = priorForm is not null && await _unitOfWork.Repository<Invoice>().ExistsAsync(
+                i => i.ChildId == childId && i.Status != InvoiceStatus.Cancelled, cancellationToken);
+            if (course is not null && feeAmount > 0 && !alreadyInvoiced)
             {
                 // Course fee: a one-off invoice, the same thing staff create by hand in Billing.
                 await _billingService.CreateInvoiceAsync(
@@ -269,6 +312,14 @@ namespace iucs.readernest.application.Services
                 .Where(i => i.ChildId == childId && i.Status != InvoiceStatus.Cancelled)
                 .OrderByDescending(i => i.CreatedAtUtc)
                 .FirstOrDefaultAsync(cancellationToken);
+
+            // A plan agreed at ₹0: don't leave a Pending ₹0 invoice that would go overdue.
+            if (plan is not null && invoice is not null && invoice.Amount == 0 && invoice.Status != InvoiceStatus.Paid)
+            {
+                invoice.Status = InvoiceStatus.Paid;
+                invoice.PaidAtUtc = DateTime.UtcNow;
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
 
             string? paymentLinkUrl = null;
             string? paymentLinkError = null;

@@ -265,6 +265,7 @@ namespace iucs.readernest.application.Services
                         ParentProfileId = form.ParentProfileId,
                         ChildId = child.Id,
                         PackagePlanId = request.PackagePlanId.Value,
+                        PriceOverride = request.PackagePlanPriceOverride,
                         StartDate = DateOnly.FromDateTime(DateTime.UtcNow),
                     },
                     cancellationToken);

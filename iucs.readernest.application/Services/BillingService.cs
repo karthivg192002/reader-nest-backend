@@ -1983,6 +1983,7 @@ namespace iucs.readernest.application.Services
                 // one cycle out; a future start leaves the first invoice to the billing job
                 // on the start date itself.
                 NextBillingAtUtc = startsNow ? NextBillingFrom(startUtc, plan.BillingCycle) : startUtc,
+                PriceOverride = request.PriceOverride,
             };
             await _unitOfWork.Repository<Subscription>().AddAsync(subscription, cancellationToken);
             await _auditLog.StageAsync(AuditAction.Create, nameof(Subscription), subscription.Id.ToString(), cancellationToken: cancellationToken);
@@ -2016,7 +2017,7 @@ namespace iucs.readernest.application.Services
                         SubscriptionId = subscription.Id,
                         CourseId = plan.CourseId,
                         DepartmentId = await DepartmentIdForPlanAsync(plan, cancellationToken),
-                        Amount = plan.Price,
+                        Amount = subscription.PriceOverride ?? plan.Price,
                         DueDate = today.AddDays(7),
                     },
                     cancellationToken);
@@ -2094,7 +2095,7 @@ namespace iucs.readernest.application.Services
                     SubscriptionId = subscription.Id,
                     CourseId = plan.CourseId,
                     DepartmentId = await DepartmentIdForPlanAsync(plan, cancellationToken),
-                    Amount = plan.Price,
+                    Amount = subscription.PriceOverride ?? plan.Price,
                     DueDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(7),
                 },
                 cancellationToken);

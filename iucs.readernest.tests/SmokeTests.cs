@@ -3851,7 +3851,7 @@ namespace iucs.readernest.tests
 
             var billing = CreateBillingService();
             var admission = new ManualAdmissionService(
-                _db.UnitOfWork, demoService, CreateUserService(), CreateEnrollmentService(), billing,
+                _db.UnitOfWork, demoService, CreateUserService(), CreateEnrollmentService(), billing, CreateBatchService(),
                 _auditLog, new ConfigurationBuilder().Build(), NullLogger<ManualAdmissionService>.Instance);
             var result = await admission.AdmitAsync(demo.Id, new ManualAdmissionRequest
             {
@@ -3906,7 +3906,7 @@ namespace iucs.readernest.tests
             await _db.Context.SaveChangesAsync();
             var demoService = CreateDemoBookingService();
             var admission = new ManualAdmissionService(
-                _db.UnitOfWork, demoService, CreateUserService(), CreateEnrollmentService(), CreateBillingService(),
+                _db.UnitOfWork, demoService, CreateUserService(), CreateEnrollmentService(), CreateBillingService(), CreateBatchService(),
                 _auditLog, new ConfigurationBuilder().Build(), NullLogger<ManualAdmissionService>.Instance);
 
             var options = await admission.GetOptionsAsync();
@@ -3938,6 +3938,38 @@ namespace iucs.readernest.tests
             var discounted = await Admit("9222222222", 8000, 2);
             Assert.Equal(8000, discounted.AmountDue);
             Assert.Equal(ConversionStatus.PaymentPending, discounted.Booking.ConversionStatus);
+        }
+
+        [Fact]
+        public async Task ManualAdmission_PlanWithCustomAmount_BillsThatAmountNowAndOnRenewal()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var plan = new PackagePlan { Name = "Monthly", BillingType = BillingType.Subscription, BillingCycle = BillingCycle.Monthly, Price = 2000 };
+            _db.Context.AddRange(teacher, plan,
+                new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" });
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Asha Rao", ParentPhone = "9876500000", ChildName = "Riya",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+            var admission = new ManualAdmissionService(
+                _db.UnitOfWork, demoService, CreateUserService(), CreateEnrollmentService(), CreateBillingService(), CreateBatchService(),
+                _auditLog, new ConfigurationBuilder().Build(), NullLogger<ManualAdmissionService>.Instance);
+
+            var result = await admission.AdmitAsync(demo.Id, new ManualAdmissionRequest
+            {
+                ParentName = "Asha Rao", ParentPhone = "9876500000",
+                ChildFirstName = "Riya", ChildDateOfBirth = new DateOnly(2018, 5, 1),
+                PackagePlanId = plan.Id, Amount = 1500,
+            });
+
+            Assert.Equal(1500, result.AmountDue);
+            var subscription = await _db.Context.Subscriptions.SingleAsync(s => s.ChildId == result.ChildId);
+            Assert.Equal(1500, subscription.PriceOverride);
         }
 
         [Fact]

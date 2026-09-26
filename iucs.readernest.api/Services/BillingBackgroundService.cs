@@ -121,7 +121,7 @@ namespace iucs.readernest.api.Services
                                 // Route to the department's payment account (dual-gateway requirement);
                                 // plans without a course default to Phonics
                                 DepartmentId = subscription.PackagePlan.Course?.DepartmentId ?? WellKnownDepartments.Phonics,
-                                Amount = subscription.PackagePlan.Price,
+                                Amount = subscription.PriceOverride ?? subscription.PackagePlan.Price,
                                 DueDate = DateOnly.FromDateTime(now.AddDays(7)),
                             },
                             cancellationToken,
