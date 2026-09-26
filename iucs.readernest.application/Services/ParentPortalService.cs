@@ -351,6 +351,9 @@ namespace iucs.readernest.application.Services
             var invoices = await _unitOfWork.Repository<Invoice>().Query()
                 .Where(i => i.ParentProfileId == parent.Id)
                 .Include(i => i.Child)
+                // Admission / course-fee invoices are tied to the course directly (no subscription):
+                // without this the parent saw them with no course name.
+                .Include(i => i.Course)
                 .Include(i => i.Subscription).ThenInclude(s => s!.PackagePlan).ThenInclude(p => p.Course)
                 .OrderByDescending(i => i.IssuedAtUtc)
                 .ToListAsync(cancellationToken);
