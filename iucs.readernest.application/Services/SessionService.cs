@@ -454,7 +454,14 @@ namespace iucs.readernest.application.Services
             string headline;
             string outcome;
 
-            if (enrolled.Any(e => e.ParentUserId != parentUserId))
+            // T&C §7: a group class is cancelled only when every enrolled child has cancelled;
+            // a 1:1 (or siblings-only) class is the family's own and is cancelled outright.
+            var isGroupClass = enrolled.Any(e => e.ParentUserId != parentUserId);
+            var cancelWholeClass = !isGroupClass;
+            headline = string.Empty;
+            outcome = string.Empty;
+
+            if (isGroupClass)
             {
                 // A shared group class: one family can't call it off for everyone else, so their
                 // cancellation means "my child won't attend" — marked Absent up front (so the
@@ -489,20 +496,36 @@ namespace iucs.readernest.application.Services
 
                 headline = $"{childNames} won't attend";
                 outcome = $"{childNames} will not attend this class. It is a group class, so it still goes ahead as scheduled for the other students.";
+
+                // Every enrolled child has now cancelled → nobody is left to teach, so the group
+                // class itself is cancelled (and made up) exactly like a 1:1 cancellation.
+                var allChildIds = enrolled.Select(e => e.ChildId).Distinct().ToList();
+                var absentCount = await _unitOfWork.Repository<SessionAttendance>().Query()
+                    .CountAsync(a => a.ClassSessionId == session.Id && a.ChildId != null
+                        && allChildIds.Contains(a.ChildId.Value) && a.Status == AttendanceStatus.Absent, cancellationToken);
+                cancelWholeClass = absentCount >= allChildIds.Count;
             }
-            else
+
+            if (cancelWholeClass)
             {
-                // The family's own class (1:1, or siblings together): cancelled outright, with the
-                // reason recorded on the class so staff see who cancelled and why, and a make-up
-                // class placed automatically — a week later at the same time, skipping holidays and
-                // this batch's other classes, same placement as a carried-forward no-show.
+                // Cancelled outright, with the reason recorded on the class so staff see who
+                // cancelled and why. T&C §6: the class is not lost -- a make-up is added at the END
+                // of the course (after the batch's last scheduled class), skipping holidays and the
+                // batch's other classes.
                 session.Status = SessionStatus.Cancelled;
                 var storedReason = $"Cancelled by parent ({parentName}): {reason}";
                 session.CancellationReason = storedReason.Length <= 500 ? storedReason : storedReason[..500];
 
                 var duration = session.ScheduledEndAtUtc - session.ScheduledStartAtUtc;
+                var lastClassStart = await _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.BatchId == session.BatchId && s.Id != session.Id
+                        && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward))
+                    .MaxAsync(s => (DateTime?)s.ScheduledStartAtUtc, cancellationToken);
+                // Same weekday/time, one week after whichever is later: this class or the course's
+                // last remaining one.
+                var anchor = lastClassStart is { } last && last > session.ScheduledStartAtUtc ? last : session.ScheduledStartAtUtc;
                 var makeUpStart = await NextAvailableCarryForwardSlotAsync(
-                    session.ScheduledStartAtUtc.AddDays(7), session.BatchId, duration, cancellationToken);
+                    anchor.AddDays(7), session.BatchId, duration, cancellationToken);
                 var makeUp = new ClassSession
                 {
                     BatchId = session.BatchId,
@@ -520,8 +543,8 @@ namespace iucs.readernest.application.Services
                     changesJson: "{\"cancelledBy\":\"parent\",\"makeUpSession\":\"" + makeUp.Id + "\"}", cancellationToken: cancellationToken);
                 await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-                headline = "Class cancelled by parent";
-                outcome = $"The class has been cancelled and a make-up class has been scheduled for {DateTimeDisplay.ToLocalRange(makeUp.ScheduledStartAtUtc, makeUp.ScheduledEndAtUtc, teacher.TimeZoneId)}.";
+                headline = isGroupClass ? "Group class cancelled — every student cancelled" : "Class cancelled by parent";
+                outcome = $"The class has been cancelled and a make-up class has been added at the end of the course: {DateTimeDisplay.ToLocalRange(makeUp.ScheduledStartAtUtc, makeUp.ScheduledEndAtUtc, teacher.TimeZoneId)}.";
             }
 
             try

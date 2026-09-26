@@ -10283,6 +10283,46 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task ParentCancel_OneToOne_AddsTheMakeUpAtTheEndOfTheCourse()
+        {
+            // T&C §6: a cancelled 1:1 class "will be adjusted at the end of the course".
+            var (parent, session) = await SeedParentOwnedUpcomingClassAsync();
+            var laterClass = new ClassSession
+            {
+                BatchId = session.BatchId, TeacherProfileId = session.TeacherProfileId,
+                ScheduledStartAtUtc = session.ScheduledStartAtUtc.AddDays(21),
+                ScheduledEndAtUtc = session.ScheduledEndAtUtc.AddDays(21),
+            };
+            _db.Context.Add(laterClass);
+            await _db.Context.SaveChangesAsync();
+
+            await CreateSessionService().CancelByParentAsync(parent.Id, session.Id, "Travelling");
+
+            var makeUp = await _db.Context.ClassSessions.AsNoTracking().SingleAsync(s => s.CarriedForwardFromSessionId == session.Id);
+            Assert.Equal(laterClass.ScheduledStartAtUtc.AddDays(7), makeUp.ScheduledStartAtUtc);
+        }
+
+        [Fact]
+        public async Task ParentCancel_GroupClass_IsCancelledOnlyWhenEveryChildHasCancelled()
+        {
+            // T&C §7: one family = absence only; once every enrolled child has cancelled, the
+            // group class itself is cancelled and made up.
+            var (parentA, session) = await SeedParentOwnedUpcomingClassAsync();
+            var parentB = await _db.SeedUserAsync($"pg-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var childB = new Child { ParentProfile = new ParentProfile { UserId = parentB.Id }, FirstName = "Mira", LastName = "B" };
+            _db.Context.AddRange(childB, new BatchEnrollment { BatchId = session.BatchId!.Value, Child = childB, Status = EnrollmentStatus.Active });
+            await _db.Context.SaveChangesAsync();
+            var service = CreateSessionService();
+
+            await service.CancelByParentAsync(parentA.Id, session.Id, "Unwell");
+            Assert.Equal(SessionStatus.Scheduled, (await _db.Context.ClassSessions.AsNoTracking().SingleAsync(s => s.Id == session.Id)).Status);
+
+            await service.CancelByParentAsync(parentB.Id, session.Id, "Travelling");
+            Assert.Equal(SessionStatus.Cancelled, (await _db.Context.ClassSessions.AsNoTracking().SingleAsync(s => s.Id == session.Id)).Status);
+            Assert.True(await _db.Context.ClassSessions.AnyAsync(s => s.CarriedForwardFromSessionId == session.Id));
+        }
+
+        [Fact]
         public async Task ParentCancel_CancelsImmediately_AndEmailsTheTeacherWithTheReason()
         {
             var (parent, session) = await SeedParentOwnedUpcomingClassAsync();
@@ -10306,7 +10346,7 @@ namespace iucs.readernest.tests
             Assert.StartsWith("Class cancelled by parent", mail.Subject);
             Assert.Contains("Child is unwell", mail.Body);
             Assert.Contains("Izaan A", mail.Body);
-            Assert.Contains("make-up class has been scheduled", mail.Body);
+            Assert.Contains("make-up class has been added at the end of the course", mail.Body);
         }
 
         [Fact]
