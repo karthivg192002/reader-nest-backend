@@ -104,9 +104,63 @@ namespace iucs.readernest.application.Services
             var sessions = await query.OrderBy(s => s.ScheduledStartAtUtc).ToListAsync(cancellationToken);
             var activeRecordings = await SessionRecordingLookup.ActiveRecordingsBySessionAsync(
                 _unitOfWork, sessions.Select(s => s.Id), cancellationToken);
-            return sessions
+            var dtos = sessions
                 .Select(s => s.ToDto(activeRecordings.GetValueOrDefault(s.Id), activeRecordings.ContainsKey(s.Id)))
                 .ToList();
+            await FillStudentNamesAsync(dtos, cancellationToken);
+            return dtos;
+        }
+
+        /// <summary>
+        /// Staff calendars showed "No students assigned" for every class (reported live by a
+        /// coordinator): ChildIds is parent-portal-only, and staff screens had no names at all.
+        /// Batch classes get their active students; demos get the booked child (and any extra
+        /// children invited), also exposed as DemoChildName.
+        /// </summary>
+        private async Task FillStudentNamesAsync(List<ClassSessionDto> dtos, CancellationToken cancellationToken)
+        {
+            if (dtos.Count == 0)
+            {
+                return;
+            }
+
+            var batchIds = dtos.Where(d => d.BatchId.HasValue).Select(d => d.BatchId!.Value).Distinct().ToList();
+            var namesByBatch = batchIds.Count == 0
+                ? new Dictionary<Guid, List<string>>()
+                : (await _unitOfWork.Repository<BatchEnrollment>().Query()
+                        .Where(e => batchIds.Contains(e.BatchId) && e.Status == EnrollmentStatus.Active)
+                        .Select(e => new { e.BatchId, e.Child.FirstName, e.Child.LastName })
+                        .ToListAsync(cancellationToken))
+                    .GroupBy(e => e.BatchId)
+                    .ToDictionary(g => g.Key, g => g.Select(e => $"{e.FirstName} {e.LastName}".Trim()).OrderBy(n => n).ToList());
+
+            var demoIds = dtos.Where(d => d.Type == SessionType.Demo).Select(d => d.Id).ToList();
+            var demosBySession = demoIds.Count == 0
+                ? new Dictionary<Guid, List<string>>()
+                : (await _unitOfWork.Repository<DemoBooking>().Query()
+                        .Where(b => b.ClassSessionId != null && demoIds.Contains(b.ClassSessionId.Value))
+                        .Select(b => new
+                        {
+                            SessionId = b.ClassSessionId!.Value,
+                            b.ChildName,
+                            Extra = b.Participants.Where(p => p.IsChild).Select(p => p.Name).ToList(),
+                        })
+                        .ToListAsync(cancellationToken))
+                    .GroupBy(b => b.SessionId)
+                    .ToDictionary(g => g.Key, g => g.SelectMany(b => new[] { b.ChildName }.Concat(b.Extra)).ToList());
+
+            foreach (var dto in dtos)
+            {
+                if (dto.BatchId is { } batchId && namesByBatch.TryGetValue(batchId, out var names))
+                {
+                    dto.StudentNames = names;
+                }
+                else if (demosBySession.TryGetValue(dto.Id, out var demoNames))
+                {
+                    dto.StudentNames = demoNames;
+                    dto.DemoChildName ??= demoNames.FirstOrDefault();
+                }
+            }
         }
 
         public async Task<IReadOnlyList<ClassSessionDto>> ListForTeacherUserAsync(
@@ -128,7 +182,9 @@ namespace iucs.readernest.application.Services
                 ?? throw new NotFoundException(nameof(ClassSession), id);
 
             var activeRecordings = await SessionRecordingLookup.ActiveRecordingsBySessionAsync(_unitOfWork, [id], cancellationToken);
-            return session.ToDto(activeRecordings.GetValueOrDefault(id), activeRecordings.ContainsKey(id));
+            var dto = session.ToDto(activeRecordings.GetValueOrDefault(id), activeRecordings.ContainsKey(id));
+            await FillStudentNamesAsync([dto], cancellationToken);
+            return dto;
         }
 
         public async Task<ClassSessionDto> ScheduleAsync(ScheduleSessionRequest request, CancellationToken cancellationToken = default)
