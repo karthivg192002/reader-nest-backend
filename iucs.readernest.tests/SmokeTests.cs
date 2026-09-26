@@ -4014,6 +4014,67 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task ReadyForEnrollment_ForEmailParent_SendsTheNewWelcomeEmail_NotTheGenericOne()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Nisha Rao", ParentEmail = "nisha.rao@example.com", ParentPhone = "9555555555", ChildName = "Ira",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+
+            _emailSender.Sent.Clear();
+            await demoService.UpdateConversionStatusAsync(demo.Id,
+                new UpdateConversionStatusRequest { ConversionStatus = ConversionStatus.ReadyForEnrollment });
+
+            Assert.DoesNotContain(_emailSender.Sent, m => m.To == "nisha.rao@example.com" && m.Subject.Contains("account is ready"));
+            var welcome = Assert.Single(_emailSender.Sent, m => m.To == "nisha.rao@example.com" && m.Subject.Contains("login details"));
+            Assert.Contains("Forgot your PIN", welcome.Body);
+            var user = await _db.Context.Users.SingleAsync(u => u.Email == "nisha.rao@example.com");
+            Assert.Contains(await CreateUserService().RevealPinAsync(user.Id), welcome.Body);
+        }
+
+        [Fact]
+        public async Task AdmissionInvoices_StopBeingExemptOnceTheLeadIsEnrolled()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Super Reader", Type = CourseType.Group,
+                DurationMinutes = 45, Price = 5000, TotalSessions = 36, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            _db.Context.AddRange(teacher, category, course,
+                new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" });
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Dev Shah", ParentEmail = "dev.shah@example.com", ParentPhone = "9666666666", ChildName = "Om",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+            var admission = new AdmissionPaymentService(
+                _db.UnitOfWork, demoService, CreateUserService(), CreateBillingService(), _notifications, _auditLog, new ConfigurationBuilder().Build());
+            var link = await admission.SendPaymentLinkAsync(demo.Id, new SendAdmissionPaymentLinkRequest { CourseId = course.Id });
+            var invoiceId = link.Booking.InvoiceId!.Value;
+
+            Assert.Contains(invoiceId, await AdmissionInvoices.ExemptFromOverdueHandlingAsync(_db.UnitOfWork));
+
+            var booking = await _db.Context.DemoBookings.SingleAsync(b => b.Id == demo.Id);
+            booking.ConversionStatus = ConversionStatus.Enrolled;
+            await _db.Context.SaveChangesAsync();
+
+            Assert.DoesNotContain(invoiceId, await AdmissionInvoices.ExemptFromOverdueHandlingAsync(_db.UnitOfWork));
+        }
+
+        [Fact]
         public async Task ReadyForEnrollment_ForNoEmailParent_HandsStaffTheNewMobileLoginPin()
         {
             var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
@@ -10089,6 +10150,12 @@ namespace iucs.readernest.tests
             // The account exists (the invoice needs it) but the parent is NOT sent a login yet.
             var parentUser = await _db.Context.Users.SingleAsync(u => u.Email == "asha.parent@example.com");
             Assert.DoesNotContain(_emailSender.Sent, m => m.To == parentUser.Email && (m.Subject.Contains("account is ready") || m.Subject.Contains("login details")));
+            // ...and no "invoice issued" email either: they aren't enrolled (or logged in) yet.
+            Assert.DoesNotContain(_emailSender.Sent, m => m.To == parentUser.Email && m.Subject.StartsWith("Invoice "));
+
+            // Until the lead is Enrolled the payment-link invoice is exempt from overdue handling,
+            // reminders and fee suspension (a family-level invoice would otherwise block a sibling).
+            Assert.Contains(link.Booking.InvoiceId!.Value, await AdmissionInvoices.ExemptFromOverdueHandlingAsync(_db.UnitOfWork));
 
             // The parent's page shows the discounted amount and won't start until the terms are accepted.
             var token = link.PaymentUrl.Split("/pay/")[1];

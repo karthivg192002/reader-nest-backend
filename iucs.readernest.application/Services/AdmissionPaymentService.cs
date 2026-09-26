@@ -148,7 +148,8 @@ namespace iucs.readernest.application.Services
                     Amount = amount,
                     DueDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(FeeDueDays),
                 },
-                cancellationToken);
+                cancellationToken,
+                notifyParent: false);
 
             var tracked = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
                 .FirstAsync(b => b.Id == demoBookingId, cancellationToken);

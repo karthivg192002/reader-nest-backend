@@ -158,9 +158,13 @@ namespace iucs.readernest.api.Services
             // would have; UpdatedBy is deliberately left alone because this sweep is a system
             // action with no acting user, which is exactly what the interceptor records too.
             var today = DateOnly.FromDateTime(now);
+            // Admission payment-link invoices of leads that are not enrolled yet never age into
+            // Overdue (see AdmissionInvoices) -- otherwise an unpaid link could suspend a sibling.
+            var admissionExempt = await AdmissionInvoices.ExemptFromOverdueHandlingAsync(unitOfWork, cancellationToken);
             var overdueCount = await unitOfWork.Repository<Invoice>().ExecuteUpdateAsync(
                 i => (i.Status == InvoiceStatus.Pending || i.Status == InvoiceStatus.PartiallyPaid)
-                     && i.DueDate < today,
+                     && i.DueDate < today
+                     && !admissionExempt.Contains(i.Id),
                 setters => setters
                     .SetProperty(i => i.Status, InvoiceStatus.Overdue)
                     .SetProperty(i => i.UpdatedAtUtc, now),
@@ -203,7 +207,8 @@ namespace iucs.readernest.api.Services
                 var graceDays = await BillingSettings.GetSuspensionGraceDaysAsync(unitOfWork, cancellationToken);
                 var suspensionCutoff = today.AddDays(-graceDays);
                 var overdueInvoices = await unitOfWork.Repository<Invoice>().Query()
-                    .Where(i => i.Status == InvoiceStatus.Overdue && i.DueDate <= suspensionCutoff)
+                    .Where(i => i.Status == InvoiceStatus.Overdue && i.DueDate <= suspensionCutoff
+                                && !admissionExempt.Contains(i.Id))
                     .Select(i => new { i.ParentProfileId, i.ChildId, i.Id, i.InvoiceNumber })
                     .ToListAsync(cancellationToken);
 
@@ -415,10 +420,12 @@ namespace iucs.readernest.api.Services
             var reminderDays = await BillingSettings.GetReminderDaysBeforeDueAsync(unitOfWork, cancellationToken);
             var reminderWindow = today.AddDays(reminderDays);
 
+            var admissionExempt = await AdmissionInvoices.ExemptFromOverdueHandlingAsync(unitOfWork, cancellationToken);
             var dueInvoices = await unitOfWork.Repository<Invoice>().Query()
                 .Include(i => i.ParentProfile).ThenInclude(p => p.User)
                 .Where(i => (i.Status == InvoiceStatus.Pending || i.Status == InvoiceStatus.PartiallyPaid || i.Status == InvoiceStatus.Overdue)
-                            && i.DueDate <= reminderWindow)
+                            && i.DueDate <= reminderWindow
+                            && !admissionExempt.Contains(i.Id))
                 .ToListAsync(cancellationToken);
 
             foreach (var invoice in dueInvoices)
