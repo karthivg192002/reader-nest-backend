@@ -119,6 +119,7 @@ namespace iucs.readernest.tests
             Invoice invoice,
             PaymentAccount account,
             string? preferredMethodKey = null,
+            decimal? amount = null,
             CancellationToken cancellationToken = default)
         {
             return Task.FromResult(new PaymentLinkResult
@@ -158,13 +159,14 @@ namespace iucs.readernest.tests
             PaymentAccount account,
             string methodKey,
             InlinePayerInfo payer,
+            decimal? amount = null,
             CancellationToken cancellationToken = default)
         {
             return Task.FromResult(new InlineCheckoutResult
             {
                 KeyId = "rzp_test_fake",
                 OrderId = $"order_TEST-{invoice.InvoiceNumber}",
-                AmountMinor = (long)Math.Round((invoice.Amount - invoice.AmountPaid) * 100m),
+                AmountMinor = (long)Math.Round((amount ?? invoice.Amount - invoice.AmountPaid) * 100m),
                 Currency = invoice.Currency,
                 Description = $"Test order for {invoice.InvoiceNumber}",
                 PrefillName = payer.Name,

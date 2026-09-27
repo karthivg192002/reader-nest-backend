@@ -21,12 +21,12 @@ namespace iucs.readernest.application.Common
         private const int DefaultSuspensionGraceDays = 0;
 
         /// <summary>
-        /// Whether fee-default suspension is allowed to block anything at all. The centre isn't
-        /// tracking fees through the portal yet, so this defaults OFF (2026-09) until they ask for
-        /// it back -- flip this default to true (or set the "billing.suspensionEnabled" AppSetting
-        /// to "true") once fee tracking is live.
+        /// Whether fee-default suspension is allowed to block anything at all. Was OFF (2026-09) while
+        /// the centre wasn't tracking fees in the portal; back ON at their request (2026-09-25), with
+        /// the rule that a child is only suspended once their paid classes are used up (PaidClasses).
+        /// A "billing.suspensionEnabled" AppSetting of "false" still turns it off.
         /// </summary>
-        private const bool DefaultSuspensionEnabled = false;
+        private const bool DefaultSuspensionEnabled = true;
 
         /// <summary>Whether fee-default suspension may block login content, session join, or auto-create new suspensions.</summary>
         public static async Task<bool> IsSuspensionEnabledAsync(

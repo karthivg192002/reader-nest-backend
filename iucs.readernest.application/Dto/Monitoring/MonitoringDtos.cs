@@ -281,6 +281,10 @@ namespace iucs.readernest.application.Dto.Monitoring
         public string State { get; set; } = string.Empty;
         public DateTime ActiveSince { get; set; }
         public string? Instance { get; set; }
+        /// <summary>Participant named by a call-quality alert (PoorConnection's `person` label); null otherwise.</summary>
+        public string? Person { get; set; }
+        /// <summary>The alert's `room` label resolved to a class name (falls back to the raw room); null when the alert has no room.</summary>
+        public string? ClassName { get; set; }
     }
 
     /// <summary>Request body for POST .../jibri/min-replicas.</summary>
@@ -436,6 +440,21 @@ namespace iucs.readernest.application.Dto.Monitoring
         public List<UnattachedRecordingDto> Unattached { get; set; } = new();
     }
 
+    /// <summary>
+    /// One participant's stretch of degraded audio/video on one call, derived from JVB's own
+    /// bandwidth-estimation warnings. Many distinct rooms in a short window points at shared bridge
+    /// contention; a lone row reads as that person's own network at that moment.
+    /// </summary>
+    public class CallQualityIncidentDto
+    {
+        public string RoomName { get; set; } = "";
+        public string ParticipantLabel { get; set; } = "";
+        public DateTime FirstAtUtc { get; set; }
+        public DateTime LastAtUtc { get; set; }
+        public int EventCount { get; set; }
+        public double LowestKbps { get; set; }
+    }
+
     /// <summary>Everything the Server Monitoring dashboard needs in one call.</summary>
     public class MonitoringSummaryDto
     {
@@ -453,6 +472,10 @@ namespace iucs.readernest.application.Dto.Monitoring
         public BurstWorkerUsageDto? BurstWorkerUsage { get; set; }
         /// <summary>Null if main could not be reached -- unknown, not "healthy".</summary>
         public RecordingPipelineDto? RecordingPipeline { get; set; }
+        /// <summary>Recent per-participant audio/video degradation incidents, newest first. Empty if none in the lookback window or main was unreachable.</summary>
+        public List<CallQualityIncidentDto> CallQualityIncidents { get; set; } = new();
+        /// <summary>True when CallQualityIncidents' spread across distinct rooms suggests shared bridge contention rather than individual network variance.</summary>
+        public bool CallQualityIncidentsLookSystemic { get; set; }
         public DateTime GeneratedAtUtc { get; set; }
     }
 }

@@ -39,12 +39,13 @@ namespace iucs.readernest.api.Services.Payments
             Invoice invoice,
             PaymentAccount account,
             IReadOnlyDictionary<string, string?> config,
+            decimal? amount,
             CancellationToken cancellationToken)
         {
             var baseUrl = string.Equals(Value(config, "mode"), "live", StringComparison.OrdinalIgnoreCase)
                 ? "https://api.cashfree.com"
                 : "https://sandbox.cashfree.com";
-            var remaining = invoice.Amount - invoice.AmountPaid;
+            var remaining = amount ?? invoice.Amount - invoice.AmountPaid;
             var linkId = $"RN-{Guid.NewGuid():N}"[..24];
             var brandName = await BrandSettings.GetNameAsync(_unitOfWork, cancellationToken);
 

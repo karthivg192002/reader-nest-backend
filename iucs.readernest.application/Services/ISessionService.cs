@@ -26,6 +26,21 @@ namespace iucs.readernest.application.Services
         Task<ClassSessionDto> CancelAsync(Guid id, CancelSessionRequest request, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// A parent cancels their own child's upcoming class from the portal — immediately, with
+        /// no admin approval — and the class's teacher is emailed that the parent cancelled and
+        /// why. Only for a class that is the family's alone (not a shared group batch).
+        /// </summary>
+        /// <summary>
+        /// System-only completion (no caller check) for a class the teacher left without pressing
+        /// End Class and never rejoined — ended at <paramref name="teacherLeftAtUtc"/>, so a class
+        /// cut short is flagged for payout approval like any other. Only for
+        /// <c>AbandonedClassCompletionBackgroundService</c>; never exposed on a controller.
+        /// </summary>
+        Task<ClassSessionDto> CompleteAbandonedAsync(Guid id, DateTime teacherLeftAtUtc, CancellationToken cancellationToken = default);
+
+        Task<ClassSessionDto> CancelByParentAsync(Guid parentUserId, Guid sessionId, string reason, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Marks a session completed and, when all course sessions of the batch are done,
         /// automatically moves the batch to Dormant (course completion tracking).
         /// </summary>

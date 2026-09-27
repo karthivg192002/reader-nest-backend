@@ -28,12 +28,23 @@ namespace iucs.readernest.application.Dto.Sessions
         /// Docs/LONG_DURATION_SESSIONS.md); it's advisory only.</summary>
         public DateTime ScheduledEndAtUtc { get; set; }
 
-        /// <summary>True for a Demo-type session. Auto-recording is scoped to real, Regular
-        /// classes only ("don't record demo and personal link, only record session and class") —
-        /// the classroom screen needs this to know which kind of session it just joined, since
-        /// the Personal Meeting Room never calls this endpoint at all (no sessionId behind it)
-        /// and is excluded that way instead.</summary>
+        /// <summary>The caller's name as signed into the Jitsi token (what Jitsi shows for them,
+        /// including on the lobby's knock).</summary>
+        public string DisplayName { get; set; } = string.Empty;
+
+        /// <summary>True when an admin-team member (Admin, Sub Admin, Admission) is joining as a
+        /// monitor — the host's classroom admits them from the lobby automatically.</summary>
+        public bool IsMonitor { get; set; }
+
+        /// <summary>True for a Demo-type session (demos are auto-recorded like any other class).</summary>
         public bool IsDemo { get; set; }
+
+        /// <summary>Jitsi display names (the same "First Last" the join token carries) of every
+        /// active Admin / Sub Admin (RM, Coordinator, Counselor, Management) / Admission user.
+        /// Only filled in for a Teacher/Admin caller — the classroom screen auto-admits a
+        /// waiting-room knock from any of these names so staff can walk into a class without the
+        /// teacher having to let them in. Empty for everyone else.</summary>
+        public List<string> StaffNames { get; set; } = new();
     }
 
     /// <summary>

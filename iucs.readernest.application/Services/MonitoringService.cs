@@ -27,6 +27,7 @@ namespace iucs.readernest.application.Services
         private readonly IClassroomPresenceTracker _presenceTracker;
         private readonly IBurstWorkerUsageService _burstWorkerUsage;
         private readonly IRecordingPipelineService _recordingPipeline;
+        private readonly ICallQualityIncidentService _callQualityIncidents;
         private readonly MonitoringOptions _options;
 
         public MonitoringService(
@@ -35,6 +36,7 @@ namespace iucs.readernest.application.Services
             IClassroomPresenceTracker presenceTracker,
             IBurstWorkerUsageService burstWorkerUsage,
             IRecordingPipelineService recordingPipeline,
+            ICallQualityIncidentService callQualityIncidents,
             IOptions<MonitoringOptions> options)
         {
             _prometheus = prometheus;
@@ -42,6 +44,7 @@ namespace iucs.readernest.application.Services
             _presenceTracker = presenceTracker;
             _burstWorkerUsage = burstWorkerUsage;
             _recordingPipeline = recordingPipeline;
+            _callQualityIncidents = callQualityIncidents;
             _options = options.Value;
         }
 
@@ -55,9 +58,11 @@ namespace iucs.readernest.application.Services
             var alertsTask = _prometheus.GetActiveAlertsAsync(_options.PrometheusBaseUrl, cancellationToken);
             var burstUsageTask = _burstWorkerUsage.GetUsageSummaryAsync(cancellationToken);
             var pipelineTask = _recordingPipeline.GetAsync(cancellationToken);
+            var callQualityIncidentsTask = _callQualityIncidents.GetRecentAsync(cancellationToken);
 
-            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask).Append(burstUsageTask).Append(pipelineTask));
+            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask).Append(burstUsageTask).Append(pipelineTask).Append(callQualityIncidentsTask));
             var (dbHealthy, dbLatencyMs) = await databaseTask;
+            var callQualityIncidents = await callQualityIncidentsTask;
             // Sequential, not joined into the WhenAll above: this also queries via _unitOfWork,
             // and CheckDatabaseAsync already does too -- both use the same scoped DbContext,
             // which throws "a second operation was started on this context instance before a
@@ -65,6 +70,13 @@ namespace iucs.readernest.application.Services
             // concurrently (confirmed live: this exact crash took down the whole /summary
             // endpoint, not just this one field, the first time these ran side by side).
             var todayRecordings = await GetTodayRecordingSummaryAsync(cancellationToken);
+            var rawAlerts = await alertsTask;
+            // Also sequential for the same shared-DbContext reason as above.
+            var roomLabels = await GetRoomLabelsAsync(
+                rawAlerts.Select(a => a.Labels.TryGetValue("room", out var room) ? room : null)
+                    .OfType<string>()
+                    .ToList(),
+                cancellationToken);
 
             return new MonitoringSummaryDto
             {
@@ -76,18 +88,24 @@ namespace iucs.readernest.application.Services
                 DatabaseInsights = await insightsTask,
                 BurstWorkerUsage = await burstUsageTask,
                 RecordingPipeline = await pipelineTask,
+                CallQualityIncidents = callQualityIncidents,
+                CallQualityIncidentsLookSystemic = CallQualityIncidentParser.LooksSystemic(callQualityIncidents),
                 ConcurrentClassroomUsers = _presenceTracker.TotalConnectedUsers,
                 ActiveClassCount = _presenceTracker.ActiveClassCount,
-                ActiveAlerts = (await alertsTask)
+                ActiveAlerts = rawAlerts
                     .Select(a => new AlertDto
                     {
                         Name = a.Name,
                         Severity = a.Severity,
-                        Summary = a.Summary,
-                        Description = a.Description,
+                        Summary = WithRoomLabel(a.Summary, a.Labels, roomLabels),
+                        Description = WithRoomLabel(a.Description, a.Labels, roomLabels),
                         State = a.State,
                         ActiveSince = a.ActiveSince,
                         Instance = a.Labels.TryGetValue("instance", out var instance) ? instance : null,
+                        Person = a.Labels.TryGetValue("person", out var person) ? person : null,
+                        ClassName = a.Labels.TryGetValue("room", out var room)
+                            ? roomLabels.GetValueOrDefault(room, room)
+                            : null,
                     })
                     .OrderByDescending(a => a.Severity == "critical")
                     .ThenBy(a => a.ActiveSince)
@@ -95,6 +113,57 @@ namespace iucs.readernest.application.Services
                 TodayRecordings = todayRecordings,
                 GeneratedAtUtc = DateTime.UtcNow,
             };
+        }
+
+        /// <summary>
+        /// Maps Jitsi room names (the `room` label on call-quality alerts, e.g. PoorConnection) to
+        /// something an admin recognises: the class session's course/batch/teacher, or the owner of a
+        /// personal meeting room. Rooms that match neither are simply left out.
+        /// </summary>
+        private async Task<Dictionary<string, string>> GetRoomLabelsAsync(List<string> rooms, CancellationToken cancellationToken)
+        {
+            var labels = new Dictionary<string, string>();
+            rooms = rooms.Distinct().ToList();
+            if (rooms.Count == 0)
+            {
+                return labels;
+            }
+
+            var sessions = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.MeetingRoomId != null && rooms.Contains(s.MeetingRoomId))
+                .Include(s => s.Batch!).ThenInclude(b => b.Course)
+                .Include(s => s.TeacherProfile).ThenInclude(t => t.User)
+                .ToListAsync(cancellationToken);
+            foreach (var session in sessions.OrderBy(s => s.ScheduledStartAtUtc))
+            {
+                var course = session.Batch?.Course.Name ?? "Demo session";
+                var batch = session.Batch is null ? "" : $" – {session.Batch.Name}";
+                var teacher = $"{session.TeacherProfile.User.FirstName} {session.TeacherProfile.User.LastName}".Trim();
+                // Later sessions win if a room is ever reused.
+                labels[session.MeetingRoomId!] = teacher.Length > 0 ? $"{course}{batch} ({teacher})" : $"{course}{batch}";
+            }
+
+            var personalRooms = rooms.Where(r => !labels.ContainsKey(r)).ToList();
+            if (personalRooms.Count > 0)
+            {
+                var owners = await _unitOfWork.Repository<User>().Query()
+                    .Where(u => u.PersonalMeetingRoomId != null && personalRooms.Contains(u.PersonalMeetingRoomId))
+                    .Select(u => new { u.PersonalMeetingRoomId, u.FirstName, u.LastName })
+                    .ToListAsync(cancellationToken);
+                foreach (var owner in owners)
+                {
+                    labels[owner.PersonalMeetingRoomId!] = $"{$"{owner.FirstName} {owner.LastName}".Trim()}'s personal room";
+                }
+            }
+
+            return labels;
+        }
+
+        private static string WithRoomLabel(string text, IReadOnlyDictionary<string, string> alertLabels, Dictionary<string, string> roomLabels)
+        {
+            return alertLabels.TryGetValue("room", out var room) && roomLabels.TryGetValue(room, out var label)
+                ? text.Replace(room, label)
+                : text;
         }
 
         /// <summary>
@@ -420,10 +489,10 @@ namespace iucs.readernest.application.Services
             // round trip once we know the server is even up, so these fire after the up check below
             // rather than joining the big WhenAll batch.
             var conferencesTask = server.TracksLiveCalls
-                ? _prometheus.QueryScalarAsync(baseUrl, $"jitsi_jvb_conferences{{instance=\"{instanceLabel}\"}}", cancellationToken)
+                ? _prometheus.QueryScalarAsync(baseUrl, $"sum(jitsi_jvb_conferences{{instance=\"{instanceLabel}\"}})", cancellationToken)
                 : Task.FromResult<double?>(null);
             var participantsTask = server.TracksLiveCalls
-                ? _prometheus.QueryScalarAsync(baseUrl, $"jitsi_jvb_current_endpoints{{instance=\"{instanceLabel}\"}}", cancellationToken)
+                ? _prometheus.QueryScalarAsync(baseUrl, $"sum(jitsi_jvb_current_endpoints{{instance=\"{instanceLabel}\"}})", cancellationToken)
                 : Task.FromResult<double?>(null);
 
             // rn_jibri_instances_total/busy come from each server's own textfile-collector
@@ -447,18 +516,21 @@ namespace iucs.readernest.application.Services
                 : Task.FromResult<double?>(null);
 
             // Same JVB endpoint as above -- call quality, not just up/down.
-            Task<double?> jvbMetric(string name) => server.TracksLiveCalls
-                ? _prometheus.QueryScalarAsync(baseUrl, $"{name}{{instance=\"{instanceLabel}\"}}", cancellationToken)
+            // There are two video bridges (jvb, jvb2) scraped under the same instance label, so every JVB
+            // reading is aggregated across them: totals add (counts, bitrates, ICE tallies), quality
+            // averages (RTT, loss), stress reports the busier bridge, and health is the weaker one.
+            Task<double?> jvbMetric(string name, string aggregate = "sum") => server.TracksLiveCalls
+                ? _prometheus.QueryScalarAsync(baseUrl, $"{aggregate}({name}{{instance=\"{instanceLabel}\"}})", cancellationToken)
                 : Task.FromResult<double?>(null);
-            var rttTask = jvbMetric("jitsi_jvb_average_rtt");
-            var lossInTask = jvbMetric("jitsi_jvb_incoming_loss_fraction");
-            var lossOutTask = jvbMetric("jitsi_jvb_outgoing_loss_fraction");
+            var rttTask = jvbMetric("jitsi_jvb_average_rtt", "avg");
+            var lossInTask = jvbMetric("jitsi_jvb_incoming_loss_fraction", "avg");
+            var lossOutTask = jvbMetric("jitsi_jvb_outgoing_loss_fraction", "avg");
             var bitrateInTask = jvbMetric("jitsi_jvb_incoming_bitrate");
             var bitrateOutTask = jvbMetric("jitsi_jvb_outgoing_bitrate");
             var sendingAudioTask = jvbMetric("jitsi_jvb_endpoints_sending_audio");
             var sendingVideoTask = jvbMetric("jitsi_jvb_endpoints_sending_video");
-            var stressTask = jvbMetric("jitsi_jvb_stress");
-            var jvbHealthyTask = jvbMetric("jitsi_jvb_healthy");
+            var stressTask = jvbMetric("jitsi_jvb_stress", "max");
+            var jvbHealthyTask = jvbMetric("jitsi_jvb_healthy", "min");
             // jitsi_jvb_ice_succeeded(_relayed)_total come from the same native JVB endpoint --
             // "relayed" means the winning ICE candidate pair used the Cloudflare TURN fallback
             // (see turn-credentials-refresh.sh) instead of a direct UDP path, i.e. this

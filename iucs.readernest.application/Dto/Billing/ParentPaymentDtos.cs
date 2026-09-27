@@ -8,6 +8,12 @@ namespace iucs.readernest.application.Dto.Billing
         [Required]
         [MaxLength(100)]
         public string MethodKey { get; set; } = null!;
+
+        /// <summary>
+        /// How much to pay now, for an installment plan (e.g. 2,000 of a 9,000 balance). Null =
+        /// the whole outstanding balance, as before. Must be between 1 and the balance.
+        /// </summary>
+        public decimal? Amount { get; set; }
     }
 
     /// <summary>

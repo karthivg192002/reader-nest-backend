@@ -1,13 +1,17 @@
 using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Payouts;
+using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
+using iucs.readernest.domain.Entities.Academics;
+using iucs.readernest.domain.Entities.Admission;
 using iucs.readernest.domain.Entities.Payouts;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using iucs.readernest.domain.Repository;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 
 namespace iucs.readernest.application.Services
 {
@@ -16,12 +20,18 @@ namespace iucs.readernest.application.Services
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
         private readonly INotificationService _notificationService;
+        private readonly IConfiguration _configuration;
 
-        public PayoutService(IUnitOfWork unitOfWork, IAuditLogService auditLog, INotificationService notificationService)
+        public PayoutService(
+            IUnitOfWork unitOfWork,
+            IAuditLogService auditLog,
+            INotificationService notificationService,
+            IConfiguration configuration)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
             _notificationService = notificationService;
+            _configuration = configuration;
         }
 
         public async Task<IReadOnlyList<PayoutRateDto>> ListRatesAsync(
@@ -146,7 +156,7 @@ namespace iucs.readernest.application.Services
             return await ListAsync(null, null, teacher.Id, cancellationToken);
         }
 
-        public async Task AccrueForSessionAsync(
+        public async Task<PayoutItem> AccrueForSessionAsync(
             ClassSession session,
             PayoutItemType type,
             string? note,
@@ -209,29 +219,29 @@ namespace iucs.readernest.application.Services
             // tell them apart (see PayoutItem.RequiresReview's own doc comment). This only flags
             // for review; it never changes the amount itself.
             var requiresReview = false;
+            int? scheduledMinutes = null;
+            int? deliveredMinutes = null;
             if (type == PayoutItemType.SessionEarning && durationMinutes > 0)
             {
+                scheduledMinutes = durationMinutes;
                 var attendance = await _unitOfWork.Repository<SessionAttendance>().Query()
                     .Where(a => a.ClassSessionId == session.Id && a.TeacherProfileId == session.TeacherProfileId)
                     .FirstOrDefaultAsync(cancellationToken);
 
                 if (attendance?.JoinedAtUtc is { } joinedAtUtc)
                 {
-                    // LeftAtUtc is only set once the teacher's hub connection actually
-                    // disconnects, which for a self-completed class happens AFTER this call
-                    // (Complete → then the page unmounts and drops the connection) -- so at this
-                    // exact moment it is only populated when someone completes the class well
-                    // after the teacher already left (e.g. an admin cleaning up later). Falling
-                    // back to "now" correctly treats a still-connected teacher's own Complete
-                    // click as the real end of their attendance.
-                    var attendedEndUtc = attendance.LeftAtUtc ?? DateTime.UtcNow;
-                    var attendedMinutes = (attendedEndUtc - joinedAtUtc).TotalMinutes;
-                    var minFraction = await PayrollSettings.GetMinAttendanceFractionForReviewAsync(_unitOfWork, cancellationToken);
-                    if (attendedMinutes < durationMinutes * minFraction)
+                    deliveredMinutes = DeliveredMinutes(session, joinedAtUtc, attendance.LeftAtUtc ?? DateTime.UtcNow);
+
+                    // Core rule (client requirement): ANY class that ran for less than its
+                    // scheduled duration is flagged for payout approval — not only ones under
+                    // some percentage threshold, and never silently treated as a normal
+                    // completed class. Whole minutes, so a class that started a few seconds late
+                    // doesn't trip it.
+                    if (deliveredMinutes < durationMinutes)
                     {
                         requiresReview = true;
-                        var attendedNote = $"Teacher attended only {Math.Max(0, attendedMinutes):0} of {durationMinutes} scheduled minutes — review before finalizing.";
-                        note = string.IsNullOrEmpty(note) ? attendedNote : $"{note} ({attendedNote})";
+                        var shortNote = $"Class ran {deliveredMinutes} of {durationMinutes} scheduled minutes ({durationMinutes - deliveredMinutes} min short) — awaiting payout approval.";
+                        note = string.IsNullOrEmpty(note) ? shortNote : $"{note} ({shortNote})";
                     }
                 }
                 else
@@ -257,7 +267,7 @@ namespace iucs.readernest.application.Services
                 note = string.IsNullOrEmpty(note) ? rolledNote : $"{note} ({rolledNote})";
             }
 
-            payout.Items.Add(new PayoutItem
+            var item = new PayoutItem
             {
                 PayoutId = payout.Id,
                 ClassSessionId = session.Id,
@@ -265,8 +275,222 @@ namespace iucs.readernest.application.Services
                 Amount = amount,
                 Note = note,
                 RequiresReview = requiresReview,
-            });
+                ScheduledMinutes = scheduledMinutes,
+                DeliveredMinutes = deliveredMinutes,
+            };
+            payout.Items.Add(item);
             payout.TotalAmount += amount;
+            return item;
+        }
+
+        /// <summary>
+        /// Whole minutes the teacher was in class, counted inside the scheduled window: time
+        /// after the scheduled end never counts, and time before the scheduled start doesn't
+        /// either once the class window has actually begun (a teacher who joins at 2:58 for a
+        /// 3:00–3:30 class and leaves at 3:28 delivered 28 minutes, not 30). The start clip only
+        /// applies when the window began before the teacher left, so a class completed ahead of
+        /// its slot (an ad-hoc/rescheduled run) is still measured by the time actually spent.
+        /// </summary>
+        public static int DeliveredMinutes(ClassSession session, DateTime joinedAtUtc, DateTime leftAtUtc)
+        {
+            var end = leftAtUtc < session.ScheduledEndAtUtc ? leftAtUtc : session.ScheduledEndAtUtc;
+            var start = joinedAtUtc < session.ScheduledStartAtUtc && session.ScheduledStartAtUtc < leftAtUtc
+                ? session.ScheduledStartAtUtc
+                : joinedAtUtc;
+            var minutes = (end - start).TotalMinutes;
+            return minutes <= 0 ? 0 : (int)Math.Round(minutes, MidpointRounding.AwayFromZero);
+        }
+
+        public async Task NotifyPayoutReviewAsync(Guid payoutItemId, CancellationToken cancellationToken = default)
+        {
+            var approval = (await ApprovalQueryAsync(i => i.Id == payoutItemId, cancellationToken)).FirstOrDefault();
+            if (approval is null)
+            {
+                return;
+            }
+
+            // Admin plus every Sub Admin who can approve payouts — the Management / Founder
+            // presets carry Payouts:Approve as a required grant (RequiredSystemRolePermissions).
+            var module = PermissionModule.Payouts.ToString();
+            var approvers = _unitOfWork.Repository<SubAdminPermission>().Query();
+            var recipients = await _unitOfWork.Repository<User>().Query()
+                .Include(u => u.RoleDefinition)
+                .Where(u => u.Status == UserStatus.Active
+                            && (u.Role == UserRole.Admin
+                                || (u.Role == UserRole.SubAdmin
+                                    && approvers.Any(p => p.UserId == u.Id && p.Module == module && p.CanApprove))))
+                .ToListAsync(cancellationToken);
+
+            var baseUrl = (_configuration["Frontend:BaseUrl"] ?? "http://localhost:5173").TrimEnd('/');
+            foreach (var recipient in recipients)
+            {
+                var portal = recipient.Role == UserRole.Admin
+                    ? "/admin"
+                    : (recipient.RoleDefinition?.DefaultRoute ?? "/management").TrimEnd('/');
+                var tokens = new Dictionary<string, string>
+                {
+                    ["TeacherName"] = approval.TeacherName,
+                    ["ClassName"] = approval.ClassName,
+                    ["Students"] = string.IsNullOrWhiteSpace(approval.StudentNames) ? "—" : approval.StudentNames,
+                    ["ScheduledTime"] = approval.ScheduledStartAtUtc is { } s && approval.ScheduledEndAtUtc is { } e
+                        ? DateTimeDisplay.ToLocalRange(s, e, recipient.TimeZoneId)
+                        : "—",
+                    ["ScheduledMinutes"] = approval.ScheduledMinutes?.ToString() ?? "—",
+                    ["ActualMinutes"] = approval.DeliveredMinutes?.ToString() ?? "No attendance recorded",
+                    ["ShortfallMinutes"] = approval.ShortfallMinutes?.ToString() ?? "—",
+                    ["ApprovalsUrl"] = $"{baseUrl}{portal}/payout-approvals",
+                };
+                try
+                {
+                    await _notificationService.SendTemplatedEmailAsync(
+                        recipient.Id, recipient.Email, NotificationType.General, "short-class-payout-approval", tokens, cancellationToken);
+                }
+                catch (Exception)
+                {
+                    // Best-effort: the item is already saved and listed under Payout Approvals,
+                    // so one failed alert must not stop the rest or fail the class completion.
+                }
+            }
+        }
+
+        public async Task<IReadOnlyList<PayoutApprovalDto>> ListApprovalsAsync(bool pending, CancellationToken cancellationToken = default)
+        {
+            return pending
+                ? await ApprovalQueryAsync(i => i.RequiresReview, cancellationToken)
+                : await ApprovalQueryAsync(i => i.ReviewDecision != null, cancellationToken);
+        }
+
+        public async Task<PayoutApprovalDto> DecideApprovalAsync(
+            Guid payoutItemId,
+            Guid reviewerUserId,
+            DecidePayoutApprovalRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var item = await _unitOfWork.Repository<PayoutItem>().TrackedQuery()
+                .Include(i => i.Payout)
+                .FirstOrDefaultAsync(i => i.Id == payoutItemId, cancellationToken)
+                ?? throw new NotFoundException(nameof(PayoutItem), payoutItemId);
+
+            if (!item.RequiresReview)
+            {
+                throw new ConflictException("This class has already been decided.");
+            }
+
+            if (item.Payout.Status != PayoutStatus.Pending)
+            {
+                throw new DomainValidationException(
+                    $"This class's payout is already {item.Payout.Status} and can no longer be changed.");
+            }
+
+            var fullAmount = item.AmountBeforeReview ?? item.Amount;
+            var newAmount = request.Decision switch
+            {
+                PayoutReviewDecision.ApprovedFull => fullAmount,
+                PayoutReviewDecision.Rejected => 0m,
+                _ => request.Amount ?? ProRate(fullAmount, item.ScheduledMinutes, item.DeliveredMinutes),
+            };
+            if (request.Decision == PayoutReviewDecision.ApprovedPartial && (newAmount < 0 || newAmount > fullAmount))
+            {
+                throw new DomainValidationException($"A partial payout must be between 0 and the full amount ({fullAmount:0.00}).");
+            }
+
+            var label = request.Decision switch
+            {
+                PayoutReviewDecision.ApprovedFull => "Approved for full payout",
+                PayoutReviewDecision.ApprovedPartial => $"Approved for partial payout ({newAmount:0.00} of {fullAmount:0.00})",
+                _ => "Not approved for payout",
+            };
+            var decisionNote = string.IsNullOrWhiteSpace(request.Note) ? label : $"{label}: {request.Note.Trim()}";
+            item.Note = string.IsNullOrEmpty(item.Note) ? decisionNote : $"{item.Note} ({decisionNote})";
+            item.AmountBeforeReview = fullAmount;
+            item.Payout.TotalAmount += newAmount - item.Amount;
+            item.Amount = newAmount;
+            item.RequiresReview = false;
+            item.ReviewDecision = request.Decision;
+            item.ReviewedByUserId = reviewerUserId;
+            item.ReviewedAtUtc = DateTime.UtcNow;
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(PayoutItem), item.Id.ToString(),
+                changesJson: $"{{\"decision\":\"{request.Decision}\",\"amount\":{newAmount}}}", cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return (await ApprovalQueryAsync(i => i.Id == payoutItemId, cancellationToken)).First();
+        }
+
+        private static decimal ProRate(decimal fullAmount, int? scheduledMinutes, int? deliveredMinutes)
+        {
+            if (scheduledMinutes is not > 0)
+            {
+                return fullAmount;
+            }
+
+            var fraction = Math.Clamp((decimal)(deliveredMinutes ?? 0) / scheduledMinutes.Value, 0m, 1m);
+            return Math.Round(fullAmount * fraction, 2);
+        }
+
+        private async Task<List<PayoutApprovalDto>> ApprovalQueryAsync(
+            System.Linq.Expressions.Expression<Func<PayoutItem, bool>> filter,
+            CancellationToken cancellationToken)
+        {
+            var items = await _unitOfWork.Repository<PayoutItem>().Query()
+                .Where(i => i.Type == PayoutItemType.SessionEarning)
+                .Where(filter)
+                .Include(i => i.Payout).ThenInclude(p => p.TeacherProfile).ThenInclude(t => t.User)
+                .Include(i => i.ClassSession).ThenInclude(s => s!.Batch)
+                .OrderByDescending(i => i.CreatedAtUtc)
+                .Take(500)
+                .ToListAsync(cancellationToken);
+
+            var sessionIds = items.Where(i => i.ClassSessionId != null).Select(i => i.ClassSessionId!.Value).Distinct().ToList();
+            var batchIds = items.Where(i => i.ClassSession?.BatchId != null).Select(i => i.ClassSession!.BatchId!.Value).Distinct().ToList();
+            var students = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => batchIds.Contains(e.BatchId) && e.Status == EnrollmentStatus.Active)
+                .Select(e => new { e.BatchId, Name = e.Child.FirstName + " " + e.Child.LastName })
+                .ToListAsync(cancellationToken);
+            var demoChildren = await _unitOfWork.Repository<DemoBooking>().Query()
+                .Where(b => b.ClassSessionId != null && sessionIds.Contains(b.ClassSessionId.Value))
+                .Select(b => new { SessionId = b.ClassSessionId!.Value, b.ChildName })
+                .ToListAsync(cancellationToken);
+            var reviewerIds = items.Where(i => i.ReviewedByUserId != null).Select(i => i.ReviewedByUserId!.Value).Distinct().ToList();
+            var reviewers = await _unitOfWork.Repository<User>().Query()
+                .Where(u => reviewerIds.Contains(u.Id))
+                .Select(u => new { u.Id, Name = u.FirstName + " " + u.LastName })
+                .ToDictionaryAsync(u => u.Id, u => u.Name.Trim(), cancellationToken);
+
+            return items.Select(i =>
+            {
+                var session = i.ClassSession;
+                var fullAmount = i.AmountBeforeReview ?? i.Amount;
+                string? studentNames = session?.BatchId is { } batchId
+                    ? string.Join(", ", students.Where(s => s.BatchId == batchId).Select(s => s.Name.Trim()))
+                    : demoChildren.FirstOrDefault(d => d.SessionId == session?.Id)?.ChildName;
+                return new PayoutApprovalDto
+                {
+                    ItemId = i.Id,
+                    PayoutId = i.PayoutId,
+                    PayoutStatus = i.Payout.Status,
+                    ClassSessionId = i.ClassSessionId,
+                    TeacherName = $"{i.Payout.TeacherProfile.User.FirstName} {i.Payout.TeacherProfile.User.LastName}".Trim(),
+                    ClassName = session?.Batch?.Name ?? (session?.Type == SessionType.Demo ? "Demo class" : "Class session"),
+                    StudentNames = string.IsNullOrWhiteSpace(studentNames) ? null : studentNames,
+                    ScheduledStartAtUtc = session?.ScheduledStartAtUtc,
+                    ScheduledEndAtUtc = session?.ScheduledEndAtUtc,
+                    ActualStartAtUtc = session?.ActualStartAtUtc,
+                    ActualEndAtUtc = session?.ActualEndAtUtc,
+                    ScheduledMinutes = i.ScheduledMinutes,
+                    DeliveredMinutes = i.DeliveredMinutes,
+                    ShortfallMinutes = i.ScheduledMinutes is { } sm ? sm - (i.DeliveredMinutes ?? 0) : null,
+                    FullAmount = fullAmount,
+                    ProRatedAmount = ProRate(fullAmount, i.ScheduledMinutes, i.DeliveredMinutes),
+                    Amount = i.Amount,
+                    Pending = i.RequiresReview,
+                    Decision = i.ReviewDecision,
+                    ReviewedByName = i.ReviewedByUserId is { } rid && reviewers.TryGetValue(rid, out var rn) ? rn : null,
+                    ReviewedAtUtc = i.ReviewedAtUtc,
+                    Note = i.Note,
+                    CreatedAtUtc = i.CreatedAtUtc,
+                };
+            }).ToList();
         }
 
         public async Task<PayoutDto> AdjustItemAsync(
@@ -298,6 +522,17 @@ namespace iucs.readernest.application.Services
             var delta = request.NewAmount - item.Amount;
             var adjustmentNote = $"Adjusted from {item.Amount:0.00} to {request.NewAmount:0.00}: {reason}";
             item.Note = string.IsNullOrEmpty(item.Note) ? adjustmentNote : $"{item.Note} ({adjustmentNote})";
+            // Adjusting a flagged item from the payout statement is the same decision as
+            // making it on Payout Approvals — record it so it shows there as decided.
+            if (item.RequiresReview)
+            {
+                var fullAmount = item.AmountBeforeReview ?? item.Amount;
+                item.AmountBeforeReview = fullAmount;
+                item.ReviewDecision = request.NewAmount >= fullAmount ? PayoutReviewDecision.ApprovedFull
+                    : request.NewAmount <= 0 ? PayoutReviewDecision.Rejected
+                    : PayoutReviewDecision.ApprovedPartial;
+                item.ReviewedAtUtc = DateTime.UtcNow;
+            }
             item.Amount = request.NewAmount;
             item.RequiresReview = false;
             _unitOfWork.Repository<PayoutItem>().Update(item);

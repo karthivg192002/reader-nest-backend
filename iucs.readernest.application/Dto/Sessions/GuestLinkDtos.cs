@@ -39,6 +39,11 @@ namespace iucs.readernest.application.Dto.Sessions
     public class GuestLinkDto
     {
         public string Token { get; set; } = null!;
+
+        /// <summary>The token's own outer bound (see this class's own doc comment) — the
+        /// controller uses this as the matching expiry for the /m/{slug} short link it wraps
+        /// this token's URL in, so the short link never outlives what it points to.</summary>
+        public DateTime ExpiresAtUtc { get; set; }
     }
 
     /// <summary>Body for the anonymous guest-join landing call.</summary>

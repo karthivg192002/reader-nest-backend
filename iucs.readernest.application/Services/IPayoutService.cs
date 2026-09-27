@@ -1,4 +1,5 @@
 using iucs.readernest.application.Dto.Payouts;
+using iucs.readernest.domain.Entities.Payouts;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Enums;
 
@@ -25,7 +26,24 @@ namespace iucs.readernest.application.Services
         /// Amount derives from the teacher's effective per-duration rate; deductions are negative.
         /// Does not save — participates in the caller's unit of work.
         /// </summary>
-        Task AccrueForSessionAsync(ClassSession session, PayoutItemType type, string? note, CancellationToken cancellationToken = default);
+        Task<PayoutItem> AccrueForSessionAsync(ClassSession session, PayoutItemType type, string? note, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Emails Admin and every payout approver (Management / Founder) that a class ran short
+        /// and is waiting in Payout Approvals — scheduled time, scheduled vs actual duration,
+        /// shortfall, teacher and batch/students. Call after the item has been saved.
+        /// </summary>
+        Task NotifyPayoutReviewAsync(Guid payoutItemId, CancellationToken cancellationToken = default);
+
+        /// <summary>Payout Approvals: classes awaiting a decision (pending) or already decided, newest first.</summary>
+        Task<IReadOnlyList<PayoutApprovalDto>> ListApprovalsAsync(bool pending, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Approve a flagged class for full payout, for a partial payout (a given amount, or
+        /// pro-rated to the delivered minutes), or reject it (nothing paid). Only while its
+        /// payout is still Pending; the payout can't be finalized until every flag is decided.
+        /// </summary>
+        Task<PayoutApprovalDto> DecideApprovalAsync(Guid payoutItemId, Guid reviewerUserId, DecidePayoutApprovalRequest request, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Admin correction to one accrued line item -- the only way to act on a

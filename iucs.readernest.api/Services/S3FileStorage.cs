@@ -206,6 +206,67 @@ namespace iucs.readernest.api.Services
             }
         }
 
+        /// <summary>
+        /// Large uploads (over ~90 MB) go from the browser straight to the bucket with presigned
+        /// PUTs, which the browser only allows if the BUCKET itself answers CORS for the portal's
+        /// origin. Without it every part fails at the network level and the UI just says "The
+        /// upload connection failed." Applied at startup so a fresh bucket works out of the box;
+        /// idempotent, and best-effort (a key without the permission only logs a warning).
+        /// </summary>
+        public async Task EnsureBrowserUploadCorsAsync(IReadOnlyCollection<string> allowedOrigins, ILogger logger)
+        {
+            if (allowedOrigins.Count == 0)
+            {
+                return;
+            }
+
+            try
+            {
+                // PutBucketCors replaces the whole configuration, so keep whatever rules the bucket
+                // already has and only add ours (skipped when an equivalent rule is already there).
+                var rules = new List<CORSRule>();
+                try
+                {
+                    rules.AddRange((await _client.GetCORSConfigurationAsync(_bucket)).Configuration.Rules);
+                }
+                catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    // no CORS configuration yet
+                }
+
+                var alreadyCovered = rules.Any(r =>
+                    r.AllowedMethods.Contains("PUT")
+                    && r.ExposeHeaders.Any(h => h.Equals("ETag", StringComparison.OrdinalIgnoreCase))
+                    && (r.AllowedOrigins.Contains("*") || allowedOrigins.All(o => r.AllowedOrigins.Contains(o))));
+                if (alreadyCovered)
+                {
+                    return;
+                }
+
+                rules.Add(new CORSRule
+                {
+                    AllowedOrigins = allowedOrigins.ToList(),
+                    AllowedMethods = ["GET", "PUT", "HEAD"],
+                    AllowedHeaders = ["*"],
+                    // The browser must read each part's ETag back to complete the upload.
+                    ExposeHeaders = ["ETag"],
+                    MaxAgeSeconds = 3000,
+                });
+                await _client.PutCORSConfigurationAsync(new PutCORSConfigurationRequest
+                {
+                    BucketName = _bucket,
+                    Configuration = new CORSConfiguration { Rules = rules },
+                });
+                logger.LogInformation("Bucket CORS applied for browser uploads ({Origins}).", string.Join(", ", allowedOrigins));
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex,
+                    "Could not set the bucket's CORS rules — uploads over 90 MB will fail until the bucket allows PUT/GET from {Origins} and exposes ETag.",
+                    string.Join(", ", allowedOrigins));
+            }
+        }
+
         public string GetReadUrl(string key, TimeSpan validFor, string? contentType)
         {
             var request = new GetPreSignedUrlRequest

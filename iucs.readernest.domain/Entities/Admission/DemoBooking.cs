@@ -14,6 +14,7 @@ namespace iucs.readernest.domain.Entities.Admission
     /// account yet; the conversion funnel is tracked to Enrolled/NotInterested.
     /// </summary>
     [Index(nameof(ConversionStatus))]
+    [Index(nameof(PaymentToken), IsUnique = true)]
     public class DemoBooking : AuditEntity
     {
         public Guid? ClassSessionId { get; set; }
@@ -57,6 +58,26 @@ namespace iucs.readernest.domain.Entities.Admission
         public Guid? InvoiceId { get; set; }
 
         public Invoice? Invoice { get; set; }
+
+        /// <summary>Course the counsellor's payment link is for (portal admission flow).</summary>
+        public Guid? CourseId { get; set; }
+
+        public Course? Course { get; set; }
+
+        /// <summary>
+        /// Unguessable token behind the parent-facing payment page (/pay/{token}). Set only for
+        /// bookings that went through the portal admission flow; its presence is also what tells
+        /// the billing side to park a fully-paid lead in PaymentReceived (awaiting the counsellor's
+        /// verification) instead of the older manual-admission path's straight-to-Enrolled.
+        /// </summary>
+        [MaxLength(64)]
+        public string? PaymentToken { get; set; }
+
+        /// <summary>When the parent accepted the Terms &amp; Conditions on the payment page.</summary>
+        public DateTime? TermsAcceptedAtUtc { get; set; }
+
+        /// <summary>When the counsellor verified the payment and clicked Enroll.</summary>
+        public DateTime? PaymentVerifiedAtUtc { get; set; }
 
         /// <summary>
         /// Join-based attendance capture for the primary parent (PDF's "System Marks

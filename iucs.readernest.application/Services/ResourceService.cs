@@ -157,6 +157,82 @@ namespace iucs.readernest.application.Services
             return resource.ToDto();
         }
 
+        public async Task<ResourceDto> CreateFromRecordingAsync(
+            AddRecordingResourceRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var recording = await _unitOfWork.Repository<iucs.readernest.domain.Entities.Sessions.SessionRecording>().Query()
+                .Include(r => r.ClassSession).ThenInclude(s => s.Batch)
+                .FirstOrDefaultAsync(r => r.Id == request.RecordingId, cancellationToken)
+                ?? throw new NotFoundException("SessionRecording", request.RecordingId);
+
+            if (request.FolderId.HasValue
+                && !await _unitOfWork.Repository<ResourceFolder>().ExistsAsync(f => f.Id == request.FolderId.Value, cancellationToken))
+            {
+                throw new NotFoundException(nameof(ResourceFolder), request.FolderId.Value);
+            }
+
+            // Same recording into the same folder twice is a double click, not a second entry.
+            var existing = await _unitOfWork.Repository<Resource>().Query()
+                .FirstOrDefaultAsync(r => r.FileUrl == recording.StorageUrl && r.FolderId == request.FolderId, cancellationToken);
+            if (existing is not null)
+            {
+                return existing.ToDto();
+            }
+
+            var session = recording.ClassSession;
+            var title = string.IsNullOrWhiteSpace(request.Title)
+                ? $"{session.Batch?.Name ?? "Class"} — {session.ScheduledStartAtUtc:dd MMM yyyy}"
+                : request.Title.Trim();
+            if (title.Length > 200)
+            {
+                title = title[..200];
+            }
+
+            var resource = new Resource
+            {
+                FolderId = request.FolderId,
+                Title = title,
+                Type = ResourceType.Other,
+                FileUrl = recording.StorageUrl,
+                MimeType = "video/mp4",
+                // Recordings are view-only for parents (the /play endpoint), never downloadable.
+                IsDownloadable = false,
+                Description = "Class recording",
+            };
+            await _unitOfWork.Repository<Resource>().AddAsync(resource, cancellationToken);
+            await _auditLog.StageAsync(AuditAction.Create, nameof(Resource), resource.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return resource.ToDto();
+        }
+
+        public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            var resource = await _unitOfWork.Repository<Resource>().TrackedQuery()
+                .FirstOrDefaultAsync(r => r.Id == id, cancellationToken)
+                ?? throw new NotFoundException(nameof(Resource), id);
+
+            // Foreign keys are Restrict everywhere, so the grants have to go first.
+            var grants = await _unitOfWork.Repository<ResourceAccess>().TrackedQuery()
+                .Where(a => a.ResourceId == id).ToListAsync(cancellationToken);
+            foreach (var grant in grants)
+            {
+                _unitOfWork.Repository<ResourceAccess>().Remove(grant);
+            }
+
+            var visibility = await _unitOfWork.Repository<ResourceBatchVisibility>().TrackedQuery()
+                .Where(v => v.ResourceId == id).ToListAsync(cancellationToken);
+            foreach (var row in visibility)
+            {
+                _unitOfWork.Repository<ResourceBatchVisibility>().Remove(row);
+            }
+
+            _unitOfWork.Repository<Resource>().Remove(resource);
+            await _auditLog.StageAsync(AuditAction.Delete, nameof(Resource), id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
         public async Task<ResourceDto> CreateForTeacherUserAsync(
             Guid userId,
             CreateResourceRequest request,

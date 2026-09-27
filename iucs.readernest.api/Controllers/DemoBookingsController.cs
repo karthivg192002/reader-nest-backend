@@ -118,6 +118,74 @@ namespace iucs.readernest.api.Controllers
 
         /// <summary>Move a still-scheduled demo to a new date/time. Notifies the parent, invitees
         /// and teacher with the new time, same as resend-link.</summary>
+        /// <summary>Edit a booking's parent/child details and extra invitees (e.g. fix a wrong email).</summary>
+        [HttpPut("{id:guid}")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<DemoBookingDto>> Update(
+            Guid id,
+            UpdateDemoBookingRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _demoBookingService.UpdateAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>
+        /// "Admit manually" — counselor completes admission for a parent who shares nothing by
+        /// email: creates their login (mobile number + PIN when no email), the child, the first
+        /// invoice and a payment link, and returns a WhatsApp-ready message with all of it.
+        /// </summary>
+        [HttpGet("manual-admission/options")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<ManualAdmissionOptionsDto>> ManualAdmissionOptions(
+            [FromServices] IManualAdmissionService manualAdmissionService,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await manualAdmissionService.GetOptionsAsync(cancellationToken));
+        }
+
+        [HttpPost("{id:guid}/manual-admission")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<ManualAdmissionResultDto>> ManualAdmission(
+            Guid id,
+            ManualAdmissionRequest request,
+            [FromServices] IManualAdmissionService manualAdmissionService,
+            CancellationToken cancellationToken)
+        {
+            var result = await manualAdmissionService.AdmitAsync(id, request, cancellationToken);
+            Response.Headers.CacheControl = "no-store"; // may carry a new parent's PIN
+            return Ok(result);
+        }
+
+        /// <summary>
+        /// Portal admission flow: the counsellor issues the parent's payment link for a course at
+        /// the agreed (possibly discounted) amount. The parent pays on a page that first asks them
+        /// to accept the Terms and Conditions.
+        /// </summary>
+        [HttpPost("{id:guid}/payment-link")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<AdmissionPaymentLinkDto>> SendPaymentLink(
+            Guid id,
+            SendAdmissionPaymentLinkRequest request,
+            [FromServices] IAdmissionPaymentService admissionPaymentService,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await admissionPaymentService.SendPaymentLinkAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>
+        /// The counsellor has verified the parent's payment and clicks Enroll: the parent's login
+        /// is emailed automatically and the lead moves on to ReadyForEnrollment.
+        /// </summary>
+        [HttpPost("{id:guid}/enroll")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<DemoBookingDto>> Enroll(
+            Guid id,
+            [FromServices] IAdmissionPaymentService admissionPaymentService,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await admissionPaymentService.VerifyAndEnrollAsync(id, cancellationToken));
+        }
+
         [HttpPut("{id:guid}/reschedule")]
         [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
         public async Task<ActionResult<DemoBookingDto>> Reschedule(

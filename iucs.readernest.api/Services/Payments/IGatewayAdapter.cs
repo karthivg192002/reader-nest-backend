@@ -22,6 +22,7 @@ namespace iucs.readernest.api.Services.Payments
             Invoice invoice,
             PaymentAccount account,
             IReadOnlyDictionary<string, string?> config,
+            decimal? amount,
             CancellationToken cancellationToken);
 
         /// <param name="gatewayPaymentId">The concrete payment id captured at settlement (not the payment-link reference).</param>
@@ -52,6 +53,7 @@ namespace iucs.readernest.api.Services.Payments
             PaymentAccount account,
             InlinePayerInfo payer,
             IReadOnlyDictionary<string, string?> config,
+            decimal? amount,
             CancellationToken cancellationToken) => Task.FromResult<InlineCheckoutResult?>(null);
 
         /// <summary>

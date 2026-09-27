@@ -62,6 +62,20 @@ namespace iucs.readernest.application.Dto.Resources
         public string? Description { get; set; }
     }
 
+    /// <summary>Adds a registered class recording to a Content and Resources folder by reference.</summary>
+    public class AddRecordingResourceRequest
+    {
+        [Required]
+        public Guid RecordingId { get; set; }
+
+        /// <summary>Folder to file it under; omit for the top level.</summary>
+        public Guid? FolderId { get; set; }
+
+        /// <summary>Defaults to the class title + date when omitted.</summary>
+        [MaxLength(200)]
+        public string? Title { get; set; }
+    }
+
     public class UpdateResourceRequest
     {
         /// <summary>Business rule: only worksheets can be downloadable; reading books stay view-only regardless.</summary>
@@ -158,6 +172,12 @@ namespace iucs.readernest.application.Dto.Resources
     }
 
     /// <summary>A short-lived URL a parent's browser plays a shared recording from.</summary>
+    /// <summary>Null Url = not viewable inline; the client falls back to downloading it.</summary>
+    public class ResourceViewUrlDto
+    {
+        public string? Url { get; set; }
+    }
+
     public class ResourcePlaybackDto
     {
         public string Url { get; set; } = null!;

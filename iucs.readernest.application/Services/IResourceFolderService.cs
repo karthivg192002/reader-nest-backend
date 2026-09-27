@@ -24,6 +24,12 @@ namespace iucs.readernest.application.Services
         Task<IReadOnlyList<ResourceFolderAccessDto>> SetAccessAsync(
             Guid folderId, Guid actorUserId, SetResourceFolderAccessRequest request, CancellationToken cancellationToken = default);
 
+        Task<IReadOnlyList<ResourceFolderBatchAccessDto>> ListBatchAccessAsync(Guid folderId, CancellationToken cancellationToken = default);
+
+        /// <summary>Shares with / stops sharing with the given batches; unlimited, idempotent. Enrolled parents are resolved live.</summary>
+        Task<IReadOnlyList<ResourceFolderBatchAccessDto>> SetBatchAccessAsync(
+            Guid folderId, Guid actorUserId, SetResourceFolderBatchAccessRequest request, CancellationToken cancellationToken = default);
+
         /// <summary>Moves one file into a folder (null = top level).</summary>
         Task<ResourceDto> MoveResourceAsync(Guid resourceId, MoveResourceRequest request, CancellationToken cancellationToken = default);
     }

@@ -52,6 +52,31 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _payoutService.AdjustItemAsync(id, itemId, request, cancellationToken));
         }
 
+        /// <summary>
+        /// Payout Approvals (Admin + Management dashboards): classes that ran shorter than
+        /// scheduled, waiting for a decision (pending=true) or already decided (pending=false).
+        /// </summary>
+        [HttpGet("approvals")]
+        [HasPermission(PermissionModule.Payouts, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<PayoutApprovalDto>>> ListApprovals(
+            [FromQuery] bool pending = true,
+            CancellationToken cancellationToken = default)
+        {
+            return Ok(await _payoutService.ListApprovalsAsync(pending, cancellationToken));
+        }
+
+        /// <summary>Approve a short class for full payout, partial payout, or reject it.</summary>
+        [HttpPost("approvals/{itemId:guid}/decide")]
+        [HasPermission(PermissionModule.Payouts, PermissionAction.Approve)]
+        public async Task<ActionResult<PayoutApprovalDto>> DecideApproval(
+            Guid itemId,
+            DecidePayoutApprovalRequest request,
+            CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _payoutService.DecideApprovalAsync(itemId, userId, request, cancellationToken));
+        }
+
         /// <summary>Locks the month's total and emails the statement to the teacher.</summary>
         [HttpPost("{id:guid}/finalize")]
         [HasPermission(PermissionModule.Payouts, PermissionAction.Approve)]

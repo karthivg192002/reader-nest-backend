@@ -72,6 +72,24 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _folders.SetAccessAsync(id, actor, request, cancellationToken));
         }
 
+        /// <summary>Batches this folder is shared with.</summary>
+        [HttpGet("{id:guid}/batch-access")]
+        [HasPermission(PermissionModule.ContentAccessManagement, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<ResourceFolderBatchAccessDto>>> BatchAccess(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _folders.ListBatchAccessAsync(id, cancellationToken));
+        }
+
+        /// <summary>Share with / unshare from any number of batches in one call.</summary>
+        [HttpPut("{id:guid}/batch-access")]
+        [HasPermission(PermissionModule.ContentAccessManagement, PermissionAction.Edit)]
+        public async Task<ActionResult<IReadOnlyList<ResourceFolderBatchAccessDto>>> SetBatchAccess(
+            Guid id, SetResourceFolderBatchAccessRequest request, CancellationToken cancellationToken)
+        {
+            var actor = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _folders.SetBatchAccessAsync(id, actor, request, cancellationToken));
+        }
+
         /// <summary>Moves a file into a folder (or back to the top level).</summary>
         [HttpPost("~/api/resources/{resourceId:guid}/move")]
         [HasPermission(PermissionModule.ContentAccessManagement, PermissionAction.Edit)]

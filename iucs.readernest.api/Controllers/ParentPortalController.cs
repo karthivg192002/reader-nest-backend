@@ -65,6 +65,20 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _parentPortal.GetInvoicesAsync(UserId(), cancellationToken));
         }
 
+        /// <summary>Whether the Terms and Conditions still need accepting -- only before a parent's first payment.</summary>
+        [HttpGet("terms-status")]
+        public async Task<ActionResult<TermsStatusDto>> TermsStatus(CancellationToken cancellationToken)
+        {
+            return Ok(new TermsStatusDto { Required = await _parentPortal.IsTermsAcceptanceRequiredAsync(UserId(), cancellationToken) });
+        }
+
+        [HttpPost("terms/accept")]
+        public async Task<IActionResult> AcceptTerms(CancellationToken cancellationToken)
+        {
+            await _parentPortal.AcceptTermsAsync(UserId(), cancellationToken);
+            return NoContent();
+        }
+
         /// <summary>Enabled payment methods (gateways + Cash) for the Pay Now popup, from Settings → Integrations.</summary>
         [HttpGet("payment-methods")]
         public async Task<ActionResult<IReadOnlyList<PaymentMethodOptionDto>>> PaymentMethods(CancellationToken cancellationToken)
@@ -179,9 +193,13 @@ namespace iucs.readernest.api.Controllers
             await _parentPortal.GetResourceForViewAsync(UserId(), id, cancellationToken);
             var resource = await resourceService.GetForDownloadAsync(id, cancellationToken); // also audits the access
             var validFor = TimeSpan.FromMinutes(30);
+            // A class recording filed into Resources by reference keeps the recording's own
+            // https URL as its file location — nothing to presign, play it as-is.
+            var isExternal = Uri.TryCreate(resource.FileUrl, UriKind.Absolute, out var external)
+                && (external.Scheme == Uri.UriSchemeHttps || external.Scheme == Uri.UriSchemeHttp);
             return Ok(new ResourcePlaybackDto
             {
-                Url = directUploads.GetReadUrl(resource.FileUrl, validFor, resource.MimeType),
+                Url = isExternal ? resource.FileUrl : directUploads.GetReadUrl(resource.FileUrl, validFor, resource.MimeType),
                 MimeType = resource.MimeType,
                 ExpiresAtUtc = DateTime.UtcNow.Add(validFor),
             });

@@ -375,7 +375,7 @@ namespace iucs.readernest.application.Services
             var enrollmentFunnel = new List<FunnelStageDto>
             {
                 new() { Stage = "Demo Booked", Value = demoTotal },
-                new() { Stage = "Demo Completed", Value = StageCount(ConversionStatus.DemoCompleted, ConversionStatus.FollowUpInProgress, ConversionStatus.Enrolled) },
+                new() { Stage = "Demo Completed", Value = StageCount(ConversionStatus.DemoCompleted, ConversionStatus.FollowUpInProgress, ConversionStatus.PaymentPending, ConversionStatus.PartiallyPaid, ConversionStatus.PaymentReceived, ConversionStatus.ReadyForEnrollment, ConversionStatus.Enrolled) },
                 new() { Stage = "Follow-up", Value = StageCount(ConversionStatus.FollowUpInProgress, ConversionStatus.Enrolled) },
                 new() { Stage = "Enrolled", Value = demoEnrolled },
             };

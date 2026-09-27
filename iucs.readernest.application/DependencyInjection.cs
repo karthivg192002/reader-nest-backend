@@ -16,6 +16,7 @@ namespace iucs.readernest.application
             services.AddScoped<IServerLogService, ServerLogService>();
             services.AddScoped<IBurstWorkerUsageService, BurstWorkerUsageService>();
             services.AddScoped<IRecordingPipelineService, RecordingPipelineService>();
+            services.AddScoped<ICallQualityIncidentService, CallQualityIncidentService>();
             services.AddScoped<IBurstWorkerControlService, BurstWorkerControlService>();
             services.AddScoped<IServerControlService, ServerControlService>();
             services.AddSingleton<IClassroomPresenceTracker, ClassroomPresenceTracker>();
@@ -44,6 +45,8 @@ namespace iucs.readernest.application
             services.AddScoped<IClassSessionEventLogService, ClassSessionEventLogService>();
             services.AddScoped<IClassSessionLogService, ClassSessionLogService>();
             services.AddScoped<IEnrollmentService, EnrollmentService>();
+            services.AddScoped<IManualAdmissionService, ManualAdmissionService>();
+            services.AddScoped<IAdmissionPaymentService, AdmissionPaymentService>();
             services.AddScoped<IUserDeletionService, UserDeletionService>();
             services.AddScoped<IParentPortalService, ParentPortalService>();
             services.AddScoped<IReportsService, ReportsService>();
@@ -57,6 +60,8 @@ namespace iucs.readernest.application
             services.AddScoped<IQuizQuestionService, QuizQuestionService>();
             services.AddScoped<IWhiteboardActivityService, WhiteboardActivityService>();
             services.AddScoped<IChatbotService, ChatbotService>();
+            services.AddScoped<ISupportTicketService, SupportTicketService>();
+            services.AddScoped<IStaffLeaveService, StaffLeaveService>();
             return services;
         }
     }

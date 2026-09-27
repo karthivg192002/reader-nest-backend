@@ -97,6 +97,7 @@ namespace iucs.readernest.application.Common.Interfaces
     /// </summary>
     public interface IPaymentGateway
     {
+        /// <param name="amount">Amount to charge now (a partial installment); null = the invoice's whole outstanding balance.</param>
         /// <param name="preferredMethodKey">
         /// The gateway the payer explicitly chose (integration key, e.g. "razorpay").
         /// Takes precedence over the account's GatewayProvider so the Pay Now popup
@@ -108,6 +109,7 @@ namespace iucs.readernest.application.Common.Interfaces
             Invoice invoice,
             PaymentAccount account,
             string? preferredMethodKey = null,
+            decimal? amount = null,
             CancellationToken cancellationToken = default);
 
         /// <summary>
@@ -153,6 +155,7 @@ namespace iucs.readernest.application.Common.Interfaces
             PaymentAccount account,
             string methodKey,
             InlinePayerInfo payer,
+            decimal? amount = null,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(new InlineCheckoutResult
             {

@@ -3,6 +3,7 @@ using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Resources;
 using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Resources;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
@@ -38,11 +39,17 @@ namespace iucs.readernest.application.Services
                 .Select(g => new { FolderId = g.Key, Count = g.Count() })
                 .ToDictionaryAsync(x => x.FolderId, x => x.Count, cancellationToken);
 
+            var batchSharedCounts = await _unitOfWork.Repository<ResourceFolderBatchAccess>().Query()
+                .GroupBy(a => a.FolderId)
+                .Select(g => new { FolderId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.FolderId, x => x.Count, cancellationToken);
+
             return folders.Select(f => ToDto(
                 f,
                 fileCounts.GetValueOrDefault(f.Id),
                 folders.Count(c => c.ParentFolderId == f.Id),
-                sharedCounts.GetValueOrDefault(f.Id))).ToList();
+                sharedCounts.GetValueOrDefault(f.Id),
+                batchSharedCounts.GetValueOrDefault(f.Id))).ToList();
         }
 
         public async Task<ResourceFolderDto> CreateAsync(CreateResourceFolderRequest request, CancellationToken cancellationToken = default)
@@ -63,7 +70,7 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.Repository<ResourceFolder>().AddAsync(folder, cancellationToken);
             await _auditLog.StageAsync(AuditAction.Create, nameof(ResourceFolder), folder.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
-            return ToDto(folder, 0, 0, 0);
+            return ToDto(folder, 0, 0, 0, 0);
         }
 
         public async Task<ResourceFolderDto> UpdateAsync(Guid id, UpdateResourceFolderRequest request, CancellationToken cancellationToken = default)
@@ -103,7 +110,8 @@ namespace iucs.readernest.application.Services
             var files = await _unitOfWork.Repository<Resource>().Query().CountAsync(r => r.FolderId == id, cancellationToken);
             var subs = await _unitOfWork.Repository<ResourceFolder>().Query().CountAsync(f => f.ParentFolderId == id, cancellationToken);
             var shared = await _unitOfWork.Repository<ResourceFolderAccess>().Query().CountAsync(a => a.FolderId == id, cancellationToken);
-            return ToDto(folder, files, subs, shared);
+            var sharedBatches = await _unitOfWork.Repository<ResourceFolderBatchAccess>().Query().CountAsync(a => a.FolderId == id, cancellationToken);
+            return ToDto(folder, files, subs, shared, sharedBatches);
         }
 
         public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
@@ -123,6 +131,13 @@ namespace iucs.readernest.application.Services
             foreach (var row in access)
             {
                 _unitOfWork.Repository<ResourceFolderAccess>().Remove(row);
+            }
+
+            var batchAccess = await _unitOfWork.Repository<ResourceFolderBatchAccess>().TrackedQuery()
+                .Where(a => a.FolderId == id).ToListAsync(cancellationToken);
+            foreach (var row in batchAccess)
+            {
+                _unitOfWork.Repository<ResourceFolderBatchAccess>().Remove(row);
             }
 
             _unitOfWork.Repository<ResourceFolder>().Remove(folder);
@@ -182,6 +197,58 @@ namespace iucs.readernest.application.Services
             return await ReadAccessAsync(folderId, cancellationToken);
         }
 
+        public async Task<IReadOnlyList<ResourceFolderBatchAccessDto>> ListBatchAccessAsync(Guid folderId, CancellationToken cancellationToken = default)
+        {
+            await RequireFolderAsync(folderId, cancellationToken);
+            return await ReadBatchAccessAsync(folderId, cancellationToken);
+        }
+
+        public async Task<IReadOnlyList<ResourceFolderBatchAccessDto>> SetBatchAccessAsync(
+            Guid folderId, Guid actorUserId, SetResourceFolderBatchAccessRequest request, CancellationToken cancellationToken = default)
+        {
+            await RequireFolderAsync(folderId, cancellationToken);
+            var toAdd = request.AddBatchIds.Distinct().ToList();
+            var toRemove = request.RemoveBatchIds.Distinct().Except(toAdd).ToList();
+
+            var repo = _unitOfWork.Repository<ResourceFolderBatchAccess>();
+            var existing = await repo.TrackedQuery().Where(a => a.FolderId == folderId).ToListAsync(cancellationToken);
+
+            if (toAdd.Count > 0)
+            {
+                var known = (await _unitOfWork.Repository<Batch>().Query()
+                        .Where(b => toAdd.Contains(b.Id)).Select(b => b.Id).ToListAsync(cancellationToken)).ToHashSet();
+                var missing = toAdd.FirstOrDefault(b => !known.Contains(b));
+                if (missing != Guid.Empty)
+                {
+                    throw new NotFoundException(nameof(Batch), missing);
+                }
+
+                var already = existing.Select(a => a.BatchId).ToHashSet();
+                foreach (var batchId in toAdd.Where(b => !already.Contains(b)))
+                {
+                    await repo.AddAsync(new ResourceFolderBatchAccess { FolderId = folderId, BatchId = batchId, GrantedBy = actorUserId }, cancellationToken);
+                }
+            }
+
+            foreach (var row in existing.Where(a => toRemove.Contains(a.BatchId)))
+            {
+                repo.Remove(row);
+            }
+
+            if (toAdd.Count > 0 || toRemove.Count > 0)
+            {
+                await _auditLog.StageAsync(
+                    AuditAction.Update,
+                    "ResourceFolderBatchSharing",
+                    folderId.ToString(),
+                    JsonSerializer.Serialize(new { shared = toAdd, unshared = toRemove }),
+                    cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+
+            return await ReadBatchAccessAsync(folderId, cancellationToken);
+        }
+
         public async Task<ResourceDto> MoveResourceAsync(Guid resourceId, MoveResourceRequest request, CancellationToken cancellationToken = default)
         {
             var resource = await _unitOfWork.Repository<Resource>().TrackedQuery()
@@ -218,6 +285,21 @@ namespace iucs.readernest.application.Services
             }).ToList();
         }
 
+        private async Task<IReadOnlyList<ResourceFolderBatchAccessDto>> ReadBatchAccessAsync(Guid folderId, CancellationToken cancellationToken)
+        {
+            var rows = await _unitOfWork.Repository<ResourceFolderBatchAccess>().Query()
+                .Include(a => a.Batch).ThenInclude(b => b.Course)
+                .Where(a => a.FolderId == folderId)
+                .ToListAsync(cancellationToken);
+            return rows.OrderBy(a => a.Batch.Name).Select(a => new ResourceFolderBatchAccessDto
+            {
+                BatchId = a.BatchId,
+                BatchName = a.Batch.Name,
+                CourseName = a.Batch.Course?.Name,
+                SharedAtUtc = a.CreatedAtUtc,
+            }).ToList();
+        }
+
         private async Task<List<(Guid Id, Guid? ParentId)>> LoadTreeAsync(CancellationToken cancellationToken)
         {
             var rows = await _unitOfWork.Repository<ResourceFolder>().Query()
@@ -248,7 +330,7 @@ namespace iucs.readernest.application.Services
 
         private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
-        private static ResourceFolderDto ToDto(ResourceFolder f, int files, int subfolders, int shared) => new()
+        private static ResourceFolderDto ToDto(ResourceFolder f, int files, int subfolders, int shared, int sharedBatches) => new()
         {
             Id = f.Id,
             Name = f.Name,
@@ -257,6 +339,7 @@ namespace iucs.readernest.application.Services
             FileCount = files,
             SubfolderCount = subfolders,
             SharedParentCount = shared,
+            SharedBatchCount = sharedBatches,
             CreatedAtUtc = f.CreatedAtUtc,
         };
     }

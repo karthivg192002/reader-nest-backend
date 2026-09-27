@@ -17,6 +17,7 @@ namespace iucs.readernest.domain.Enums
         Communication,
         Settings,
         SystemMonitoring,
-        ClassSessionLogs
+        ClassSessionLogs,
+        SupportTickets
     }
 }

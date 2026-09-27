@@ -37,6 +37,7 @@ namespace iucs.readernest.api.Services.Payments
             Invoice invoice,
             PaymentAccount account,
             string? preferredMethodKey = null,
+            decimal? amount = null,
             CancellationToken cancellationToken = default)
         {
             // The payer's chosen gateway wins; otherwise fall back to the account's provider.
@@ -50,7 +51,7 @@ namespace iucs.readernest.api.Services.Payments
                 _logger.LogInformation(
                     "No gateway adapter matches method '{Method}' / provider '{Provider}' for account {Account}; using the simulated gateway.",
                     preferredMethodKey, account.GatewayProvider, account.Name);
-                return await _simulated.CreatePaymentLinkAsync(invoice, account, preferredMethodKey, cancellationToken);
+                return await _simulated.CreatePaymentLinkAsync(invoice, account, preferredMethodKey, amount, cancellationToken);
             }
 
             var integration = await _unitOfWork.Repository<Integration>().Query()
@@ -61,7 +62,7 @@ namespace iucs.readernest.api.Services.Payments
 
             if (enabled && configured)
             {
-                return await adapter.CreatePaymentLinkAsync(invoice, account, config, cancellationToken);
+                return await adapter.CreatePaymentLinkAsync(invoice, account, config, amount, cancellationToken);
             }
 
             // The payer picked this gateway explicitly → hand back a clear reason instead of
@@ -82,7 +83,7 @@ namespace iucs.readernest.api.Services.Payments
             _logger.LogInformation(
                 "Integration '{Key}' disabled/unconfigured; using the simulated gateway for invoice {Invoice}.",
                 adapter.IntegrationKey, invoice.InvoiceNumber);
-            return await _simulated.CreatePaymentLinkAsync(invoice, account, preferredMethodKey, cancellationToken);
+            return await _simulated.CreatePaymentLinkAsync(invoice, account, preferredMethodKey, amount, cancellationToken);
         }
 
         /// <summary>
@@ -95,6 +96,7 @@ namespace iucs.readernest.api.Services.Payments
             PaymentAccount account,
             string methodKey,
             InlinePayerInfo payer,
+            decimal? amount = null,
             CancellationToken cancellationToken = default)
         {
             var adapter = ResolveAdapter(methodKey);
@@ -116,7 +118,7 @@ namespace iucs.readernest.api.Services.Payments
                 };
             }
 
-            var result = await adapter.CreateInlineCheckoutAsync(invoice, account, payer, config, cancellationToken);
+            var result = await adapter.CreateInlineCheckoutAsync(invoice, account, payer, config, amount, cancellationToken);
             return result ?? new InlineCheckoutResult
             {
                 UnavailableReason = $"{adapter.IntegrationKey} does not support in-page checkout.",

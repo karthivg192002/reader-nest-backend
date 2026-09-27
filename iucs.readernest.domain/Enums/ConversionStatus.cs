@@ -22,5 +22,12 @@ namespace iucs.readernest.domain.Enums
         /// enrollment form once approved, same as every other enrollment path.
         /// </summary>
         ReadyForEnrollment,
+        /// <summary>
+        /// Portal-only admission flow: the parent paid the counsellor-issued payment link in full
+        /// (see AdmissionPaymentService) and it now waits for the counsellor to verify the payment
+        /// and click Enroll, which moves the lead to <see cref="ReadyForEnrollment"/>. Appended at
+        /// the end so the stored integer values of the older statuses never shift.
+        /// </summary>
+        PaymentReceived,
     }
 }

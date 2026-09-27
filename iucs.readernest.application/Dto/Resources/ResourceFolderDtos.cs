@@ -20,6 +20,9 @@ namespace iucs.readernest.application.Dto.Resources
         /// <summary>Parents this folder is shared with directly.</summary>
         public int SharedParentCount { get; set; }
 
+        /// <summary>Batches this folder is shared with directly (every enrolled parent in them sees it).</summary>
+        public int SharedBatchCount { get; set; }
+
         public DateTime CreatedAtUtc { get; set; }
     }
 
@@ -69,6 +72,26 @@ namespace iucs.readernest.application.Dto.Resources
         public List<Guid> AddParentProfileIds { get; set; } = [];
 
         public List<Guid> RemoveParentProfileIds { get; set; } = [];
+    }
+
+    /// <summary>A batch a folder is currently shared with.</summary>
+    public class ResourceFolderBatchAccessDto
+    {
+        public Guid BatchId { get; set; }
+
+        public string BatchName { get; set; } = null!;
+
+        public string? CourseName { get; set; }
+
+        public DateTime SharedAtUtc { get; set; }
+    }
+
+    /// <summary>Adds and/or removes batches in one call; no cap on how many.</summary>
+    public class SetResourceFolderBatchAccessRequest
+    {
+        public List<Guid> AddBatchIds { get; set; } = [];
+
+        public List<Guid> RemoveBatchIds { get; set; } = [];
     }
 
     public class MoveResourceRequest

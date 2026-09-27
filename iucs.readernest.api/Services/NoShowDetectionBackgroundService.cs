@@ -1,6 +1,7 @@
 using iucs.readernest.application.Common;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Services;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Admission;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Enums;
@@ -92,6 +93,33 @@ namespace iucs.readernest.api.Services
                             && s.OrphanedDemoAlertSentAtUtc == null)
                 .ToListAsync(cancellationToken);
 
+            // A class covered by a teacher's leave request that's still awaiting an admin decision
+            // is not a no-show: with no minimum notice, urgent leave is often applied for shortly
+            // before class, and penalising the teacher (payout deduction, no-show alert, auto
+            // make-up) because nobody had reviewed it yet is wrong. It stays Scheduled until the
+            // review: approval cancels it; a rejection lets this job treat it normally next cycle.
+            var pendingLeaves = await unitOfWork.Repository<LeaveRequest>().Query()
+                .Where(l => l.Status == LeaveStatus.Pending)
+                .Select(l => new
+                {
+                    l.TeacherProfileId,
+                    l.IsClassWise,
+                    l.StartAtUtc,
+                    l.EndAtUtc,
+                    SessionIds = l.Sessions.Select(s => s.ClassSessionId).ToList(),
+                })
+                .ToListAsync(cancellationToken);
+            if (pendingLeaves.Count > 0)
+            {
+                candidates = candidates
+                    .Where(s => !pendingLeaves.Any(l => l.IsClassWise
+                        ? l.SessionIds.Contains(s.Id)
+                        : l.TeacherProfileId == s.TeacherProfileId
+                            && l.StartAtUtc < s.ScheduledEndAtUtc
+                            && l.EndAtUtc > s.ScheduledStartAtUtc))
+                    .ToList();
+            }
+
             if (candidates.Count == 0)
             {
                 return;
@@ -109,7 +137,9 @@ namespace iucs.readernest.api.Services
                 .Select(a => a.ClassSessionId)
                 .ToHashSet();
             var studentPresentSessionIds = (await unitOfWork.Repository<SessionAttendance>().Query()
-                .Where(a => candidateIds.Contains(a.ClassSessionId) && a.ChildId != null)
+                // Absent rows don't count as present — e.g. a parent's planned absence from a
+                // group class is recorded up front as Absent (SessionService.CancelByParentAsync).
+                .Where(a => candidateIds.Contains(a.ClassSessionId) && a.ChildId != null && a.Status != AttendanceStatus.Absent)
                 .Select(a => a.ClassSessionId)
                 .ToListAsync(cancellationToken))
                 .ToHashSet();

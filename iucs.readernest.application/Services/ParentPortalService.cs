@@ -257,6 +257,25 @@ namespace iucs.readernest.application.Services
                 .Where(a => a.ParentProfileId == parentProfileId)
                 .Select(a => a.FolderId)
                 .ToListAsync(cancellationToken);
+
+            // Folders shared with a batch reach every parent with an actively enrolled child in it,
+            // evaluated now (a parent who enrols later gets them with no extra step). A child under an
+            // active fee suspension doesn't unlock its batch's folders, same as batch-visible files.
+            var suspendedChildIds = (await _unitOfWork.Repository<FeeSuspension>().Query()
+                    .Where(s => s.ParentProfileId == parentProfileId && s.Status == SuspensionStatus.Active && s.ChildId != null)
+                    .Select(s => s.ChildId!.Value)
+                    .ToListAsync(cancellationToken))
+                .ToHashSet();
+            var enrolledBatchIds = _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.Status == EnrollmentStatus.Active
+                    && e.Child.ParentProfileId == parentProfileId
+                    && !suspendedChildIds.Contains(e.ChildId))
+                .Select(e => e.BatchId);
+            roots.AddRange(await _unitOfWork.Repository<ResourceFolderBatchAccess>().Query()
+                .Where(a => enrolledBatchIds.Contains(a.BatchId))
+                .Select(a => a.FolderId)
+                .ToListAsync(cancellationToken));
+
             if (roots.Count == 0)
             {
                 return new HashSet<Guid>();
@@ -332,6 +351,9 @@ namespace iucs.readernest.application.Services
             var invoices = await _unitOfWork.Repository<Invoice>().Query()
                 .Where(i => i.ParentProfileId == parent.Id)
                 .Include(i => i.Child)
+                // Admission / course-fee invoices are tied to the course directly (no subscription):
+                // without this the parent saw them with no course name.
+                .Include(i => i.Course)
                 .Include(i => i.Subscription).ThenInclude(s => s!.PackagePlan).ThenInclude(p => p.Course)
                 .OrderByDescending(i => i.IssuedAtUtc)
                 .ToListAsync(cancellationToken);
@@ -546,6 +568,25 @@ namespace iucs.readernest.application.Services
                     ChildIds = childIdsByBatch.GetValueOrDefault(r.ClassSession.BatchId!.Value, []),
                 })
                 .ToList();
+        }
+
+        public async Task<bool> IsTermsAcceptanceRequiredAsync(Guid parentUserId, CancellationToken cancellationToken = default)
+        {
+            var parent = await GetParentAsync(parentUserId, cancellationToken);
+            return await TermsRule.IsAcceptanceRequiredAsync(_unitOfWork, parent, cancellationToken);
+        }
+
+        public async Task AcceptTermsAsync(Guid parentUserId, CancellationToken cancellationToken = default)
+        {
+            var parent = await GetParentAsync(parentUserId, cancellationToken);
+            if (parent.TermsAcceptedAtUtc is not null)
+            {
+                return;
+            }
+
+            parent.TermsAcceptedAtUtc = DateTime.UtcNow;
+            _unitOfWork.Repository<ParentProfile>().Update(parent);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
         private async Task<ParentProfile> GetParentAsync(Guid parentUserId, CancellationToken cancellationToken)

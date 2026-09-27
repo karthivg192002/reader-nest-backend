@@ -53,5 +53,9 @@ namespace iucs.readernest.application.Dto.Sessions
         /// is instead of a bare "Demo class" when a family has more than one child.
         /// </summary>
         public string? DemoChildName { get; set; }
+
+        /// <summary>Who this class is for, for staff views (calendars, session lists): the active
+        /// students of its batch, or a demo's child. Filled by the staff session list / detail.</summary>
+        public List<string> StudentNames { get; set; } = [];
     }
 }

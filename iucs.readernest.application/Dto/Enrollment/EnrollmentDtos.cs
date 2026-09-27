@@ -54,6 +54,10 @@ namespace iucs.readernest.application.Dto.Enrollment
         /// </summary>
         public Guid? PackagePlanId { get; set; }
 
+        /// <summary>Agreed per-cycle amount replacing the plan's listed price; null = plan price.</summary>
+        [Range(0, 10000000)]
+        public decimal? PackagePlanPriceOverride { get; set; }
+
         /// <summary>
         /// Batch to place the child in the moment the approval lands, so the new student
         /// already has a roster/schedule instead of sitting unplaced until someone visits
