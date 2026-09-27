@@ -366,7 +366,7 @@ namespace iucs.readernest.application.Services
                 PaymentLinkUrl = paymentLinkUrl,
                 PaymentLinkError = paymentLinkError,
                 WhatsAppMessage = BuildWhatsAppMessage(
-                    request.ParentName.Trim(), request.ChildFirstName.Trim(), plan?.Name ?? course!.Name,
+                    await BrandSettings.GetNameAsync(_unitOfWork, cancellationToken), request.ParentName.Trim(), request.ChildFirstName.Trim(), plan?.Name ?? course!.Name,
                     loginUrl, loginId, temporaryPin, amountDue, currency, paymentLinkUrl),
             };
         }
@@ -415,14 +415,14 @@ namespace iucs.readernest.application.Services
         }
 
         private static string BuildWhatsAppMessage(
-            string parentName, string childName, string planName, string loginUrl, string loginId,
+            string brandName, string parentName, string childName, string planName, string loginUrl, string loginId,
             string? pin, decimal amountDue, string currency, string? paymentLinkUrl)
         {
             var lines = new List<string>
             {
                 $"Hello {parentName},",
                 "",
-                $"Welcome to The Reader Nest! {childName}'s admission for {planName} is done.",
+                $"Welcome to {brandName}! {childName}'s admission for {planName} is done.",
                 "",
                 "Parent portal login:",
                 loginUrl,

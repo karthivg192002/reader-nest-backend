@@ -343,7 +343,7 @@ namespace iucs.readernest.application.Services
                     WhatsAppMessage = string.Join("\n",
                         $"Hello {booking.ParentName},",
                         "",
-                        "Your The Reader Nest parent portal login:",
+                        $"Your {await BrandSettings.GetNameAsync(_unitOfWork, cancellationToken)} parent portal login:",
                         loginUrl,
                         $"Login: {loginId}",
                         $"PIN: {pinText}",
