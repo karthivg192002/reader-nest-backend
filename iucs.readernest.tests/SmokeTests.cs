@@ -5519,6 +5519,39 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task CancelUpcomingSessions_ClearsTheBatchsFutureClasses_SoANewScheduleCanBeGenerated()
+        {
+            // Client: instead of deleting a batch (and its history) to change its timing, cancel all
+            // upcoming classes at once and generate a fresh schedule on the same batch.
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 3, includeSession: false);
+            var admin = await _db.SeedUserAsync($"adm-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            var sessionService = CreateSessionService();
+            var start = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(3));
+            await sessionService.GenerateScheduleAsync(batch.Id, new GenerateScheduleRequest
+            {
+                StartDate = start,
+                Slots = [new GenerateScheduleSlot { DayOfWeek = start.DayOfWeek, StartTimeUtc = new TimeOnly(10, 0) }],
+            });
+
+            var cancelled = await CreateBatchService().CancelUpcomingSessionsAsync(batch.Id, admin.Id);
+
+            Assert.Equal(3, cancelled);
+            var old = await _db.Context.ClassSessions.AsNoTracking().Where(s => s.BatchId == batch.Id).ToListAsync();
+            Assert.All(old, s => Assert.Equal(SessionStatus.Cancelled, s.Status));
+            Assert.All(old, s => Assert.StartsWith("Cancelled by Test User (Admin)", s.CancellationReason));
+
+            // The batch is kept and can get a new schedule (new day/time).
+            var fresh = await sessionService.GenerateScheduleAsync(batch.Id, new GenerateScheduleRequest
+            {
+                StartDate = start.AddDays(1),
+                Slots = [new GenerateScheduleSlot { DayOfWeek = start.AddDays(1).DayOfWeek, StartTimeUtc = new TimeOnly(12, 30) }],
+            });
+            // The listing keeps the 3 cancelled ones as history; 3 new classes are scheduled.
+            Assert.Equal(3, fresh.Count(s => s.Status == SessionStatus.Scheduled));
+            Assert.Equal(3, fresh.Count(s => s.Status == SessionStatus.Cancelled));
+        }
+
+        [Fact]
         public async Task GenerateSchedule_CreatesAllCourseSessions_SkippingHolidays()
         {
             var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 4, includeSession: false);
