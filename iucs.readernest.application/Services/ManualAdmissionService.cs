@@ -316,7 +316,16 @@ namespace iucs.readernest.application.Services
             string? paymentLinkUrl = null;
             string? paymentLinkError = null;
             var amountDue = invoice is null ? 0 : invoice.Amount - invoice.AmountPaid;
-            if (invoice is not null && amountDue > 0)
+            if (invoice is not null && amountDue > 0
+                && await TermsRule.IsAcceptanceRequiredAsync(_unitOfWork, parentProfile, cancellationToken))
+            {
+                // A first-time parent must see the Terms & Conditions before paying (reported live:
+                // the raw gateway link let a new parent pay without them) -- so the link is the
+                // portal's /pay page, which shows the Terms and then opens the gateway.
+                var frontendBase = (_configuration["Frontend:BaseUrl"] ?? "https://thereadernest.in").TrimEnd('/');
+                paymentLinkUrl = $"{frontendBase}/pay/{InvoicePayToken.Create(invoice.Id, _configuration["Jwt:SigningKey"])}";
+            }
+            else if (invoice is not null && amountDue > 0)
             {
                 try
                 {

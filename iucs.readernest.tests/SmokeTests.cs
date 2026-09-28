@@ -182,8 +182,9 @@ namespace iucs.readernest.tests
             _db.Context.AddRange(farFuture, alreadyEnded, withinWindow);
             await _db.Context.SaveChangesAsync();
 
-            await Assert.ThrowsAsync<DomainValidationException>(
-                () => service.GetJitsiJoinAsync(farFuture.Id, teacherUser.Id));
+            // Client: a teacher's own Join is open "all the time" before her class (reported live),
+            // but a class long over (past the 3-hour late-join grace) stays closed.
+            Assert.Equal("trn-far-future", (await service.GetJitsiJoinAsync(farFuture.Id, teacherUser.Id)).Room);
             await Assert.ThrowsAsync<DomainValidationException>(
                 () => service.GetJitsiJoinAsync(alreadyEnded.Id, teacherUser.Id));
 
@@ -4231,6 +4232,47 @@ namespace iucs.readernest.tests
             await CompleteClass(2);
             exempt = await PaidClasses.WithClassesLeftAsync(_db.UnitOfWork, ids);
             Assert.DoesNotContain(halfPaid, exempt);     // both paid classes done → suspend now
+        }
+
+        [Fact]
+        public async Task StaffPaymentLink_ForAFirstTimeParent_GoesThroughTheTermsPage()
+        {
+            // Reported live: staff shared a raw Razorpay link and a new parent paid without ever
+            // seeing the Terms & Conditions. A first-time parent's link is now the portal /pay page.
+            var parentUser = await _db.SeedUserAsync($"tf-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var profile = new ParentProfile { UserId = parentUser.Id };
+            _db.Context.AddRange(profile,
+                new PaymentAccount { Name = "P", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "t", GatewayAccountRef = "p" });
+            await _db.Context.SaveChangesAsync();
+            var billing = CreateBillingService();
+            var invoice = await billing.CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = profile.Id, DepartmentId = WellKnownDepartments.Phonics,
+                Amount = 3000, DueDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(7),
+            });
+            var admission = new AdmissionPaymentService(
+                _db.UnitOfWork, CreateDemoBookingService(), CreateUserService(), billing, _notifications, _auditLog, new ConfigurationBuilder().Build());
+
+            var link = await admission.TermsFirstPayLinkAsync(invoice.Id);
+            Assert.NotNull(link);
+            Assert.Contains("/pay/i", link!.Url);
+            var token = link.Url[(link.Url.IndexOf("/pay/", StringComparison.Ordinal) + 5)..];
+
+            var page = await admission.GetPublicPaymentAsync(token);
+            Assert.True(page.TermsRequired);
+            Assert.Equal(3000, page.Amount);
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                admission.StartPublicPaymentAsync(token, new StartPublicAdmissionPaymentRequest { TermsAccepted = false }));
+            var started = await admission.StartPublicPaymentAsync(token, new StartPublicAdmissionPaymentRequest { TermsAccepted = true });
+            Assert.StartsWith("https://pay.test/", started.Url);
+
+            // Accepted once → from now on the raw gateway link is fine (no Terms page needed).
+            Assert.NotNull((await _db.Context.ParentProfiles.AsNoTracking().SingleAsync(p => p.Id == profile.Id)).TermsAcceptedAtUtc);
+            Assert.Null(await admission.TermsFirstPayLinkAsync(invoice.Id));
+
+            // A tampered code is rejected.
+            var tampered = token[..^1] + (token[^1] == 'a' ? 'b' : 'a');
+            await Assert.ThrowsAsync<NotFoundException>(() => admission.GetPublicPaymentAsync(tampered));
         }
 
         [Fact]
@@ -10357,7 +10399,9 @@ namespace iucs.readernest.tests
 
             var stored = await _db.Context.ClassSessions.AsNoTracking().FirstAsync(s => s.Id == session.Id);
             Assert.Equal(SessionStatus.Cancelled, stored.Status);
-            Assert.StartsWith("Cancelled by parent", stored.CancellationReason);
+            // Who cancelled is visible to admin: "Cancelled by {parent name} (Parent): {reason}".
+            Assert.StartsWith("Cancelled by ", stored.CancellationReason);
+            Assert.Contains("(Parent)", stored.CancellationReason);
             Assert.EndsWith("Child is unwell", stored.CancellationReason);
 
             // A make-up class is placed automatically, a week later at the same time.
