@@ -57,6 +57,16 @@ namespace iucs.readernest.domain.Entities.Academics
         /// RecordingMissingAlertSentAtUtc / OrphanedDemoAlertSentAtUtc.</summary>
         public DateTime? PaymentReminderSentAtUtc { get; set; }
 
+        /// <summary>
+        /// Flat amount paid to this batch's teacher per completed class, set by Admin/Management
+        /// (or an RM) when the batch is created — every teacher can be paid differently per
+        /// batch. Null (the default, and the only option before this field existed) means the
+        /// batch is priced the old way: PayoutService's per-minute rate card
+        /// (PayoutRate/TeacherNoShowPenaltyPercent). The two never mix for one batch — whichever
+        /// applies at the moment a session completes is used for that session's whole payout item.
+        /// </summary>
+        public decimal? TeacherPayoutPerClass { get; set; }
+
         public ICollection<BatchEnrollment> Enrollments { get; set; } = new List<BatchEnrollment>();
     }
 }

@@ -90,6 +90,8 @@ namespace iucs.readernest.domain.Data
         public DbSet<PayoutRate> PayoutRates => Set<PayoutRate>();
         public DbSet<Payout> Payouts => Set<Payout>();
         public DbSet<PayoutItem> PayoutItems => Set<PayoutItem>();
+        public DbSet<StaffCompensationSetting> StaffCompensationSettings => Set<StaffCompensationSetting>();
+        public DbSet<StaffPayout> StaffPayouts => Set<StaffPayout>();
 
         // Resources
         public DbSet<Resource> Resources => Set<Resource>();

@@ -29,6 +29,11 @@ namespace iucs.readernest.application.Dto.Batches
         [Range(1, 500)]
         public int? DurationMinutesOverride { get; set; }
 
+        /// <summary>Flat amount paid to this batch's teacher per completed class. Null keeps the
+        /// batch on the centre's per-minute rate card (PayoutRate) — the previous, only behaviour.</summary>
+        [Range(0, 9_999_999)]
+        public decimal? TeacherPayoutPerClass { get; set; }
+
         /// <summary>How this batch's fee is expected to be collected.</summary>
         public BatchPaymentPlanType PaymentPlanType { get; set; } = BatchPaymentPlanType.FullPaymentDone;
 

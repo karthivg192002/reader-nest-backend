@@ -46,7 +46,14 @@ namespace iucs.readernest.application.Common
             new("management", PermissionModule.SessionCalendarManagement, View: true),
             // Short-class payout approval: Management / Owners decide full, partial or no payout
             // for any class that ran shorter than scheduled (Payout Approvals), alongside Admin.
-            new("management", PermissionModule.Payouts, View: true, Approve: true),
+            // Edit added alongside: staff compensation (fixed salary / collection percentage) is
+            // set and edited by Admin/Management (client requirement), same Payouts module.
+            new("management", PermissionModule.Payouts, View: true, Edit: true, Approve: true),
+            // Client requirement: an Admin's own leave is approved only by Management, never by
+            // Admin. The plain "Management" preset shipped read-only (no UserManagement grant at
+            // all), so without this there would be no one able to approve it — StaffLeaveService.
+            // ReviewAsync's own carve-out refuses an Admin reviewer on an Admin-submitted leave.
+            new("management", PermissionModule.UserManagement, View: true, Approve: true),
             new("parent", PermissionModule.SessionCalendarManagement, View: true),
             new("parent", PermissionModule.ContentAccessManagement, View: true),
             new("parent", PermissionModule.BillingFinance, View: true),

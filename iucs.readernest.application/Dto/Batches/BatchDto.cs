@@ -20,6 +20,9 @@ namespace iucs.readernest.application.Dto.Batches
         /// <summary>What every session in this batch is actually scheduled at: DurationMinutesOverride if set, else CourseDurationMinutes.</summary>
         public int EffectiveDurationMinutes { get; set; }
 
+        /// <summary>Flat per-class teacher payout for this batch; null means the centre's per-minute rate card applies instead.</summary>
+        public decimal? TeacherPayoutPerClass { get; set; }
+
         public Guid TeacherProfileId { get; set; }
 
         public string TeacherName { get; set; } = null!;

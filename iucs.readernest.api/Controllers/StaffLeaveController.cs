@@ -9,15 +9,17 @@ using Microsoft.AspNetCore.Mvc;
 namespace iucs.readernest.api.Controllers
 {
     /// <summary>
-    /// Admin-team leave: RMs, Coordinators, Management and Admission apply ("mine" routes, no
-    /// minimum notice); Admin / Founder (UserManagement:Approve) review. Teachers keep their own
-    /// class-aware leave under /api/leave.
+    /// Admin-team leave: RMs, Coordinators, Management, Admission and Admin apply ("mine" routes,
+    /// no minimum notice); Admin / Founder / Management (UserManagement:Approve) review — except
+    /// an Admin's own leave, which StaffLeaveService.ReviewAsync refuses to let another Admin
+    /// approve (client requirement: only Management approves Admin's leave). Teachers keep their
+    /// own class-aware leave under /api/leave.
     /// </summary>
     [ApiController]
     [Route("api/staff-leave")]
     public class StaffLeaveController : ControllerBase
     {
-        private const string StaffRoles = $"{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}";
+        private const string StaffRoles = $"{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)},{nameof(UserRole.Admin)}";
 
         private readonly IStaffLeaveService _staffLeave;
 

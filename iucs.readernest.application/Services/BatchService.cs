@@ -66,6 +66,7 @@ namespace iucs.readernest.application.Services
                 PaymentPlanType = request.PaymentPlanType,
                 PaymentAfterSessionsCount = request.PaymentAfterSessionsCount,
                 PaymentDueDate = request.PaymentDueDate,
+                TeacherPayoutPerClass = request.TeacherPayoutPerClass,
             };
             await _unitOfWork.Repository<Batch>().AddAsync(batch, cancellationToken);
             await _auditLog.StageAsync(AuditAction.Create, nameof(Batch), batch.Id.ToString(), cancellationToken: cancellationToken);
@@ -240,6 +241,7 @@ namespace iucs.readernest.application.Services
             batch.PaymentPlanType = request.PaymentPlanType;
             batch.PaymentAfterSessionsCount = request.PaymentAfterSessionsCount;
             batch.PaymentDueDate = request.PaymentDueDate;
+            batch.TeacherPayoutPerClass = request.TeacherPayoutPerClass;
             if (paymentPlanChanged)
             {
                 batch.PaymentReminderSentAtUtc = null;

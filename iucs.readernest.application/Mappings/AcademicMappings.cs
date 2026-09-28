@@ -60,6 +60,7 @@ namespace iucs.readernest.application.Mappings
                 PaymentPlanType = batch.PaymentPlanType,
                 PaymentAfterSessionsCount = batch.PaymentAfterSessionsCount,
                 PaymentDueDate = batch.PaymentDueDate,
+                TeacherPayoutPerClass = batch.TeacherPayoutPerClass,
             };
         }
 

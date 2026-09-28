@@ -170,4 +170,35 @@ namespace iucs.readernest.application.Dto.Payouts
 
         public IReadOnlyList<PayoutItemDto> Items { get; set; } = [];
     }
+
+    /// <summary>One batch's row on the teacher's "My Earnings" breakdown for a month.</summary>
+    public class TeacherBatchEarningsDto
+    {
+        /// <summary>Null for a demo/ad-hoc session with no batch behind it.</summary>
+        public Guid? BatchId { get; set; }
+
+        public string BatchName { get; set; } = null!;
+
+        /// <summary>The batch's flat per-class rate if it has one; otherwise the effective average (total earned / classes taken) for a per-minute-rate batch.</summary>
+        public decimal? RatePerClass { get; set; }
+
+        public int ClassesTaken { get; set; }
+
+        public decimal TotalEarned { get; set; }
+    }
+
+    /// <summary>"My Earnings" (client requirement): a teacher's classes-taken and earnings per batch for one month.</summary>
+    public class TeacherEarningsSummaryDto
+    {
+        public int PeriodYear { get; set; }
+
+        public int PeriodMonth { get; set; }
+
+        /// <summary>Null when nothing has accrued for this teacher in this month yet.</summary>
+        public PayoutStatus? Status { get; set; }
+
+        public decimal TotalAmount { get; set; }
+
+        public IReadOnlyList<TeacherBatchEarningsDto> Batches { get; set; } = [];
+    }
 }

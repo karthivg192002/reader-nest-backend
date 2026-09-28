@@ -22,6 +22,13 @@ namespace iucs.readernest.application.Services
         Task<IReadOnlyList<PayoutDto>> ListForTeacherUserAsync(Guid userId, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// "My Earnings": this teacher's classes-taken and earnings broken down per batch for one
+        /// month (defaults to the current month) — built from the same Payout/PayoutItem rows as
+        /// the existing statement, so it always matches it exactly.
+        /// </summary>
+        Task<TeacherEarningsSummaryDto> GetMyEarningsSummaryAsync(Guid userId, int? year, int? month, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Adds a line item to the teacher's current-month payout for a session event.
         /// Amount derives from the teacher's effective per-duration rate; deductions are negative.
         /// Does not save — participates in the caller's unit of work.

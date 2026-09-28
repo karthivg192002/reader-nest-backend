@@ -56,6 +56,7 @@ namespace iucs.readernest.api.Data
             await EnsureItAdminMenuAsync(context);
             await EnsureExecutiveMenuAsync(context);
             await RelabelExecutiveDashboardMenuAsync(context);
+            await RelabelTeacherPayoutMenuAsync(context);
             await EnsureBulkEmailHistoryMenuAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
@@ -75,6 +76,7 @@ namespace iucs.readernest.api.Data
             await EnsureSupportTicketMenusAsync(context);
             await EnsurePayoutApprovalsMenusAsync(context);
             await EnsureStaffLeaveMenusAsync(context);
+            await EnsureStaffPayrollMenusAsync(context);
             await EnsureAccessRequestEmailTemplatesAsync(context);
             await EnsurePaymentPlanReminderEmailTemplatesAsync(context);
             await ReconcileOrgNameEmailTemplatesAsync(context);
@@ -566,6 +568,22 @@ namespace iucs.readernest.api.Data
         }
 
         /// <summary>
+        /// One-time relabel: the teacher's "/teacher/payout" menu item was seeded as "My Payout"
+        /// before the client asked for it to read "My Earnings" (the batch-wise breakdown is the
+        /// same page, PayoutsController.MineSummary just added a new endpoint it now also calls).
+        /// Only touches a row still carrying the old default label, so a title a teacher's admin
+        /// already customised via Menu Manager is left alone.
+        /// </summary>
+        private static async Task RelabelTeacherPayoutMenuAsync(ReaderNestDbContext context)
+        {
+            var item = await context.MenuItems.FirstOrDefaultAsync(m => m.Portal == "teacher" && m.Path == "/teacher/payout");
+            if (item is not null && item.Label == "My Payout")
+            {
+                item.Label = "My Earnings";
+            }
+        }
+
+        /// <summary>
         /// (portal, section, label, path, lucide icon, required module); orders derive from
         /// array position. Shared by the first-boot seed and the existing-database backfill
         /// so the module mapping lives in exactly one place. A null module means the item is
@@ -612,7 +630,7 @@ namespace iucs.readernest.api.Data
             ("teacher", "Teaching", "Demo Feedback", "/teacher/demo-feedback", "ClipboardCheck", PermissionModule.SessionCalendarManagement.ToString()),
             ("teacher", "Teaching", "Student Doubts", "/teacher/doubts", "MessageCircleQuestion", PermissionModule.Communication.ToString()),
             ("teacher", "My Account", "Leave Management", "/teacher/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
-            ("teacher", "My Account", "My Payout", "/teacher/payout", "Banknote", PermissionModule.Payouts.ToString()),
+            ("teacher", "My Account", "My Earnings", "/teacher/payout", "Banknote", PermissionModule.Payouts.ToString()),
             ("teacher", "My Account", "Resources", "/teacher/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
             ("parent", null, "Dashboard", "/parent", "LayoutDashboard", null),
             ("parent", "Learning", "Schedule & Live Class", "/parent/schedule", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
@@ -2434,6 +2452,9 @@ namespace iucs.readernest.api.Data
         /// <summary>
         /// Staff leave, for a DB seeded before it existed: "My Leave" (always visible) in each
         /// admin-team portal, and "Staff Leave" review for Admin / Founder, gated on UserManagement.
+        /// Admin also gets its own "My Leave" (client requirement: Admin can apply for leave too,
+        /// alongside the "Staff Leave" review screen it already had) — reviewed only by Management,
+        /// never by another Admin (StaffLeaveService.ReviewAsync's own carve-out).
         /// </summary>
         private static async Task EnsureStaffLeaveMenusAsync(ReaderNestDbContext context)
         {
@@ -2445,6 +2466,8 @@ namespace iucs.readernest.api.Data
                 ("management", "/management/sessions", "My Leave", "my-leave", null),
                 ("admin", "/admin/leave", "Staff Leave", "staff-leave", PermissionModule.UserManagement.ToString()),
                 ("executive", "/executive/leave", "Staff Leave", "staff-leave", PermissionModule.UserManagement.ToString()),
+                ("admin", "/admin/staff-leave", "My Leave", "my-leave", (string?)null),
+                ("executive", "/executive/staff-leave", "My Leave", "my-leave", null),
             })
             {
                 var path = $"/{portal}/{slug}";
@@ -2469,6 +2492,55 @@ namespace iucs.readernest.api.Data
                     Label = label,
                     Path = path,
                     Icon = "CalendarOff",
+                    SortOrder = anchor.SortOrder + 1,
+                    IsActive = true,
+                    RequiredModule = module,
+                });
+            }
+        }
+
+        /// <summary>
+        /// Staff pay (client requirement — fixed salary for Coordinator/Relationship
+        /// Manager/Admin, collection percentage for Admission): "My Salary" (self-view, always
+        /// visible) in every admin-team portal including Admin/Founder, and "Staff Payroll" (set
+        /// / edit amounts) for Admin and Founder only, gated on Payouts.
+        /// </summary>
+        private static async Task EnsureStaffPayrollMenusAsync(ReaderNestDbContext context)
+        {
+            foreach (var (portal, anchorPath, label, slug, module) in new[]
+            {
+                ("subadmin", "/subadmin/my-leave", "My Salary", "my-salary", (string?)null),
+                ("admission", "/admission/my-leave", "My Salary", "my-salary", null),
+                ("coordinator", "/coordinator/my-leave", "My Salary", "my-salary", null),
+                ("management", "/management/my-leave", "My Salary", "my-salary", null),
+                ("admin", "/admin/my-leave", "My Salary", "my-salary", null),
+                ("executive", "/executive/my-leave", "My Salary", "my-salary", null),
+                ("admin", "/admin/payout-approvals", "Staff Payroll", "staff-payroll", PermissionModule.Payouts.ToString()),
+                ("executive", "/executive/payout-approvals", "Staff Payroll", "staff-payroll", PermissionModule.Payouts.ToString()),
+            })
+            {
+                var path = $"/{portal}/{slug}";
+                if (context.MenuItems.Local.Any(m => m.Portal == portal && m.Path == path) ||
+                    await context.MenuItems.AnyAsync(m => m.Portal == portal && m.Path == path))
+                {
+                    continue;
+                }
+
+                var anchor = context.MenuItems.Local.FirstOrDefault(m => m.Portal == portal && m.Path == anchorPath)
+                    ?? await context.MenuItems.FirstOrDefaultAsync(m => m.Portal == portal && m.Path == anchorPath);
+                if (anchor is null)
+                {
+                    continue;
+                }
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = portal,
+                    Section = anchor.Section,
+                    SectionOrder = anchor.SectionOrder,
+                    Label = label,
+                    Path = path,
+                    Icon = "Wallet",
                     SortOrder = anchor.SortOrder + 1,
                     IsActive = true,
                     RequiredModule = module,

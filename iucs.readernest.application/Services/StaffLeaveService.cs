@@ -53,7 +53,7 @@ namespace iucs.readernest.application.Services
             var user = await _unitOfWork.Repository<User>().Query()
                 .FirstOrDefaultAsync(u => u.Id == userId, cancellationToken)
                 ?? throw new NotFoundException("User not found.");
-            if (user.Role is not (UserRole.SubAdmin or UserRole.AdmissionTeam))
+            if (user.Role is not (UserRole.SubAdmin or UserRole.AdmissionTeam or UserRole.Admin))
             {
                 throw new ForbiddenException("Staff leave is for admin-team members; teachers apply from their own Leave page.");
             }
@@ -122,6 +122,22 @@ namespace iucs.readernest.application.Services
             if (leave.Status != LeaveStatus.Pending)
             {
                 throw new ConflictException($"This leave has already been {leave.Status.ToString().ToLowerInvariant()}.");
+            }
+
+            // Client requirement: an Admin's own leave is approved only by Management, never by
+            // Admin — everyone else's leave stays approvable by Admin/Management as before. The
+            // controller's [HasPermission(UserManagement, Approve)] already lets both through;
+            // this is the one case that permission check alone can't tell apart.
+            if (leave.User.Role == UserRole.Admin)
+            {
+                var reviewerRole = await _unitOfWork.Repository<User>().Query()
+                    .Where(u => u.Id == reviewerUserId)
+                    .Select(u => (UserRole?)u.Role)
+                    .FirstOrDefaultAsync(cancellationToken);
+                if (reviewerRole == UserRole.Admin)
+                {
+                    throw new ForbiddenException("An Admin's own leave can only be approved by Management, not by another Admin.");
+                }
             }
 
             leave.Status = request.Approve ? LeaveStatus.Approved : LeaveStatus.Rejected;
@@ -194,17 +210,24 @@ namespace iucs.readernest.application.Services
         private static string FormatDates(DateOnly start, DateOnly end) =>
             start == end ? start.ToString("ddd, d MMM yyyy") : $"{start:ddd, d MMM} – {end:ddd, d MMM yyyy}";
 
-        /// <summary>Admin plus every Sub Admin who can approve people matters (UserManagement:Approve — the Founder preset). Best-effort.</summary>
+        /// <summary>
+        /// Admin plus every Sub Admin who can approve people matters (UserManagement:Approve —
+        /// the Management / Founder presets) — except when the leave itself is Admin's own, where
+        /// only the Sub Admin approvers are notified: an Admin recipient could never actually
+        /// approve it (ReviewAsync's own carve-out), so alerting one would just be noise pointing
+        /// at a dead end. Best-effort.
+        /// </summary>
         private async Task NotifyApproversAsync(User staff, StaffLeaveRequest leave, CancellationToken cancellationToken)
         {
             try
             {
                 var module = PermissionModule.UserManagement.ToString();
                 var grants = _unitOfWork.Repository<SubAdminPermission>().Query();
+                var requesterIsAdmin = staff.Role == UserRole.Admin;
                 var approvers = await _unitOfWork.Repository<User>().Query()
                     .Include(u => u.RoleDefinition)
                     .Where(u => u.Status == UserStatus.Active
-                                && (u.Role == UserRole.Admin
+                                && ((!requesterIsAdmin && u.Role == UserRole.Admin)
                                     || (u.Role == UserRole.SubAdmin
                                         && grants.Any(p => p.UserId == u.Id && p.Module == module && p.CanApprove))))
                     .ToListAsync(cancellationToken);
