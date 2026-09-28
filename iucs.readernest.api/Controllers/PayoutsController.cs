@@ -40,6 +40,16 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _payoutService.ListForTeacherUserAsync(userId, cancellationToken));
         }
 
+        /// <summary>"My Earnings": batch-wise breakdown (rate per class, classes taken, total) for one month, defaulting to the current month.</summary>
+        [HttpGet("mine/summary")]
+        [Authorize(Roles = nameof(UserRole.Teacher))]
+        public async Task<ActionResult<TeacherEarningsSummaryDto>> MineSummary(
+            [FromQuery] int? year, [FromQuery] int? month, CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _payoutService.GetMyEarningsSummaryAsync(userId, year, month, cancellationToken));
+        }
+
         /// <summary>Admin correction to one accrued line item -- the only way to act on a RequiresReview flag. Only while the payout is still Pending.</summary>
         [HttpPut("{id:guid}/items/{itemId:guid}")]
         [HasPermission(PermissionModule.Payouts, PermissionAction.Edit)]

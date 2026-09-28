@@ -103,7 +103,7 @@ namespace iucs.readernest.tests
         private PermissionModuleService CreatePermissionModuleService() => new(_db.UnitOfWork, _auditLog);
 
         private AcademicOpsService CreateAcademicOpsService() =>
-            new(_db.UnitOfWork, _auditLog, _notifications, _db.CurrentUser, CreateSessionService(), CreateEventLogService());
+            new(_db.UnitOfWork, _auditLog, _notifications, _db.CurrentUser, CreateSessionService(), CreateEventLogService(), _emailTemplates, _emailSender);
 
         private GamificationService CreateGamificationService() => new(_db.UnitOfWork, CreateSessionService());
 
@@ -3088,7 +3088,52 @@ namespace iucs.readernest.tests
 
             // Client feedback #10: core team + affected parents are notified
             Assert.Contains(_emailSender.Sent, m => m.Subject.StartsWith("Teacher on leave"));
-            Assert.Contains(_emailSender.Sent, m => m.To == parentUser.Email && m.Subject.StartsWith("Class update"));
+            // Client feedback (later): the parent email names the specific cancelled class(es) so
+            // it isn't confused with the earlier 1-hour reminder, not just a vague leave window.
+            var parentMail = Assert.Single(_emailSender.Sent, m => m.To == parentUser.Email);
+            Assert.StartsWith("Class cancelled", parentMail.Subject);
+            Assert.Contains(batch.Name, parentMail.Body);
+        }
+
+        /// <summary>
+        /// Client-reported gap: a demo's parent/lead previously got no automated email at all when
+        /// the assigned teacher's leave cancelled their demo — only internal admission staff were
+        /// told, and had to remember to pass it on themselves. This is on top of the 1-hour
+        /// SessionReminderBackgroundService reminder they'd already received, which is exactly what
+        /// made the missing follow-up confusing.
+        /// </summary>
+        [Fact]
+        public async Task ApproveLeave_CancelsDemo_EmailsLeadDirectly_AndStillAlertsAdmissionStaff()
+        {
+            var admissionUser = await _db.SeedUserAsync($"admission-{Guid.NewGuid():N}@test.com", "x", UserRole.AdmissionTeam);
+            var demoStart = DateTime.UtcNow.AddDays(3);
+            var (session, booking) = await SeedDemoSessionAsync($"lead-{Guid.NewGuid():N}@test.com", startAtUtc: demoStart);
+            var teacherUserId = session.TeacherProfile.UserId;
+            _db.CurrentUser.UserId = null; // SubmitLeaveAsync below runs as the teacher, not the demo helper's leftover actor
+
+            var ops = CreateAcademicOpsService();
+            var leave = await ops.SubmitLeaveAsync(teacherUserId, new SubmitLeaveRequest
+            {
+                StartAtUtc = demoStart.AddHours(-1),
+                EndAtUtc = demoStart.AddHours(1),
+                Reason = "Family emergency",
+            });
+            _db.Context.ChangeTracker.Clear();
+            _emailSender.Sent.Clear();
+
+            await ops.ReviewLeaveAsync(leave.Id, new ReviewLeaveRequest { Approve = true });
+
+            // The lead is emailed directly — previously this never happened at all.
+            var leadMail = Assert.Single(_emailSender.Sent, m => m.To == booking.ParentEmail);
+            Assert.Contains("cancelled", leadMail.Subject, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(booking.ChildName, leadMail.Body);
+
+            // Admission staff still get their own alert to actually reassign/reschedule it.
+            Assert.Contains(_emailSender.Sent, m => m.To == admissionUser.Email && m.Subject.Contains("Demo(s) cancelled"));
+
+            _db.Context.ChangeTracker.Clear();
+            var cancelled = await _db.Context.ClassSessions.FirstAsync(s => s.Id == session.Id);
+            Assert.Equal(SessionStatus.Cancelled, cancelled.Status);
         }
 
         [Fact]
@@ -3474,13 +3519,13 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
-        public async Task RequestPinReset_UnknownEmail_DoesNothingAndNeverThrows()
+        public async Task RequestPinReset_UnknownEmail_ThrowsNotFoundAndSendsNothing()
         {
             var auth = CreateAuthService();
 
-            // No account with this email exists — must complete quietly (no enumeration signal),
-            // never throw NotFoundException or anything else the caller could distinguish.
-            await auth.RequestPinResetAsync(new ForgotPinRequest { Email = "nobody@test.com" });
+            // Product decision: reveal "no account found" to the caller instead of staying silent.
+            await Assert.ThrowsAsync<NotFoundException>(() =>
+                auth.RequestPinResetAsync(new ForgotPinRequest { Email = "nobody@test.com" }));
 
             Assert.Empty(await _db.Context.PinResetTokens.ToListAsync());
             Assert.Empty(_emailSender.Sent);
@@ -5516,6 +5561,39 @@ namespace iucs.readernest.tests
             var storedInvoice = await _db.Context.Invoices.FirstAsync(i => i.Id == invoice.Id);
             Assert.NotEqual(InvoiceStatus.Paid, storedInvoice.Status);
             Assert.Equal(0, storedInvoice.AmountPaid);
+        }
+
+        [Fact]
+        public async Task CancelUpcomingSessions_ClearsTheBatchsFutureClasses_SoANewScheduleCanBeGenerated()
+        {
+            // Client: instead of deleting a batch (and its history) to change its timing, cancel all
+            // upcoming classes at once and generate a fresh schedule on the same batch.
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 3, includeSession: false);
+            var admin = await _db.SeedUserAsync($"adm-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            var sessionService = CreateSessionService();
+            var start = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(3));
+            await sessionService.GenerateScheduleAsync(batch.Id, new GenerateScheduleRequest
+            {
+                StartDate = start,
+                Slots = [new GenerateScheduleSlot { DayOfWeek = start.DayOfWeek, StartTimeUtc = new TimeOnly(10, 0) }],
+            });
+
+            var cancelled = await CreateBatchService().CancelUpcomingSessionsAsync(batch.Id, admin.Id);
+
+            Assert.Equal(3, cancelled);
+            var old = await _db.Context.ClassSessions.AsNoTracking().Where(s => s.BatchId == batch.Id).ToListAsync();
+            Assert.All(old, s => Assert.Equal(SessionStatus.Cancelled, s.Status));
+            Assert.All(old, s => Assert.StartsWith("Cancelled by Test User (Admin)", s.CancellationReason));
+
+            // The batch is kept and can get a new schedule (new day/time).
+            var fresh = await sessionService.GenerateScheduleAsync(batch.Id, new GenerateScheduleRequest
+            {
+                StartDate = start.AddDays(1),
+                Slots = [new GenerateScheduleSlot { DayOfWeek = start.AddDays(1).DayOfWeek, StartTimeUtc = new TimeOnly(12, 30) }],
+            });
+            // The listing keeps the 3 cancelled ones as history; 3 new classes are scheduled.
+            Assert.Equal(3, fresh.Count(s => s.Status == SessionStatus.Scheduled));
+            Assert.Equal(3, fresh.Count(s => s.Status == SessionStatus.Cancelled));
         }
 
         [Fact]

@@ -997,12 +997,18 @@ namespace iucs.readernest.application.Services
             // CarriedForward) for what's really one class slot — confirmed live across 19
             // batches. Fetched once for the window rather than queried per candidate day, same
             // as the holiday lookup above.
-            var windowEndExclusive = windowEnd.ToDateTime(TimeOnly.MinValue).AddDays(1);
+            // Both bounds MUST be DateTimeKind.Utc: PostgreSQL's driver refuses an Unspecified
+            // DateTime against a timestamptz column and throws before anything is saved. Reported
+            // live as "Couldn't cancel the class -- something went wrong on our side": every
+            // parent cancellation (and every no-show carry-forward) failed right here. SQLite, used
+            // by the tests, accepts either kind, which is how this slipped through.
+            var windowStartUtc = windowStart.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+            var windowEndExclusive = windowEnd.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc).AddDays(1);
             var batchSessions = batchId is null
                 ? new List<DateTime[]>()
                 : await _unitOfWork.Repository<ClassSession>().Query()
                     .Where(s => s.BatchId == batchId
-                        && s.ScheduledStartAtUtc >= windowStart.ToDateTime(TimeOnly.MinValue)
+                        && s.ScheduledStartAtUtc >= windowStartUtc
                         && s.ScheduledStartAtUtc < windowEndExclusive)
                     .Select(s => new[] { s.ScheduledStartAtUtc, s.ScheduledEndAtUtc })
                     .ToListAsync(cancellationToken);

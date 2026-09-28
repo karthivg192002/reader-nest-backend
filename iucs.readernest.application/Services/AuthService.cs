@@ -188,11 +188,12 @@ namespace iucs.readernest.application.Services
             // Same identifier as the login box: email, or a parent's mobile number.
             var user = await FindLoginUserAsync(request.Email, cancellationToken);
 
-            // Deliberately silent on "no such account" / inactive — an anonymous caller must
-            // never be able to use this endpoint to discover which emails have accounts here.
+            // Product decision: reveal whether the identifier has an account (trades away
+            // anti-enumeration protection for a clearer "did my request even do anything?"
+            // signal, since silent success was being mistaken for a delivery bug).
             if (user is null || user.Status == UserStatus.Inactive)
             {
-                return;
+                throw new NotFoundException("We couldn't find an account for that email or mobile number.");
             }
 
             // A WhatsApp-only parent has no email to receive a reset link (and SMS/WhatsApp
