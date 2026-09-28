@@ -35,8 +35,8 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>
-        /// Always responds the same way whether or not the address has an account — the
-        /// frontend shows one fixed "if that email exists, we've sent a link" message either way.
+        /// 204 if the address/mobile number has an account and the reset link (or WhatsApp-only
+        /// staff alert) was sent; 404 otherwise — see AuthService.RequestPinResetAsync.
         /// </summary>
         [HttpPost("forgot-pin")]
         [AllowAnonymous]

@@ -1,5 +1,6 @@
 using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
+using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Academics;
 using iucs.readernest.application.Helper;
 using iucs.readernest.domain.Common;
@@ -21,6 +22,8 @@ namespace iucs.readernest.application.Services
         private readonly ICurrentUserService _currentUser;
         private readonly ISessionService _sessionService;
         private readonly IClassSessionEventLogService _eventLog;
+        private readonly IEmailTemplateService _emailTemplates;
+        private readonly IEmailSender _emailSender;
 
         public AcademicOpsService(
             IUnitOfWork unitOfWork,
@@ -28,7 +31,9 @@ namespace iucs.readernest.application.Services
             INotificationService notificationService,
             ICurrentUserService currentUser,
             ISessionService sessionService,
-            IClassSessionEventLogService eventLog)
+            IClassSessionEventLogService eventLog,
+            IEmailTemplateService emailTemplates,
+            IEmailSender emailSender)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
@@ -36,6 +41,8 @@ namespace iucs.readernest.application.Services
             _currentUser = currentUser;
             _sessionService = sessionService;
             _eventLog = eventLog;
+            _emailTemplates = emailTemplates;
+            _emailSender = emailSender;
         }
 
         /// <summary>
@@ -775,8 +782,16 @@ namespace iucs.readernest.application.Services
         /// <summary>
         /// Tells exactly the families whose classes this leave cancelled — previously every
         /// parent in every batch this teacher teaches got a "teacher on leave" email, even for a
-        /// single cancelled class in someone else's batch. A cancelled demo has no enrolled
-        /// family; the admission team is told instead so they can reassign or reschedule it.
+        /// single cancelled class in someone else's batch. Client-reported confusion: a parent
+        /// who'd already received the 1-hour SessionReminderBackgroundService reminder for a
+        /// class that the teacher's leave then cancelled got only a vague "on leave {window}...
+        /// will be rescheduled" email with no mention of which class or that nothing shows up
+        /// automatically — this now names each family's own cancelled class(es) by name/time and
+        /// says CANCELLED, not a rescheduling that (for a teacher-leave cancellation, unlike a
+        /// parent's own cancellation) never actually happens on its own. A cancelled demo has no
+        /// enrolled family in this system — the lead is emailed directly here (previously only
+        /// admission staff were told, and had to remember to pass it on themselves), and
+        /// admission staff still get their own alert to actually reassign/reschedule it.
         /// </summary>
         private async Task NotifyAffectedFamiliesAsync(
             string teacherName,
@@ -784,19 +799,36 @@ namespace iucs.readernest.application.Services
             IReadOnlyCollection<ClassSession> cancelled,
             CancellationToken cancellationToken)
         {
-            var batchIds = cancelled.Where(s => s.BatchId.HasValue).Select(s => s.BatchId!.Value).Distinct().ToList();
-            if (batchIds.Count > 0)
+            var batchSessions = cancelled.Where(s => s.BatchId.HasValue).ToList();
+            if (batchSessions.Count > 0)
             {
-                var parents = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                var batchIds = batchSessions.Select(s => s.BatchId!.Value).Distinct().ToList();
+                var enrollments = await _unitOfWork.Repository<BatchEnrollment>().Query()
                     .Where(e => e.Status == EnrollmentStatus.Active && batchIds.Contains(e.BatchId))
-                    .Select(e => e.Child.ParentProfile.User)
-                    .Distinct()
+                    .Select(e => new { e.BatchId, ParentUser = e.Child.ParentProfile.User })
                     .ToListAsync(cancellationToken);
-                foreach (var parent in parents)
+
+                // Each parent sees only their OWN child's cancelled class(es), by name and time —
+                // not the leave's whole date range, which might span classes in other batches
+                // (and so other families) entirely.
+                var byParent = enrollments
+                    .GroupBy(e => e.ParentUser.Id)
+                    .Select(g => (Parent: g.First().ParentUser, Sessions: batchSessions.Where(s => g.Any(e => e.BatchId == s.BatchId!.Value)).ToList()));
+
+                foreach (var (parent, sessions) in byParent)
                 {
+                    var itemsHtml = string.Join("", sessions
+                        .OrderBy(s => s.ScheduledStartAtUtc)
+                        .Select(s => $"<li>{System.Net.WebUtility.HtmlEncode(s.Batch?.Name ?? "Class")} — " +
+                            $"{DateTimeDisplay.ToLocalRange(s.ScheduledStartAtUtc, s.ScheduledEndAtUtc, parent.TimeZoneId)}</li>"));
                     await _notificationService.SendTemplatedEmailAsync(
                         parent.Id, parent.Email, NotificationType.LeaveStatusUpdate, "leave-notify-parent",
-                        new Dictionary<string, string> { ["TeacherName"] = teacherName, ["Window"] = window },
+                        new Dictionary<string, string>
+                        {
+                            ["TeacherName"] = teacherName,
+                            ["SessionsList"] = itemsHtml,
+                            ["Count"] = sessions.Count == 1 ? "This class has" : $"These {sessions.Count} classes have",
+                        },
                         cancellationToken);
                 }
             }
@@ -809,19 +841,45 @@ namespace iucs.readernest.application.Services
 
             var demos = await _unitOfWork.Repository<DemoBooking>().Query()
                 .Where(b => b.ClassSessionId != null && demoSessionIds.Contains(b.ClassSessionId.Value))
-                .Select(b => new { b.ChildName, b.ParentName, b.ParentPhone, Start = b.ClassSession!.ScheduledStartAtUtc })
+                .Select(b => new { b.ChildName, b.ParentName, b.ParentEmail, b.ParentPhone, Start = b.ClassSession!.ScheduledStartAtUtc })
                 .ToListAsync(cancellationToken);
             if (demos.Count == 0)
             {
                 return;
             }
 
+            foreach (var demo in demos)
+            {
+                if (!string.IsNullOrWhiteSpace(demo.ParentEmail))
+                {
+                    try
+                    {
+                        var (subject, htmlBody) = await _emailTemplates.RenderAsync(
+                            "demo-cancelled-teacher-leave",
+                            new Dictionary<string, string>
+                            {
+                                ["ParentName"] = demo.ParentName,
+                                ["ChildName"] = demo.ChildName,
+                                ["TeacherName"] = teacherName,
+                                ["StartLocal"] = DateTimeDisplay.ToLocal(demo.Start),
+                            },
+                            cancellationToken);
+                        await _emailSender.SendAsync(demo.ParentEmail, subject, htmlBody, cancellationToken);
+                    }
+                    catch (Exception)
+                    {
+                        // Best-effort, same as every other reminder/alert fan-out in this method —
+                        // one failed lead email must not stop the rest or the staff alert below.
+                    }
+                }
+            }
+
             var rows = string.Join("", demos.Select(d =>
                 $"<li>{System.Net.WebUtility.HtmlEncode(d.ChildName)} (parent {System.Net.WebUtility.HtmlEncode(d.ParentName)}" +
                 $"{(string.IsNullOrWhiteSpace(d.ParentPhone) ? "" : ", " + System.Net.WebUtility.HtmlEncode(d.ParentPhone))}) — {DateTimeDisplay.ToLocal(d.Start)}</li>"));
             var body =
-                $"<p>{System.Net.WebUtility.HtmlEncode(teacherName)} is on leave, so these demo classes were cancelled:</p><ul>{rows}</ul>" +
-                "<p>Please reassign each demo to another teacher (or reschedule it) and let the parent know.</p>";
+                $"<p>{System.Net.WebUtility.HtmlEncode(teacherName)} is on leave, so these demo classes were cancelled (the parent/lead has already been emailed directly):</p><ul>{rows}</ul>" +
+                "<p>Please reassign each demo to another teacher (or reschedule it).</p>";
             var admissionStaff = await _unitOfWork.Repository<User>().Query()
                 .Where(u => (u.Role == UserRole.Admin || u.Role == UserRole.AdmissionTeam) && u.Status == UserStatus.Active)
                 .ToListAsync(cancellationToken);
@@ -1070,12 +1128,17 @@ namespace iucs.readernest.application.Services
                     // span (see LeaveRequestSession's own doc comment).
                     var sessionIds = leave.Sessions.Select(s => s.ClassSessionId).ToList();
                     affectedSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                        .Include(s => s.Batch)
                         .Where(s => sessionIds.Contains(s.Id) && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward))
                         .ToListAsync(cancellationToken);
                 }
                 else
                 {
+                    // Batch included — NotifyAffectedFamiliesAsync needs each cancelled
+                    // session's own batch name/time to tell each family exactly which of their
+                    // classes was cancelled, not just the leave's overall date range.
                     affectedSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                        .Include(s => s.Batch)
                         .Where(s => s.TeacherProfileId == leave.TeacherProfileId
                             && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
                             && s.ScheduledStartAtUtc < leave.EndAtUtc

@@ -388,13 +388,26 @@ namespace iucs.readernest.application.Common
                     "TeacherName", "Window"),
 
                 New("leave-notify-parent", "Teacher on Leave (Parent)",
-                    "Sent to affected parents when their child's teacher's leave is approved.",
-                    NotificationType.LeaveStatusUpdate, "Class update: {{TeacherName}} is on leave",
+                    "Sent to affected parents when their child's teacher's leave cancels one or more of their child's classes — names the exact class(es)/time(s), not just the leave's overall date range, so a parent who already got the 1-hour class reminder isn't left wondering whether today's specific class is the one that's off.",
+                    NotificationType.LeaveStatusUpdate, "Class cancelled: {{TeacherName}} is on leave",
                     """
-                    <p>Your child's teacher <strong>{{TeacherName}}</strong> is on approved leave {{Window}}.</p>
-                    <p>Any affected classes will be rescheduled — the new slots will appear on your schedule.</p>
+                    <p>Your child's teacher <strong>{{TeacherName}}</strong> is on approved leave.</p>
+                    <p>{{Count}} been cancelled:</p>
+                    <ul>{{SessionsList}}</ul>
+                    <p>This is not an automatic reschedule — our team will reach out to arrange a make-up class.</p>
                     """,
-                    "TeacherName", "Window"),
+                    "TeacherName", "Count", "SessionsList"),
+
+                New("demo-cancelled-teacher-leave", "Demo Cancelled — Teacher on Leave (Parent/Lead)",
+                    "Sent directly to a demo's parent/lead when the assigned teacher's leave cancels their scheduled demo class — previously only internal admission staff were told, with no automated email to the family at all, leaving them with only the earlier 1-hour reminder and no idea it was cancelled.",
+                    NotificationType.LeaveStatusUpdate, "Your demo class has been cancelled",
+                    """
+                    <p>Hi {{ParentName}},</p>
+                    <p>We're sorry — {{ChildName}}'s demo class scheduled for <strong>{{StartLocal}}</strong> has been
+                    cancelled because the teacher, {{TeacherName}}, is on leave.</p>
+                    <p>Our team will reach out shortly to reschedule it for a convenient time.</p>
+                    """,
+                    "ParentName", "ChildName", "TeacherName", "StartLocal"),
 
                 New("leave-submitted-admin-alert", "Leave Application Submitted (Admin)",
                     "Sent to Admins when a teacher submits a new leave application.",

@@ -65,6 +65,8 @@ namespace iucs.readernest.api.Data
             await EnsureJitsiAutoRecordConfigAsync(context);
             await SeedEmailTemplatesAsync(context);
             await ReconcileJoinLinkEmailTemplatesAsync(context);
+            await ReconcileLeaveNotifyParentEmailTemplateAsync(context);
+            await EnsureDemoCancelledLeaveEmailTemplateAsync(context);
             await ReconcileWelcomeCredentialsPinTemplateAsync(context);
             await EnsureEmailTemplatesMenuAsync(context);
             await EnsureProgressReportEmailTemplateAsync(context);
@@ -2722,6 +2724,62 @@ namespace iucs.readernest.api.Data
                 existing.HtmlBody = seed.HtmlBody;
                 existing.PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders);
             }
+        }
+
+        /// <summary>
+        /// SeedEmailTemplatesAsync is insert-only, so a live DB never picks up template text
+        /// changes on its own. Client-reported confusion: a parent who already got the 1-hour
+        /// SessionReminderBackgroundService reminder for a class, then had it cancelled by the
+        /// teacher's leave, got only a vague "on leave {{Window}}... will be rescheduled" email —
+        /// no mention of which class, and "rescheduled" isn't even what actually happens (unlike
+        /// a parent's own cancellation, a teacher-leave cancellation doesn't auto-create a make-up
+        /// session; NotifyAffectedFamiliesAsync's own doc comment has the detail). Replaces it
+        /// with one naming each family's own cancelled class(es) by name/time. Skips any row that
+        /// already has the new {{SessionsList}} token (idempotent, and leaves an admin's own
+        /// subsequent edits alone).
+        /// </summary>
+        private static async Task ReconcileLeaveNotifyParentEmailTemplateAsync(ReaderNestDbContext context)
+        {
+            var seed = EmailTemplateSeedData.All.First(s => s.Key == "leave-notify-parent");
+            var existing = await context.EmailTemplates.FirstOrDefaultAsync(t => t.Key == seed.Key);
+            if (existing is null || existing.HtmlBody.Contains("{{SessionsList}}"))
+            {
+                return;
+            }
+
+            existing.Subject = seed.Subject;
+            existing.HtmlBody = seed.HtmlBody;
+            existing.PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders);
+        }
+
+        /// <summary>
+        /// SeedEmailTemplatesAsync is insert-only, so a DB seeded before this template existed
+        /// never picks it up: a demo's parent/lead previously got no automated email at all when
+        /// the assigned teacher's leave cancelled their demo — only internal admission staff were
+        /// told, and had to remember to pass it on themselves (see NotifyAffectedFamiliesAsync).
+        /// </summary>
+        private static async Task EnsureDemoCancelledLeaveEmailTemplateAsync(ReaderNestDbContext context)
+        {
+            const string key = "demo-cancelled-teacher-leave";
+            if (context.EmailTemplates.Local.Any(t => t.Key == key) ||
+                await context.EmailTemplates.AnyAsync(t => t.Key == key))
+            {
+                return;
+            }
+
+            var seed = EmailTemplateSeedData.All.First(s => s.Key == key);
+            context.EmailTemplates.Add(new EmailTemplate
+            {
+                Key = seed.Key,
+                Name = seed.Name,
+                Description = seed.Description,
+                Category = seed.Category,
+                Subject = seed.Subject,
+                HtmlBody = seed.HtmlBody,
+                PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders),
+                IsActive = true,
+                IsSystem = true,
+            });
         }
 
         /// <summary>
