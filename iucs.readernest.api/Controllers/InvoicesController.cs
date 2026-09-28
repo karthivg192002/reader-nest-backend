@@ -79,11 +79,24 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _billingService.ListInvoiceTransactionsAsync(id, cancellationToken));
         }
 
-        /// <summary>Shareable Pay Now link, routed through the invoice's department gateway account.</summary>
+        /// <summary>
+        /// Shareable Pay Now link, routed through the invoice's department gateway account. For a
+        /// first-time parent who hasn't accepted the Terms &amp; Conditions yet, it is instead the
+        /// portal's /pay page, which shows the Terms before sending them on to the gateway --
+        /// reported live: a raw gateway link let a new parent pay without ever seeing them.
+        /// </summary>
         [HttpPost("{id:guid}/payment-link")]
         [HasPermission(PermissionModule.BillingFinance, PermissionAction.Edit)]
-        public async Task<ActionResult<PaymentLinkDto>> CreatePaymentLink(Guid id, CancellationToken cancellationToken)
+        public async Task<ActionResult<PaymentLinkDto>> CreatePaymentLink(
+            Guid id,
+            [FromServices] IAdmissionPaymentService admissionPaymentService,
+            CancellationToken cancellationToken)
         {
+            if (await admissionPaymentService.TermsFirstPayLinkAsync(id, cancellationToken) is { } termsFirst)
+            {
+                return Ok(termsFirst);
+            }
+
             return Ok(await _billingService.CreatePaymentLinkAsync(id, cancellationToken));
         }
 

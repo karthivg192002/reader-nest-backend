@@ -442,7 +442,9 @@ namespace iucs.readernest.application.Services
                     cancellationToken);
 
                 session.Status = SessionStatus.Cancelled;
-                session.CancellationReason = $"Holiday — {holiday.Name}; carried forward to {request.Date.AddDays(offsetDays):yyyy-MM-dd}";
+                session.CancellationReason = CancelledBy.Reason(
+                    await CancelledBy.DescribeAsync(_unitOfWork, _currentUser.UserId, cancellationToken),
+                    $"holiday — {holiday.Name}; carried forward to {request.Date.AddDays(offsetDays):yyyy-MM-dd}");
             }
 
             if (clashingSessions.Count > 0)
@@ -675,8 +677,9 @@ namespace iucs.readernest.application.Services
             {
                 leave.Sessions.Add(new LeaveRequestSession { ClassSessionId = session.Id, ClassSession = session });
                 session.Status = SessionStatus.Cancelled;
-                session.CancellationReason =
-                    $"Teacher self-cancelled via class-wise leave (within monthly allowance): {reason.Trim()}";
+                session.CancellationReason = CancelledBy.Reason(
+                    CancelledBy.Describe(teacher.User),
+                    $"teacher's class-wise leave, auto-approved within monthly allowance — {reason.Trim()}");
             }
 
             await _unitOfWork.Repository<LeaveRequest>().AddAsync(leave, cancellationToken);
@@ -1081,12 +1084,19 @@ namespace iucs.readernest.application.Services
                 }
                 affectedCount = affectedSessions.Count;
 
+                // Who: the teacher on leave, and who approved it.
+                var teacherOnLeave = await _unitOfWork.Repository<User>().Query()
+                    .Include(u => u.RoleDefinition)
+                    .FirstAsync(u => u.TeacherProfile != null && u.TeacherProfile.Id == leave.TeacherProfileId, cancellationToken);
+                var approver = await CancelledBy.DescribeAsync(_unitOfWork, _currentUser.UserId, cancellationToken);
                 foreach (var session in affectedSessions)
                 {
                     session.Status = SessionStatus.Cancelled;
-                    session.CancellationReason = leave.IsClassWise
-                        ? $"Teacher on approved class-wise leave: {leave.Reason}"
-                        : $"Teacher on approved leave ({DateTimeDisplay.ToLocalDate(leave.StartAtUtc, "dd MMM yyyy")} – {DateTimeDisplay.ToLocalDate(leave.EndAtUtc, "dd MMM yyyy")}).";
+                    session.CancellationReason = CancelledBy.Reason(
+                        CancelledBy.Describe(teacherOnLeave),
+                        leave.IsClassWise
+                            ? $"teacher's class-wise leave, approved by {approver} — {leave.Reason}"
+                            : $"teacher's leave {DateTimeDisplay.ToLocalDate(leave.StartAtUtc, "dd MMM yyyy")} – {DateTimeDisplay.ToLocalDate(leave.EndAtUtc, "dd MMM yyyy")}, approved by {approver} — {leave.Reason}");
                 }
             }
 
