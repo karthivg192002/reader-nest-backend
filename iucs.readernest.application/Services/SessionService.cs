@@ -31,6 +31,9 @@ namespace iucs.readernest.application.Services
         // that without reopening an old, genuinely-over class to rejoining indefinitely.
         private static readonly TimeSpan RejoinGraceAfterCompleted = TimeSpan.FromMinutes(10);
 
+        /// <summary>How long after its scheduled end a teacher can still join her own class (matches the join button's grace).</summary>
+        private static readonly TimeSpan TeacherLateJoinGrace = TimeSpan.FromHours(3);
+
         private static readonly SessionStatus[] TerminalStatuses =
         [
             SessionStatus.Completed,
@@ -380,7 +383,8 @@ namespace iucs.readernest.application.Services
             }
 
             session.Status = SessionStatus.Cancelled;
-            session.CancellationReason = request.Reason;
+            session.CancellationReason = CancelledBy.Reason(
+                await CancelledBy.DescribeAsync(_unitOfWork, _currentUser.UserId, cancellationToken), request.Reason);
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
@@ -513,8 +517,9 @@ namespace iucs.readernest.application.Services
                 // of the course (after the batch's last scheduled class), skipping holidays and the
                 // batch's other classes.
                 session.Status = SessionStatus.Cancelled;
-                var storedReason = $"Cancelled by parent ({parentName}): {reason}";
-                session.CancellationReason = storedReason.Length <= 500 ? storedReason : storedReason[..500];
+                session.CancellationReason = isGroupClass
+                    ? CancelledBy.Reason("every parent in the group", $"last to cancel was {parentName} — {reason}")
+                    : CancelledBy.Reason($"{parentName} (Parent)", reason);
 
                 var duration = session.ScheduledEndAtUtc - session.ScheduledStartAtUtc;
                 var lastClassStart = await _unitOfWork.Repository<ClassSession>().Query()
@@ -1903,8 +1908,25 @@ namespace iucs.readernest.application.Services
             // hasn't opened for joining yet." on anything more than 10 minutes away. A genuine
             // participant (Teacher/Parent) still only gets the real join window.
             var isMonitor = user.Role is UserRole.Admin or UserRole.SubAdmin or UserRole.AdmissionTeam;
+            // Client (reported live twice): a teacher's Join must be open "all the time" for her own
+            // class -- early, and late too, even after the system auto-marked the class. Only a
+            // class that was cancelled or moved stays closed; parents keep the normal window.
+            var isOwnTeacher = user.Role == UserRole.Teacher
+                && await _unitOfWork.Repository<TeacherProfile>().ExistsAsync(
+                    t => t.Id == session.TeacherProfileId && t.UserId == user.Id, cancellationToken);
             var now = DateTime.UtcNow;
-            if (!isMonitor && now < session.ScheduledStartAtUtc.AddMinutes(-10))
+            if (isOwnTeacher)
+            {
+                if (session.Status is SessionStatus.Cancelled or SessionStatus.Rescheduled)
+                {
+                    throw new DomainValidationException("This class was cancelled or moved, so it can't be joined.");
+                }
+                if (now > session.ScheduledEndAtUtc + TeacherLateJoinGrace && session.Status != SessionStatus.InProgress)
+                {
+                    throw new DomainValidationException("This class has already ended.");
+                }
+            }
+            else if (!isMonitor && now < session.ScheduledStartAtUtc.AddMinutes(-10))
             {
                 throw new DomainValidationException("This class hasn't opened for joining yet.");
             }
@@ -1917,7 +1939,7 @@ namespace iucs.readernest.application.Services
             // keeps the original cutoff so a stale/abandoned booking can't be joined indefinitely.
             var withinCompletedGrace = session.Status == SessionStatus.Completed
                 && now <= (session.ActualEndAtUtc ?? session.ScheduledEndAtUtc) + RejoinGraceAfterCompleted;
-            if (!isMonitor && !withinCompletedGrace && session.Status != SessionStatus.InProgress && now > session.ScheduledEndAtUtc)
+            if (!isMonitor && !isOwnTeacher && !withinCompletedGrace && session.Status != SessionStatus.InProgress && now > session.ScheduledEndAtUtc)
             {
                 throw new DomainValidationException("This class has already ended.");
             }

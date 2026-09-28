@@ -182,8 +182,9 @@ namespace iucs.readernest.tests
             _db.Context.AddRange(farFuture, alreadyEnded, withinWindow);
             await _db.Context.SaveChangesAsync();
 
-            await Assert.ThrowsAsync<DomainValidationException>(
-                () => service.GetJitsiJoinAsync(farFuture.Id, teacherUser.Id));
+            // Client: a teacher's own Join is open "all the time" before her class (reported live),
+            // but a class long over (past the 3-hour late-join grace) stays closed.
+            Assert.Equal("trn-far-future", (await service.GetJitsiJoinAsync(farFuture.Id, teacherUser.Id)).Room);
             await Assert.ThrowsAsync<DomainValidationException>(
                 () => service.GetJitsiJoinAsync(alreadyEnded.Id, teacherUser.Id));
 
@@ -10398,7 +10399,9 @@ namespace iucs.readernest.tests
 
             var stored = await _db.Context.ClassSessions.AsNoTracking().FirstAsync(s => s.Id == session.Id);
             Assert.Equal(SessionStatus.Cancelled, stored.Status);
-            Assert.StartsWith("Cancelled by parent", stored.CancellationReason);
+            // Who cancelled is visible to admin: "Cancelled by {parent name} (Parent): {reason}".
+            Assert.StartsWith("Cancelled by ", stored.CancellationReason);
+            Assert.Contains("(Parent)", stored.CancellationReason);
             Assert.EndsWith("Child is unwell", stored.CancellationReason);
 
             // A make-up class is placed automatically, a week later at the same time.
