@@ -74,6 +74,7 @@ namespace iucs.readernest.application.Mappings
                 AcademicLevel = enrollment.Child.AcademicLevel,
                 Status = enrollment.Status,
                 EnrolledAtUtc = enrollment.CreatedAtUtc,
+                ParentTimeZoneId = enrollment.Child.ParentProfile?.User?.TimeZoneId,
             };
         }
 

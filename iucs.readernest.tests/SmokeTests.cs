@@ -7792,6 +7792,50 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task TeacherEarnings_ClassCompletedBeforeBatchRateWasSet_IsRepricedFromTheBatchRate()
+        {
+            // Regression: a class completed while the batch had no per-class payout accrued at 0
+            // and stayed 0 after the rate was entered ("Rate 150, 4 classes, earned 0").
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Course", Type = CourseType.Group,
+                DurationMinutes = 30, Price = 100, TotalSessions = 1, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            var batch = new Batch { Course = course, TeacherProfile = teacher, Name = "Batch", Capacity = 5 };
+            var session = new ClassSession
+            {
+                Batch = batch, TeacherProfile = teacher,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-1), ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-1).AddMinutes(30),
+            };
+            _db.Context.AddRange(teacher, category, course, batch, session);
+            await _db.Context.SaveChangesAsync();
+            _db.CurrentUser.UserId = teacherUser.Id;
+
+            await SeedFullTeacherAttendanceAsync(session);
+            await CreateSessionService().CompleteAsync(session.Id, new CompleteSessionRequest());
+            Assert.Equal(0m, (await _db.Context.PayoutItems.AsNoTracking().FirstAsync(i => i.ClassSessionId == session.Id)).Amount);
+
+            // The admin only now enters the batch's per-class payout.
+            var trackedBatch = await _db.Context.Batches.FirstAsync(b => b.Id == batch.Id);
+            trackedBatch.TeacherPayoutPerClass = 150m;
+            await _db.Context.SaveChangesAsync();
+
+            var summary = await CreatePayoutService().GetMyEarningsSummaryAsync(teacherUser.Id, session.ScheduledStartAtUtc.Year, session.ScheduledStartAtUtc.Month);
+
+            var row = Assert.Single(summary.Batches);
+            Assert.Equal(1, row.ClassesTaken);
+            Assert.Equal(150m, row.TotalEarned);
+            Assert.Equal(150m, summary.TotalAmount);
+
+            // Idempotent: reading again must not price it twice.
+            var again = await CreatePayoutService().GetMyEarningsSummaryAsync(teacherUser.Id, session.ScheduledStartAtUtc.Year, session.ScheduledStartAtUtc.Month);
+            Assert.Equal(150m, again.TotalAmount);
+        }
+
+        [Fact]
         public async Task PayoutRate_HistoricalVersioning_PricesEachSessionAtTheRateEffectiveOnItsOwnDate()
         {
             // "The rate effective on the session date" (AccrueForSessionAsync's own comment) is a

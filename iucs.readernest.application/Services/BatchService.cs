@@ -595,7 +595,7 @@ namespace iucs.readernest.application.Services
         {
             var enrollments = await _unitOfWork.Repository<BatchEnrollment>().Query()
                 .Where(e => e.BatchId == batchId && e.Status == EnrollmentStatus.Active)
-                .Include(e => e.Child)
+                .Include(e => e.Child).ThenInclude(c => c.ParentProfile).ThenInclude(p => p.User)
                 .OrderBy(e => e.Child.FirstName).ThenBy(e => e.Child.LastName)
                 .ToListAsync(cancellationToken);
 
@@ -868,6 +868,12 @@ namespace iucs.readernest.application.Services
             if (!teacherExists)
             {
                 throw new NotFoundException(nameof(TeacherProfile), request.TeacherProfileId);
+            }
+
+            // A negative per-class payout would make every completed class deduct from the teacher.
+            if (request.TeacherPayoutPerClass < 0m)
+            {
+                throw new DomainValidationException("Teacher payout per class can't be negative.");
             }
 
             return course;

@@ -122,6 +122,8 @@ namespace iucs.readernest.application.Services
             Guid? teacherProfileId,
             CancellationToken cancellationToken = default)
         {
+            await RepriceZeroBatchEarningsAsync(teacherProfileId, cancellationToken);
+
             IQueryable<Payout> query = BaseQuery();
 
             if (year.HasValue)
@@ -166,6 +168,8 @@ namespace iucs.readernest.application.Services
             var now = DateTime.UtcNow;
             var periodYear = year ?? now.Year;
             var periodMonth = month ?? now.Month;
+
+            await RepriceZeroBatchEarningsAsync(teacher.Id, cancellationToken);
 
             var payout = await BaseQuery().FirstOrDefaultAsync(
                 p => p.TeacherProfileId == teacher.Id && p.PeriodYear == periodYear && p.PeriodMonth == periodMonth,
@@ -778,6 +782,84 @@ namespace iucs.readernest.application.Services
             var payout = new Payout { TeacherProfileId = teacherProfileId, PeriodYear = year, PeriodMonth = month };
             await _unitOfWork.Repository<Payout>().AddAsync(payout, cancellationToken);
             return payout;
+        }
+
+        /// <summary>
+        /// A class's earning is frozen at the batch's flat rate the moment it completes, so a class
+        /// finished before the batch's per-class payout was entered accrued at 0 and stayed 0 even
+        /// after the rate was set (the teacher's Earnings page then showed "Rate 150, 4 classes,
+        /// earned 0"). Re-prices those items from the batch's current flat rate. Only still-Pending
+        /// payouts and only untouched SessionEarning items at exactly 0 (a reviewer's decision, or a
+        /// finalized/paid payout, is never overridden); idempotent, so safe to run on every read.
+        /// </summary>
+        private async Task RepriceZeroBatchEarningsAsync(Guid? teacherProfileId, CancellationToken cancellationToken)
+        {
+            var items = await _unitOfWork.Repository<PayoutItem>().TrackedQuery()
+                .Include(i => i.Payout)
+                .Include(i => i.ClassSession).ThenInclude(cs => cs!.Batch)
+                .Where(i => i.Type == PayoutItemType.SessionEarning
+                    && i.Amount == 0m
+                    && i.ReviewDecision == null
+                    && i.Payout.Status == PayoutStatus.Pending
+                    && (teacherProfileId == null || i.Payout.TeacherProfileId == teacherProfileId)
+                    && i.ClassSession != null)
+                .ToListAsync(cancellationToken);
+
+            if (items.Count == 0)
+            {
+                return;
+            }
+
+            // Per-minute rate cards, for zero items whose batch has no flat payout: the same
+            // "teacher's own rate wins, else the centre default, effective on the session date"
+            // lookup AccrueForSessionAsync uses.
+            var rates = await _unitOfWork.Repository<PayoutRate>().Query()
+                .Where(r => r.IsActive)
+                .ToListAsync(cancellationToken);
+
+            var changed = false;
+            foreach (var item in items)
+            {
+                var session = item.ClassSession!;
+                var flatRate = session.Batch?.TeacherPayoutPerClass;
+                decimal newAmount;
+                string source;
+                if (flatRate > 0m)
+                {
+                    newAmount = flatRate.Value;
+                    source = "the batch's per-class payout";
+                }
+                else
+                {
+                    var sessionDate = DateOnly.FromDateTime(session.ScheduledStartAtUtc);
+                    var rate = rates
+                        .Where(r => r.TeacherProfileId == item.Payout.TeacherProfileId && r.EffectiveFrom <= sessionDate)
+                        .OrderByDescending(r => r.EffectiveFrom).FirstOrDefault()
+                        ?? rates
+                            .Where(r => r.TeacherProfileId == null && r.EffectiveFrom <= sessionDate)
+                            .OrderByDescending(r => r.EffectiveFrom).FirstOrDefault();
+                    var minutes = (int)Math.Round((session.ScheduledEndAtUtc - session.ScheduledStartAtUtc).TotalMinutes);
+                    newAmount = Math.Round((rate?.RatePerMinute ?? 0m) * minutes, 2);
+                    source = "the per-minute rate card";
+                }
+
+                if (newAmount <= 0m)
+                {
+                    continue;
+                }
+
+                item.Amount = newAmount;
+                item.Note = string.IsNullOrEmpty(item.Note)
+                    ? $"Re-priced at {source}, set after this class was completed."
+                    : $"{item.Note} (re-priced at {source}, set after this class was completed)";
+                item.Payout.TotalAmount += newAmount;
+                changed = true;
+            }
+
+            if (changed)
+            {
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
         }
 
         private IQueryable<Payout> BaseQuery()
