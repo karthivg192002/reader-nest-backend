@@ -122,6 +122,8 @@ namespace iucs.readernest.application.Services
             Guid? teacherProfileId,
             CancellationToken cancellationToken = default)
         {
+            await RepriceZeroBatchEarningsAsync(teacherProfileId, cancellationToken);
+
             IQueryable<Payout> query = BaseQuery();
 
             if (year.HasValue)
@@ -166,6 +168,8 @@ namespace iucs.readernest.application.Services
             var now = DateTime.UtcNow;
             var periodYear = year ?? now.Year;
             var periodMonth = month ?? now.Month;
+
+            await RepriceZeroBatchEarningsAsync(teacher.Id, cancellationToken);
 
             var payout = await BaseQuery().FirstOrDefaultAsync(
                 p => p.TeacherProfileId == teacher.Id && p.PeriodYear == periodYear && p.PeriodMonth == periodMonth,
@@ -778,6 +782,47 @@ namespace iucs.readernest.application.Services
             var payout = new Payout { TeacherProfileId = teacherProfileId, PeriodYear = year, PeriodMonth = month };
             await _unitOfWork.Repository<Payout>().AddAsync(payout, cancellationToken);
             return payout;
+        }
+
+        /// <summary>
+        /// A class's earning is frozen at the batch's flat rate the moment it completes, so a class
+        /// finished before the batch's per-class payout was entered accrued at 0 and stayed 0 even
+        /// after the rate was set (the teacher's Earnings page then showed "Rate 150, 4 classes,
+        /// earned 0"). Re-prices those items from the batch's current flat rate. Only still-Pending
+        /// payouts and only untouched SessionEarning items at exactly 0 (a reviewer's decision, or a
+        /// finalized/paid payout, is never overridden); idempotent, so safe to run on every read.
+        /// </summary>
+        private async Task RepriceZeroBatchEarningsAsync(Guid? teacherProfileId, CancellationToken cancellationToken)
+        {
+            var items = await _unitOfWork.Repository<PayoutItem>().TrackedQuery()
+                .Include(i => i.Payout)
+                .Include(i => i.ClassSession).ThenInclude(cs => cs!.Batch)
+                .Where(i => i.Type == PayoutItemType.SessionEarning
+                    && i.Amount == 0m
+                    && i.ReviewDecision == null
+                    && i.Payout.Status == PayoutStatus.Pending
+                    && (teacherProfileId == null || i.Payout.TeacherProfileId == teacherProfileId)
+                    && i.ClassSession != null
+                    && i.ClassSession.Batch != null
+                    && i.ClassSession.Batch.TeacherPayoutPerClass > 0m)
+                .ToListAsync(cancellationToken);
+
+            if (items.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var item in items)
+            {
+                var flatRate = item.ClassSession!.Batch!.TeacherPayoutPerClass!.Value;
+                item.Amount = flatRate;
+                item.Note = string.IsNullOrEmpty(item.Note)
+                    ? "Re-priced at the batch's per-class payout, set after this class was completed."
+                    : $"{item.Note} (re-priced at the batch's per-class payout, set after this class was completed)";
+                item.Payout.TotalAmount += flatRate;
+            }
+
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
         private IQueryable<Payout> BaseQuery()
