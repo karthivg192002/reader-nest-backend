@@ -870,6 +870,12 @@ namespace iucs.readernest.application.Services
                 throw new NotFoundException(nameof(TeacherProfile), request.TeacherProfileId);
             }
 
+            // A negative per-class payout would make every completed class deduct from the teacher.
+            if (request.TeacherPayoutPerClass < 0m)
+            {
+                throw new DomainValidationException("Teacher payout per class can't be negative.");
+            }
+
             return course;
         }
     }

@@ -802,9 +802,7 @@ namespace iucs.readernest.application.Services
                     && i.ReviewDecision == null
                     && i.Payout.Status == PayoutStatus.Pending
                     && (teacherProfileId == null || i.Payout.TeacherProfileId == teacherProfileId)
-                    && i.ClassSession != null
-                    && i.ClassSession.Batch != null
-                    && i.ClassSession.Batch.TeacherPayoutPerClass > 0m)
+                    && i.ClassSession != null)
                 .ToListAsync(cancellationToken);
 
             if (items.Count == 0)
@@ -812,17 +810,56 @@ namespace iucs.readernest.application.Services
                 return;
             }
 
+            // Per-minute rate cards, for zero items whose batch has no flat payout: the same
+            // "teacher's own rate wins, else the centre default, effective on the session date"
+            // lookup AccrueForSessionAsync uses.
+            var rates = await _unitOfWork.Repository<PayoutRate>().Query()
+                .Where(r => r.IsActive)
+                .ToListAsync(cancellationToken);
+
+            var changed = false;
             foreach (var item in items)
             {
-                var flatRate = item.ClassSession!.Batch!.TeacherPayoutPerClass!.Value;
-                item.Amount = flatRate;
+                var session = item.ClassSession!;
+                var flatRate = session.Batch?.TeacherPayoutPerClass;
+                decimal newAmount;
+                string source;
+                if (flatRate > 0m)
+                {
+                    newAmount = flatRate.Value;
+                    source = "the batch's per-class payout";
+                }
+                else
+                {
+                    var sessionDate = DateOnly.FromDateTime(session.ScheduledStartAtUtc);
+                    var rate = rates
+                        .Where(r => r.TeacherProfileId == item.Payout.TeacherProfileId && r.EffectiveFrom <= sessionDate)
+                        .OrderByDescending(r => r.EffectiveFrom).FirstOrDefault()
+                        ?? rates
+                            .Where(r => r.TeacherProfileId == null && r.EffectiveFrom <= sessionDate)
+                            .OrderByDescending(r => r.EffectiveFrom).FirstOrDefault();
+                    var minutes = (int)Math.Round((session.ScheduledEndAtUtc - session.ScheduledStartAtUtc).TotalMinutes);
+                    newAmount = Math.Round((rate?.RatePerMinute ?? 0m) * minutes, 2);
+                    source = "the per-minute rate card";
+                }
+
+                if (newAmount <= 0m)
+                {
+                    continue;
+                }
+
+                item.Amount = newAmount;
                 item.Note = string.IsNullOrEmpty(item.Note)
-                    ? "Re-priced at the batch's per-class payout, set after this class was completed."
-                    : $"{item.Note} (re-priced at the batch's per-class payout, set after this class was completed)";
-                item.Payout.TotalAmount += flatRate;
+                    ? $"Re-priced at {source}, set after this class was completed."
+                    : $"{item.Note} (re-priced at {source}, set after this class was completed)";
+                item.Payout.TotalAmount += newAmount;
+                changed = true;
             }
 
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            if (changed)
+            {
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
         }
 
         private IQueryable<Payout> BaseQuery()
