@@ -128,14 +128,29 @@ namespace iucs.readernest.application.Services
             }
 
             var batchIds = dtos.Where(d => d.BatchId.HasValue).Select(d => d.BatchId!.Value).Distinct().ToList();
-            var namesByBatch = batchIds.Count == 0
-                ? new Dictionary<Guid, List<string>>()
-                : (await _unitOfWork.Repository<BatchEnrollment>().Query()
-                        .Where(e => batchIds.Contains(e.BatchId) && e.Status == EnrollmentStatus.Active)
-                        .Select(e => new { e.BatchId, e.Child.FirstName, e.Child.LastName })
-                        .ToListAsync(cancellationToken))
-                    .GroupBy(e => e.BatchId)
-                    .ToDictionary(g => g.Key, g => g.Select(e => $"{e.FirstName} {e.LastName}".Trim()).OrderBy(n => n).ToList());
+            var batchStudents = batchIds.Count == 0
+                ? []
+                : await _unitOfWork.Repository<BatchEnrollment>().Query()
+                    .Where(e => batchIds.Contains(e.BatchId) && e.Status == EnrollmentStatus.Active)
+                    .Select(e => new { e.BatchId, e.Child.FirstName, e.Child.LastName, ParentTimeZone = e.Child.ParentProfile.User.TimeZoneId })
+                    .ToListAsync(cancellationToken);
+            var namesByBatch = batchStudents
+                .GroupBy(e => e.BatchId)
+                .ToDictionary(g => g.Key, g => g.Select(e => $"{e.FirstName} {e.LastName}".Trim()).OrderBy(n => n).ToList());
+            // Reported live: staff schedule in India time, and an early-morning IST slot is the
+            // previous evening for a family in the Americas -- the parent saw classes on different
+            // days than agreed and staff couldn't see it. Staff views show the family's own local
+            // day/time from this.
+            var zonesByBatch = batchStudents
+                .GroupBy(e => e.BatchId)
+                .ToDictionary(g => g.Key, g => g.Select(e => e.ParentTimeZone).Where(z => !string.IsNullOrWhiteSpace(z)).Distinct().ToList());
+            foreach (var dto in dtos)
+            {
+                if (dto.BatchId is { } id && zonesByBatch.TryGetValue(id, out var zones))
+                {
+                    dto.ParentTimeZones = zones;
+                }
+            }
 
             var demoIds = dtos.Where(d => d.Type == SessionType.Demo).Select(d => d.Id).ToList();
             var demosBySession = demoIds.Count == 0

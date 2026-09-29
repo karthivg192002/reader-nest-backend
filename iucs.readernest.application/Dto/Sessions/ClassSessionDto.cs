@@ -57,5 +57,9 @@ namespace iucs.readernest.application.Dto.Sessions
         /// <summary>Who this class is for, for staff views (calendars, session lists): the active
         /// students of its batch, or a demo's child. Filled by the staff session list / detail.</summary>
         public List<string> StudentNames { get; set; } = [];
+
+        /// <summary>The time zones of the students' parents (staff views): staff see the family's own
+        /// local day/time next to their own, since an IST slot can fall on a different day abroad.</summary>
+        public List<string> ParentTimeZones { get; set; } = [];
     }
 }
