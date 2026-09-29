@@ -98,7 +98,10 @@ namespace iucs.readernest.api.Controllers
             // owners/members, a whitelist or the room password do — verified live on UAT), so
             // the host's own classroom admits them instead: it's told who was just authorized
             // here and answers that person's knock automatically (JitsiLive's staffJoining).
-            if (join.IsMonitor && !string.IsNullOrWhiteSpace(join.DisplayName))
+            // Also the class's own teacher (client): after a drop or accidental exit she was stuck in
+            // the waiting room until the child clicked Accept. Announced the same way, so the room
+            // admits her straight back.
+            if ((join.IsMonitor || join.IsSessionTeacher) && !string.IsNullOrWhiteSpace(join.DisplayName))
             {
                 try
                 {

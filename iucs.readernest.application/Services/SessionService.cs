@@ -2023,6 +2023,8 @@ namespace iucs.readernest.application.Services
                 IsDemo = session.Type == SessionType.Demo,
                 DisplayName = $"{user.FirstName} {user.LastName}".Trim(),
                 IsMonitor = isMonitor,
+                IsSessionTeacher = user.Role == UserRole.Teacher
+                    && await _unitOfWork.Repository<TeacherProfile>().ExistsAsync(t => t.Id == session.TeacherProfileId && t.UserId == user.Id, cancellationToken),
                 StaffNames = staffNames,
             };
         }
