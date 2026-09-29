@@ -1914,14 +1914,13 @@ namespace iucs.readernest.application.Services
             // hasn't opened for joining yet." on anything more than 10 minutes away. A genuine
             // participant (Teacher/Parent) still only gets the real join window.
             var isMonitor = user.Role is UserRole.Admin or UserRole.SubAdmin or UserRole.AdmissionTeam;
-            // Client (reported live twice): a teacher's Join must be open "all the time" for her own
-            // class -- early, and late too, even after the system auto-marked the class. Only a
-            // class that was cancelled or moved stays closed; parents keep the normal window.
-            var isOwnTeacher = user.Role == UserRole.Teacher
-                && await _unitOfWork.Repository<TeacherProfile>().ExistsAsync(
-                    t => t.Id == session.TeacherProfileId && t.UserId == user.Id, cancellationToken);
+            // Client (reported live, repeatedly): Join must be open "at all times for everyone" --
+            // teachers and parents (staff monitors already had no window). A genuine participant
+            // (checked above) can join any time before the class and until 3 hours after its end,
+            // even once the system auto-marked it. Only a class that was cancelled or moved is closed.
+            var isParticipant = !isMonitor;
             var now = DateTime.UtcNow;
-            if (isOwnTeacher)
+            if (isParticipant)
             {
                 if (session.Status is SessionStatus.Cancelled or SessionStatus.Rescheduled)
                 {
@@ -1932,10 +1931,6 @@ namespace iucs.readernest.application.Services
                     throw new DomainValidationException("This class has already ended.");
                 }
             }
-            else if (!isMonitor && now < session.ScheduledStartAtUtc.AddMinutes(-10))
-            {
-                throw new DomainValidationException("This class hasn't opened for joining yet.");
-            }
             // This deployment's Jitsi has no duration cap (see docs/LONG_DURATION_SESSIONS.md) and
             // JitsiLive.tsx's own "Continue Class" flow exists specifically so classes can legitimately
             // run past ScheduledEndAtUtc — but this check, enforced against the wall clock alone, still
@@ -1945,7 +1940,7 @@ namespace iucs.readernest.application.Services
             // keeps the original cutoff so a stale/abandoned booking can't be joined indefinitely.
             var withinCompletedGrace = session.Status == SessionStatus.Completed
                 && now <= (session.ActualEndAtUtc ?? session.ScheduledEndAtUtc) + RejoinGraceAfterCompleted;
-            if (!isMonitor && !isOwnTeacher && !withinCompletedGrace && session.Status != SessionStatus.InProgress && now > session.ScheduledEndAtUtc)
+            if (!isMonitor && !isParticipant && !withinCompletedGrace && session.Status != SessionStatus.InProgress && now > session.ScheduledEndAtUtc)
             {
                 throw new DomainValidationException("This class has already ended.");
             }

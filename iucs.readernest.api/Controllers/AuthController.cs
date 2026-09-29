@@ -47,6 +47,17 @@ namespace iucs.readernest.api.Controllers
             return NoContent();
         }
 
+        /// <summary>The signed-in user (any role, Admin included) changes their own PIN.</summary>
+        [HttpPost("change-pin")]
+        [Authorize]
+        [EnableRateLimiting("pin-reset")]
+        public async Task<IActionResult> ChangePin(ChangePinRequest request, CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            await _authService.ChangePinAsync(userId, request, cancellationToken);
+            return NoContent();
+        }
+
         [HttpPost("reset-pin")]
         [AllowAnonymous]
         [EnableRateLimiting("pin-reset")]
