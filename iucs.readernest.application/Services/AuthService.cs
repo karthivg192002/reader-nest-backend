@@ -234,6 +234,30 @@ namespace iucs.readernest.application.Services
                 cancellationToken);
         }
 
+        public async Task ChangePinAsync(Guid userId, ChangePinRequest request, CancellationToken cancellationToken = default)
+        {
+            // Client: the Admin account had no way at all to change its own PIN (Users -> Reset PIN
+            // deliberately excludes Admins). Any signed-in user can now, from their account settings.
+            var user = await _unitOfWork.Repository<User>().GetByIdAsync(userId, cancellationToken)
+                ?? throw new NotFoundException(nameof(User), userId);
+
+            if (!_passwordHasher.Verify(request.CurrentPin, user.PinHash))
+            {
+                throw new DomainValidationException("Your current PIN is not correct.");
+            }
+            if (request.NewPin == request.CurrentPin)
+            {
+                throw new DomainValidationException("Choose a new PIN that's different from your current one.");
+            }
+
+            user.PinHash = _passwordHasher.Hash(request.NewPin);
+            // A PIN the user chose themselves is never kept in readable form.
+            user.PinEncrypted = null;
+            await _auditLog.StageAsync(AuditAction.Update, nameof(User), user.Id.ToString(),
+                "{\"note\":\"User changed their own PIN\"}", cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
         public async Task ResetPinAsync(ResetPinRequest request, CancellationToken cancellationToken = default)
         {
             var resetToken = await _unitOfWork.Repository<PinResetToken>()

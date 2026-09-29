@@ -77,6 +77,51 @@ namespace iucs.readernest.api.Services
             _logger.LogInformation("EMAIL sent to {To} via {Host}:{Port} | {Subject}", toEmail, host, port, subject);
         }
 
+        /// <summary>
+        /// Settings → "Send test email": the same delivery as SendAsync, but it reports every problem
+        /// instead of quietly skipping. Reported live: parents never received their PIN-reset email,
+        /// and nothing showed why — SendAsync deliberately never fails (a disabled or half-configured
+        /// integration is only logged), so the email log still said "sent". Returns null on success,
+        /// else a plain explanation of what's wrong.
+        /// </summary>
+        public async Task<string?> SendTestAsync(string toEmail, CancellationToken cancellationToken = default)
+        {
+            var integration = await _unitOfWork.Repository<Integration>().Query()
+                .FirstOrDefaultAsync(i => i.Key == EmailIntegrationKey, cancellationToken);
+            if (integration is null)
+            {
+                return "There is no Email integration set up. Add it in Settings → Integrations.";
+            }
+            if (!integration.IsEnabled)
+            {
+                return "The Email integration is turned off, so no email is being sent (including PIN resets). Turn it on in Settings → Integrations.";
+            }
+
+            var config = DecodeConfig(integration.ConfigJson);
+            var host = Value(config, "smtpHost");
+            if (string.IsNullOrWhiteSpace(host))
+            {
+                return "The Email integration has no SMTP host, so no email is being sent. Fill in the SMTP settings.";
+            }
+            if (Value(config, "fromAddress") is null)
+            {
+                return "No \"From\" address is set, so emails go out from no-reply@meettomanage.cloud, which Gmail and others often reject or send to spam. Set a From address on your own domain.";
+            }
+
+            try
+            {
+                await SendAsync(toEmail, "The Reader Nest — test email",
+                    "<p>This is a test email from The Reader Nest portal. If you can read this, email delivery is working.</p>",
+                    cancellationToken);
+                return null;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Test email to {To} failed", toEmail);
+                return $"The mail server refused the email: {ex.GetBaseException().Message}";
+            }
+        }
+
         private static Dictionary<string, string?> DecodeConfig(string? configJson) =>
             string.IsNullOrWhiteSpace(configJson)
                 ? new Dictionary<string, string?>()

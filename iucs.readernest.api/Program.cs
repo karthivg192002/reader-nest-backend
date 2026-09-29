@@ -58,7 +58,8 @@ builder.Services.AddApplication();
 builder.Services.AddScoped<ITokenService, JwtTokenService>();
 // Real SMTP delivery driven by the DB "email" integration config (Settings →
 // Integrations); logs and no-ops safely when that integration is off/unconfigured.
-builder.Services.AddScoped<IEmailSender, SmtpEmailSender>();
+builder.Services.AddScoped<SmtpEmailSender>();
+builder.Services.AddScoped<IEmailSender>(sp => sp.GetRequiredService<SmtpEmailSender>());
 // WhatsApp Business Cloud API delivery, driven by the DB "whatsapp" integration.
 builder.Services.AddScoped<IWhatsAppSender, WhatsAppSender>();
 // SMS delivery (MSG91/Twilio), driven by the DB "sms" integration.

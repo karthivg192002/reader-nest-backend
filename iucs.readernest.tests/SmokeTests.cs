@@ -3332,6 +3332,23 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task ChangePin_LetsTheAdminChangeTheirOwnPin_OnlyWithTheCurrentPin()
+        {
+            // Client: the Admin account had no way to change its own PIN.
+            var admin = await _db.SeedUserAsync($"cp-{Guid.NewGuid():N}@test.com", _hasher.Hash("1234"), UserRole.Admin);
+            var auth = CreateAuthService();
+
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                auth.ChangePinAsync(admin.Id, new ChangePinRequest { CurrentPin = "9999", NewPin = "4321" }));
+
+            await auth.ChangePinAsync(admin.Id, new ChangePinRequest { CurrentPin = "1234", NewPin = "4321" });
+
+            Assert.Equal(admin.Id, (await auth.LoginAsync(new LoginRequest { Email = admin.Email, Pin = "4321" })).User.Id);
+            await Assert.ThrowsAsync<UnauthorizedException>(() =>
+                auth.LoginAsync(new LoginRequest { Email = admin.Email, Pin = "1234" }));
+        }
+
+        [Fact]
         public async Task Login_Fails_WithWrongPin()
         {
             await _db.SeedUserAsync("admin@test.com", _hasher.Hash("4821"), UserRole.Admin);
