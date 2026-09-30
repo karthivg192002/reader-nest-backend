@@ -2470,6 +2470,14 @@ namespace iucs.readernest.api.Data
                 ("executive", "/executive/leave", "Staff Leave", "staff-leave", PermissionModule.UserManagement.ToString()),
                 ("admin", "/admin/staff-leave", "My Leave", "my-leave", (string?)null),
                 ("executive", "/executive/staff-leave", "My Leave", "my-leave", null),
+                // Teacher-leave review for the Sub Admin-type portals. Coordinator's preset has always
+                // held LeaveManagement view+approve ("leave approval"), but only Admin/IT Admin/
+                // Executive had a screen to use it on. Gated on the module, so it shows only for
+                // accounts actually granted LeaveManagement.
+                ("subadmin", "/subadmin/my-leave", "Leave Management", "leave", PermissionModule.LeaveManagement.ToString()),
+                ("admission", "/admission/my-leave", "Leave Management", "leave", PermissionModule.LeaveManagement.ToString()),
+                ("coordinator", "/coordinator/my-leave", "Leave Management", "leave", PermissionModule.LeaveManagement.ToString()),
+                ("management", "/management/my-leave", "Leave Management", "leave", PermissionModule.LeaveManagement.ToString()),
             })
             {
                 var path = $"/{portal}/{slug}";

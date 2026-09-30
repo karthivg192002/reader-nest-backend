@@ -76,10 +76,13 @@ namespace iucs.readernest.api.Services
             // Reported live: parents saw a class as cancelled yet got "your class starts in one
             // hour". A class whose teacher has leave still awaiting review is about to be
             // cancelled, so no reminder goes out for it (approval cancels it; if rejected, it runs).
+            // Approved leave counts too: approval cancels the sessions that existed at the time, but
+            // a session created inside an approved window afterwards (schedule extended/adjusted,
+            // make-up or carry-forward landing there) is still Scheduled while its teacher is away.
             if (upcoming.Count > 0)
             {
                 var pendingLeaves = await unitOfWork.Repository<LeaveRequest>().Query()
-                    .Where(l => l.Status == LeaveStatus.Pending)
+                    .Where(l => l.Status == LeaveStatus.Pending || l.Status == LeaveStatus.Approved)
                     .Select(l => new { l.TeacherProfileId, l.IsClassWise, l.StartAtUtc, l.EndAtUtc, SessionIds = l.Sessions.Select(x => x.ClassSessionId).ToList() })
                     .ToListAsync(cancellationToken);
                 if (pendingLeaves.Count > 0)
@@ -157,6 +160,18 @@ namespace iucs.readernest.api.Services
                 // one bad recipient abort the batch.
                 try
                 {
+                    // The list above is a snapshot from the start of this cycle; re-check the live
+                    // status so a class cancelled in the meantime (teacher leave approved, parent
+                    // cancelled, rescheduled) never still gets its "starts in one hour" email.
+                    var liveStatus = await unitOfWork.Repository<ClassSession>().Query()
+                        .Where(s => s.Id == session.Id)
+                        .Select(s => (SessionStatus?)s.Status)
+                        .FirstOrDefaultAsync(cancellationToken);
+                    if (liveStatus is not (SessionStatus.Scheduled or SessionStatus.CarriedForward))
+                    {
+                        continue;
+                    }
+
                     await SendRemindersForSessionAsync(
                         session, demoBookingsBySessionId, parentUsersByBatchId, absentParentsBySessionId.GetValueOrDefault(session.Id),
                         notifications, emailTemplates, emailSender, sessionService, configuration, cancellationToken);

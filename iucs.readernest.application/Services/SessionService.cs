@@ -80,7 +80,8 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default)
         {
             var query = BaseQuery()
-                .Where(s => s.ScheduledStartAtUtc < toUtc && s.ScheduledEndAtUtc > fromUtc);
+                .Where(s => s.ScheduledStartAtUtc < toUtc && s.ScheduledEndAtUtc > fromUtc)
+                .Where(SessionVisibility.IsShownInSchedule);
 
             if (teacherProfileId.HasValue)
             {
@@ -1515,7 +1516,7 @@ namespace iucs.readernest.application.Services
                 foreach (var session in remainingSessions)
                 {
                     session.Status = SessionStatus.Cancelled;
-                    session.CancellationReason = "Schedule adjusted";
+                    session.CancellationReason = SessionVisibility.ScheduleAdjustedReason;
                 }
 
                 var sessionRepository = _unitOfWork.Repository<ClassSession>();
