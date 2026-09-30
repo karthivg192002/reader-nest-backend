@@ -109,6 +109,7 @@ builder.Services.AddHttpClient();
 builder.Services.AddSingleton<ICrmNotifier, WebhookCrmNotifier>();
 // Automated reports: weekly KPI digest to admins
 builder.Services.AddHostedService<ReportsDigestBackgroundService>();
+builder.Services.AddHostedService<BulkEmailQueueBackgroundService>();
 // Progress reports: seeds an empty monthly draft per active child on the 1st
 builder.Services.AddHostedService<ProgressReportsBackgroundService>();
 
@@ -352,7 +353,20 @@ builder.Services.AddCors(options =>
         policy.WithOrigins(allowedOrigins)
             .AllowAnyHeader()
             .WithMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
-            .AllowCredentials()));
+            .AllowCredentials()
+            // Browsers re-sent a preflight before nearly every API call; let them reuse it.
+            .SetPreflightMaxAge(TimeSpan.FromHours(2))));
+
+// Reported live as "APIs take 7 seconds": session lists were several MB of JSON. Compressing
+// JSON responses cuts them roughly tenfold on the wire.
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.Providers.Add<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProvider>();
+    options.Providers.Add<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProvider>();
+});
+builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
+builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
 
 var app = builder.Build();
 
@@ -372,6 +386,7 @@ var forwardedHeadersOptions = new ForwardedHeadersOptions
 forwardedHeadersOptions.KnownNetworks.Clear();
 forwardedHeadersOptions.KnownProxies.Clear();
 app.UseForwardedHeaders(forwardedHeadersOptions);
+app.UseResponseCompression();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 

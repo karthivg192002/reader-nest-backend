@@ -59,20 +59,23 @@ namespace iucs.readernest.api.Controllers
     public class CommunicationsController : ControllerBase
     {
         private readonly IReportsService _reportsService;
-
         public CommunicationsController(IReportsService reportsService)
         {
             _reportsService = reportsService;
         }
 
-        /// <summary>Bulk email to all active parents, or scoped to one batch.</summary>
+        /// <summary>
+        /// Bulk email to all active parents, or scoped to one batch. Queued: this only records
+        /// the blast and its Pending recipients and answers at once; BulkEmailQueueBackgroundService
+        /// delivers them, and Bulk Email History shows progress.
+        /// </summary>
         [HttpPost("bulk-email")]
         [HasPermission(PermissionModule.Communication, PermissionAction.Create)]
         public async Task<ActionResult<BulkEmailResultDto>> BulkEmail(
             BulkEmailRequest request,
             CancellationToken cancellationToken)
         {
-            return Ok(await _reportsService.SendBulkEmailAsync(UserId(), request, cancellationToken));
+            return Ok(await _reportsService.QueueBulkEmailAsync(UserId(), request, cancellationToken));
         }
 
         /// <summary>Live recipient count for the compose screen (same rule as the send).</summary>
