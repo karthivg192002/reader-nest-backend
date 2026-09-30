@@ -16,6 +16,14 @@ namespace iucs.readernest.application.Services
         Task<BulkEmailResultDto> SendBulkEmailAsync(
             Guid sentByUserId, BulkEmailRequest request, CancellationToken cancellationToken = default);
 
+        /// <summary>Queues the blast (Pending recipient rows) and returns immediately; delivery is
+        /// done by ProcessPendingBulkEmailAsync.</summary>
+        Task<BulkEmailResultDto> QueueBulkEmailAsync(
+            Guid sentByUserId, BulkEmailRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>Delivers all Pending bulk-email recipients; returns how many were attempted.</summary>
+        Task<int> ProcessPendingBulkEmailAsync(CancellationToken cancellationToken = default);
+
         /// <summary>Recipient count for the compose screen, resolved by the same rule the send uses.</summary>
         Task<BulkEmailResultDto> PreviewBulkEmailAsync(Guid? batchId, CancellationToken cancellationToken = default);
 

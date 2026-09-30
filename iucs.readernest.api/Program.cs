@@ -109,6 +109,7 @@ builder.Services.AddHttpClient();
 builder.Services.AddSingleton<ICrmNotifier, WebhookCrmNotifier>();
 // Automated reports: weekly KPI digest to admins
 builder.Services.AddHostedService<ReportsDigestBackgroundService>();
+builder.Services.AddHostedService<BulkEmailQueueBackgroundService>();
 // Progress reports: seeds an empty monthly draft per active child on the 1st
 builder.Services.AddHostedService<ProgressReportsBackgroundService>();
 

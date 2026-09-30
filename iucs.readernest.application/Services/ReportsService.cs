@@ -422,6 +422,18 @@ namespace iucs.readernest.application.Services
         public async Task<BulkEmailResultDto> SendBulkEmailAsync(
             Guid sentByUserId, BulkEmailRequest request, CancellationToken cancellationToken = default)
         {
+            var result = await QueueBulkEmailAsync(sentByUserId, request, cancellationToken);
+            await ProcessPendingBulkEmailAsync(cancellationToken);
+            return result;
+        }
+
+        // Records the blast and one Pending recipient row per parent, then returns at once.
+        // BulkEmailQueueBackgroundService drains the Pending rows, so a few hundred SMTP round
+        // trips never sit inside the admin's HTTP request (which used to time out with "Can't
+        // reach the server"), and anything still Pending after a restart is picked up again.
+        public async Task<BulkEmailResultDto> QueueBulkEmailAsync(
+            Guid sentByUserId, BulkEmailRequest request, CancellationToken cancellationToken = default)
+        {
             var recipients = await ResolveBulkEmailRecipientsAsync(request.BatchId, cancellationToken);
 
             var blast = new BulkEmailBlast
@@ -437,43 +449,70 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.Repository<BulkEmailBlast>().AddAsync(blast, cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            // One recipient's failed delivery (bad address, transport hiccup) must never abort
-            // the rest of the batch — SendEmailAsync already swallows its own delivery error and
-            // reports the resulting status here instead of throwing.
             foreach (var user in recipients)
             {
-                var recipient = new BulkEmailRecipient
+                await _unitOfWork.Repository<BulkEmailRecipient>().AddAsync(new BulkEmailRecipient
                 {
                     BulkEmailBlastId = blast.Id,
                     RecipientUserId = user.Id,
                     Email = user.Email,
-                };
-                await _unitOfWork.Repository<BulkEmailRecipient>().AddAsync(recipient, cancellationToken);
-                await _unitOfWork.SaveChangesAsync(cancellationToken);
-
-                var status = await _notificationService.SendEmailAsync(
-                    user.Id, user.Email, NotificationType.General, request.Subject, request.Body,
-                    recipient.Id, cancellationToken);
-
-                recipient.Status = status;
-                recipient.SentAtUtc = status == NotificationStatus.Sent ? DateTime.UtcNow : null;
-                if (status == NotificationStatus.Failed)
-                {
-                    recipient.ErrorMessage = "Email delivery failed.";
-                    blast.FailureCount++;
-                }
-                else
-                {
-                    blast.SuccessCount++;
-                }
-
-                _unitOfWork.Repository<BulkEmailRecipient>().Update(recipient);
+                    Status = NotificationStatus.Pending,
+                }, cancellationToken);
             }
-
-            _unitOfWork.Repository<BulkEmailBlast>().Update(blast);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return new BulkEmailResultDto { RecipientCount = recipients.Count };
+        }
+
+        // Delivers every Pending bulk-email recipient, oldest first. One recipient's failed
+        // delivery (bad address, transport hiccup) must never abort the rest -- SendEmailAsync
+        // already swallows its own delivery error and reports the resulting status instead of
+        // throwing. Returns how many recipients were attempted.
+        public async Task<int> ProcessPendingBulkEmailAsync(CancellationToken cancellationToken = default)
+        {
+            var processed = 0;
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var pendingIds = await _unitOfWork.Repository<BulkEmailRecipient>().Query()
+                    .Where(r => r.Status == NotificationStatus.Pending)
+                    .OrderBy(r => r.CreatedAtUtc)
+                    .Select(r => r.Id)
+                    .Take(25)
+                    .ToListAsync(cancellationToken);
+                if (pendingIds.Count == 0) break;
+
+                foreach (var id in pendingIds)
+                {
+                    // Tracked loads (not Query(), which is no-tracking): every recipient of a blast
+                    // must share ONE blast instance so its Success/Failure counts accumulate.
+                    var recipient = await _unitOfWork.Repository<BulkEmailRecipient>().GetByIdAsync(id, cancellationToken);
+                    if (recipient is null || recipient.Status != NotificationStatus.Pending) continue;
+                    var blast = await _unitOfWork.Repository<BulkEmailBlast>().GetByIdAsync(recipient.BulkEmailBlastId, cancellationToken);
+                    if (blast is null) continue;
+
+                    var status = await _notificationService.SendEmailAsync(
+                        recipient.RecipientUserId, recipient.Email, NotificationType.General,
+                        blast.Subject, blast.Body, recipient.Id, cancellationToken);
+
+                    var sent = status == NotificationStatus.Sent;
+                    recipient.Status = sent ? NotificationStatus.Sent : NotificationStatus.Failed;
+                    recipient.SentAtUtc = sent ? DateTime.UtcNow : null;
+                    if (sent)
+                    {
+                        blast.SuccessCount++;
+                    }
+                    else
+                    {
+                        recipient.ErrorMessage = "Email delivery failed.";
+                        blast.FailureCount++;
+                    }
+
+                    await _unitOfWork.SaveChangesAsync(cancellationToken);
+                    processed++;
+                }
+            }
+
+            return processed;
         }
 
         public async Task<BulkEmailResultDto> PreviewBulkEmailAsync(Guid? batchId, CancellationToken cancellationToken = default)

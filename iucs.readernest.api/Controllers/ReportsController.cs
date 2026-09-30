@@ -59,25 +59,15 @@ namespace iucs.readernest.api.Controllers
     public class CommunicationsController : ControllerBase
     {
         private readonly IReportsService _reportsService;
-        private readonly IServiceScopeFactory _scopeFactory;
-        private readonly ILogger<CommunicationsController> _logger;
-
-        public CommunicationsController(
-            IReportsService reportsService,
-            IServiceScopeFactory scopeFactory,
-            ILogger<CommunicationsController> logger)
+        public CommunicationsController(IReportsService reportsService)
         {
             _reportsService = reportsService;
-            _scopeFactory = scopeFactory;
-            _logger = logger;
         }
 
         /// <summary>
-        /// Bulk email to all active parents, or scoped to one batch. Delivery is one SMTP
-        /// round trip per recipient, so for a few hundred parents the request used to outlive
-        /// the proxy/browser timeout and the admin saw "Can't reach the server" even though
-        /// mail was going out. The send now runs in the background; the request answers at once
-        /// with the recipient count and the blast appears in Bulk Email History as it delivers.
+        /// Bulk email to all active parents, or scoped to one batch. Queued: this only records
+        /// the blast and its Pending recipients and answers at once; BulkEmailQueueBackgroundService
+        /// delivers them, and Bulk Email History shows progress.
         /// </summary>
         [HttpPost("bulk-email")]
         [HasPermission(PermissionModule.Communication, PermissionAction.Create)]
@@ -85,24 +75,7 @@ namespace iucs.readernest.api.Controllers
             BulkEmailRequest request,
             CancellationToken cancellationToken)
         {
-            var preview = await _reportsService.PreviewBulkEmailAsync(request.BatchId, cancellationToken);
-            var sentBy = UserId();
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    using var scope = _scopeFactory.CreateScope();
-                    var reports = scope.ServiceProvider.GetRequiredService<IReportsService>();
-                    await reports.SendBulkEmailAsync(sentBy, request, CancellationToken.None);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Background bulk email send failed.");
-                }
-            });
-
-            return Ok(preview);
+            return Ok(await _reportsService.QueueBulkEmailAsync(UserId(), request, cancellationToken));
         }
 
         /// <summary>Live recipient count for the compose screen (same rule as the send).</summary>
