@@ -2972,7 +2972,41 @@ namespace iucs.readernest.tests
             var carried = await _db.Context.ClassSessions
                 .FirstAsync(s => s.CarriedForwardFromSessionId == session.Id);
             Assert.Equal(SessionStatus.CarriedForward, carried.Status);
-            Assert.Equal(session.ScheduledStartAtUtc.AddDays(7), carried.ScheduledStartAtUtc); // next available week
+            Assert.Equal(session.ScheduledStartAtUtc.AddDays(1), carried.ScheduledStartAtUtc); // next working day
+        }
+
+        [Fact]
+        public async Task CreateHoliday_CarryForwardSkipsAFollowingHoliday()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            var holidayDate = DateOnly.FromDateTime(session.ScheduledStartAtUtc);
+            _db.Context.Holidays.Add(new Holiday { Date = holidayDate.AddDays(1), Name = "Day after" });
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            await CreateAcademicOpsService().CreateHolidayAsync(new SaveHolidayRequest { Name = "Surprise Holiday", Date = holidayDate });
+
+            var carried = await _db.Context.ClassSessions.FirstAsync(s => s.CarriedForwardFromSessionId == session.Id);
+            Assert.Equal(session.ScheduledStartAtUtc.AddDays(2), carried.ScheduledStartAtUtc);
+        }
+
+        [Fact]
+        public async Task ReconcileHolidays_MovesSessionsThatLandedOnAnExistingHoliday()
+        {
+            // Simulates a bulk import / older holiday: the holiday row exists but the session was
+            // never swept when it was created.
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            _db.Context.Holidays.Add(new Holiday { Date = DateOnly.FromDateTime(session.ScheduledStartAtUtc), Name = "Imported-over holiday" });
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            var moved = await CreateAcademicOpsService().ReconcileHolidaysAsync();
+
+            Assert.Equal(1, moved);
+            Assert.Equal(SessionStatus.Cancelled, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == session.Id)).Status);
+            var carried = await _db.Context.ClassSessions.FirstAsync(s => s.CarriedForwardFromSessionId == session.Id);
+            Assert.Equal(SessionStatus.CarriedForward, carried.Status);
+            Assert.Equal(0, await CreateAcademicOpsService().ReconcileHolidaysAsync()); // idempotent
         }
 
         /// <summary>
