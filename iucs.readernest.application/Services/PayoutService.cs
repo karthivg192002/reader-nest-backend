@@ -365,7 +365,12 @@ namespace iucs.readernest.application.Services
                 ? session.ScheduledStartAtUtc
                 : joinedAtUtc;
             var minutes = (end - start).TotalMinutes;
-            return minutes <= 0 ? 0 : (int)Math.Round(minutes, MidpointRounding.AwayFromZero);
+            // Rounded UP to a whole minute: the join is stamped when the teacher's classroom
+            // connection is established (a few seconds to ~a minute after she clicks Start), so
+            // nearest-minute rounding turned "joined on time" into "1 min short" for any join
+            // 30+ seconds in (and a 29.4-minute class into 29). Only a FULL missing minute now
+            // counts as short -- a class that ran 28:00 of 30:00 is still 28 and still flagged.
+            return minutes <= 0 ? 0 : (int)Math.Ceiling(minutes - 0.0001);
         }
 
         public async Task NotifyPayoutReviewAsync(Guid payoutItemId, CancellationToken cancellationToken = default)
@@ -456,7 +461,10 @@ namespace iucs.readernest.application.Services
                 PayoutReviewDecision.Rejected => 0m,
                 _ => request.Amount ?? ProRate(fullAmount, item.ScheduledMinutes, item.DeliveredMinutes),
             };
-            if (request.Decision == PayoutReviewDecision.ApprovedPartial && (newAmount < 0 || newAmount > fullAmount))
+            // A class priced at 0 (no rate / batch payout configured when it was completed) has no
+            // "full amount" to cap a correction against, so the reviewer can enter what it is worth;
+            // the cap still applies to every class that was actually priced.
+            if (request.Decision == PayoutReviewDecision.ApprovedPartial && (newAmount < 0 || (fullAmount > 0 && newAmount > fullAmount)))
             {
                 throw new DomainValidationException($"A partial payout must be between 0 and the full amount ({fullAmount:0.00}).");
             }

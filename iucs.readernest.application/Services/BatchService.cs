@@ -365,7 +365,7 @@ namespace iucs.readernest.application.Services
 
             var who = await CancelledBy.DescribeAsync(_unitOfWork, cancelledByUserId, cancellationToken);
             var count = await CancelDanglingFutureSessionsAsync(
-                id, CancelledBy.Reason(who, "all upcoming classes of the batch cleared to rebuild its schedule"), cancellationToken);
+                id, CancelledBy.Reason(who, $"all upcoming classes of the batch {SessionVisibility.ScheduleRebuiltMarker}"), cancellationToken);
             await _auditLog.StageAsync(AuditAction.Update, nameof(Batch), id.ToString(),
                 changesJson: $"{{\"upcomingSessionsCancelled\":{count}}}", cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);

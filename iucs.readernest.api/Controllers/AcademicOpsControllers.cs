@@ -33,6 +33,14 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _academicOps.CreateHolidayAsync(request, cancellationToken));
         }
 
+        /// <summary>Moves upcoming sessions that are still sitting on a holiday date to the next working day.</summary>
+        [HttpPost("reconcile")]
+        [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Edit)]
+        public async Task<ActionResult<object>> Reconcile(CancellationToken cancellationToken)
+        {
+            return Ok(new { movedSessions = await _academicOps.ReconcileHolidaysAsync(cancellationToken) });
+        }
+
         [HttpDelete("{id:guid}")]
         [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Delete)]
         public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)

@@ -2972,7 +2972,41 @@ namespace iucs.readernest.tests
             var carried = await _db.Context.ClassSessions
                 .FirstAsync(s => s.CarriedForwardFromSessionId == session.Id);
             Assert.Equal(SessionStatus.CarriedForward, carried.Status);
-            Assert.Equal(session.ScheduledStartAtUtc.AddDays(7), carried.ScheduledStartAtUtc); // next available week
+            Assert.Equal(session.ScheduledStartAtUtc.AddDays(1), carried.ScheduledStartAtUtc); // next working day
+        }
+
+        [Fact]
+        public async Task CreateHoliday_CarryForwardSkipsAFollowingHoliday()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            var holidayDate = DateOnly.FromDateTime(session.ScheduledStartAtUtc);
+            _db.Context.Holidays.Add(new Holiday { Date = holidayDate.AddDays(1), Name = "Day after" });
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            await CreateAcademicOpsService().CreateHolidayAsync(new SaveHolidayRequest { Name = "Surprise Holiday", Date = holidayDate });
+
+            var carried = await _db.Context.ClassSessions.FirstAsync(s => s.CarriedForwardFromSessionId == session.Id);
+            Assert.Equal(session.ScheduledStartAtUtc.AddDays(2), carried.ScheduledStartAtUtc);
+        }
+
+        [Fact]
+        public async Task ReconcileHolidays_MovesSessionsThatLandedOnAnExistingHoliday()
+        {
+            // Simulates a bulk import / older holiday: the holiday row exists but the session was
+            // never swept when it was created.
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            _db.Context.Holidays.Add(new Holiday { Date = DateOnly.FromDateTime(session.ScheduledStartAtUtc), Name = "Imported-over holiday" });
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            var moved = await CreateAcademicOpsService().ReconcileHolidaysAsync();
+
+            Assert.Equal(1, moved);
+            Assert.Equal(SessionStatus.Cancelled, (await _db.Context.ClassSessions.FirstAsync(s => s.Id == session.Id)).Status);
+            var carried = await _db.Context.ClassSessions.FirstAsync(s => s.CarriedForwardFromSessionId == session.Id);
+            Assert.Equal(SessionStatus.CarriedForward, carried.Status);
+            Assert.Equal(0, await CreateAcademicOpsService().ReconcileHolidaysAsync()); // idempotent
         }
 
         /// <summary>
@@ -5186,6 +5220,116 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task Reschedule_HidesTheOriginalFromTheScheduleList_SoOnlyTheNewTimeShows()
+        {
+            // Client: a 5:30 class moved to 6:00 showed twice (the old one as "Rescheduled").
+            var (batch, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            var sessionService = CreateSessionService();
+
+            var replacement = await sessionService.RescheduleAsync(session.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = session.ScheduledStartAtUtc.AddMinutes(30),
+                ScheduledEndAtUtc = session.ScheduledEndAtUtc.AddMinutes(30),
+            });
+
+            var listed = await sessionService.ListAsync(DateTime.MinValue, DateTime.MaxValue, null, batch.Id);
+            Assert.DoesNotContain(listed, s => s.Id == session.Id);
+            Assert.Contains(listed, s => s.Id == replacement.Id);
+            // Still in the database as history, and still reachable by id.
+            var original = await _db.Context.ClassSessions.AsNoTracking().FirstAsync(s => s.Id == session.Id);
+            Assert.Equal(SessionStatus.Rescheduled, original.Status);
+        }
+
+        [Fact]
+        public async Task ScheduleList_KeepsGenuineCancellations_ButHidesScheduleChangeLeftovers()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 4, includeSession: false);
+            ClassSession Make(int dayOffset, SessionStatus status, string? reason)
+            {
+                var start = DateTime.UtcNow.AddDays(dayOffset);
+                return new ClassSession
+                {
+                    BatchId = batch.Id,
+                    TeacherProfileId = batch.TeacherProfileId,
+                    Status = status,
+                    CancellationReason = reason,
+                    ScheduledStartAtUtc = start,
+                    ScheduledEndAtUtc = start.AddMinutes(45),
+                };
+            }
+
+            var byParent = Make(1, SessionStatus.Cancelled, "Cancelled by Asha (Parent): travelling");
+            var noReason = Make(2, SessionStatus.Cancelled, null); // older row, reason never recorded
+            var adjusted = Make(3, SessionStatus.Cancelled, SessionVisibility.ScheduleAdjustedReason);
+            var rebuilt = Make(4, SessionStatus.Cancelled, $"Cancelled by Admin (Admin): all upcoming classes of the batch {SessionVisibility.ScheduleRebuiltMarker}");
+            _db.Context.ClassSessions.AddRange(byParent, noReason, adjusted, rebuilt);
+            await _db.Context.SaveChangesAsync();
+
+            var listed = await CreateSessionService().ListAsync(DateTime.MinValue, DateTime.MaxValue, null, batch.Id);
+
+            Assert.Contains(listed, s => s.Id == byParent.Id);
+            Assert.Contains(listed, s => s.Id == noReason.Id);
+            Assert.DoesNotContain(listed, s => s.Id == adjusted.Id);
+            Assert.DoesNotContain(listed, s => s.Id == rebuilt.Id);
+        }
+
+        [Fact]
+        public void CancelledBy_ForParent_ShowsOwnReason_ButNeverATeachersPrivateLeaveReason()
+        {
+            var own = CancelledBy.Reason("Asha (Parent)", "travelling");
+            Assert.Equal(own, CancelledBy.ForParent(own));
+
+            var teacherLeave = CancelledBy.Reason("Priya Shah (Teacher)", "teacher's leave 01 Oct 2026 – 02 Oct 2026, approved by Shefali (Admin) — medical procedure");
+            var shown = CancelledBy.ForParent(teacherLeave)!;
+            Assert.StartsWith("Cancelled by Teacher", shown);
+            Assert.Contains("unavailable", shown);
+            Assert.DoesNotContain("medical", shown);
+            Assert.DoesNotContain("Shefali", shown);
+
+            var staff = CancelledBy.ForParent(CancelledBy.Reason("Ravi K (Coordinator)", "holiday — Diwali"))!;
+            Assert.Equal("Cancelled by the academy: holiday — Diwali", staff);
+
+            Assert.Null(CancelledBy.ForParent(null));
+            Assert.Equal("Schedule adjusted", CancelledBy.ForParent("Schedule adjusted"));
+        }
+
+        [Fact]
+        public void DeliveredMinutes_OnlyAFullMissingMinuteCountsAsShort()
+        {
+            var start = new DateTime(2026, 10, 1, 14, 30, 0, DateTimeKind.Utc);
+            var session = new ClassSession { ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30) };
+
+            // Joined on time but the classroom connection was stamped 40s in: not a missing minute.
+            Assert.Equal(30, PayoutService.DeliveredMinutes(session, start.AddSeconds(40), start.AddMinutes(30)));
+            // 45-minute class joined ~36s late, stayed well past the end: capped at the scheduled end.
+            var long45 = new ClassSession { ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(45) };
+            Assert.Equal(45, PayoutService.DeliveredMinutes(long45, start.AddSeconds(36), start.AddMinutes(51)));
+            // A genuinely missing minute (and more) is still counted, as before.
+            Assert.Equal(28, PayoutService.DeliveredMinutes(session, start.AddMinutes(-2), start.AddMinutes(28)));
+            Assert.Equal(29, PayoutService.DeliveredMinutes(session, start.AddMinutes(1), start.AddMinutes(30)));
+            Assert.Equal(0, PayoutService.DeliveredMinutes(session, start.AddMinutes(40), start.AddMinutes(41)));
+        }
+
+        [Fact]
+        public async Task PayoutApproval_ClassPricedAtZero_LetsTheReviewerEnterTheAmount()
+        {
+            // "0 out of 0 pay" and no way to edit: a class finished before any rate was set is priced 0,
+            // and the partial amount used to be capped at that 0.
+            var payouts = CreatePayoutService();
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1); // no rate, no attendance → flagged at 0
+            await CreateSessionService().CompleteAsync(session.Id);
+            var approval = (await payouts.ListApprovalsAsync(pending: true)).Single(a => a.ClassSessionId == session.Id);
+            Assert.Equal(0m, approval.FullAmount);
+
+            var reviewer = await _db.SeedUserAsync($"adm-{Guid.NewGuid():N}@test.com", "x", UserRole.Admin);
+            var decided = await payouts.DecideApprovalAsync(approval.ItemId, reviewer.Id,
+                new DecidePayoutApprovalRequest { Decision = PayoutReviewDecision.ApprovedPartial, Amount = 350m });
+
+            Assert.Equal(350m, decided.Amount);
+            Assert.False(decided.Pending);
+        }
+
+        [Fact]
         public async Task Reschedule_RejectsHolidayDate()
         {
             // ScheduleAsync already blocked holidays; RescheduleAsync didn't — a reschedule
@@ -5608,9 +5752,11 @@ namespace iucs.readernest.tests
                 StartDate = start.AddDays(1),
                 Slots = [new GenerateScheduleSlot { DayOfWeek = start.AddDays(1).DayOfWeek, StartTimeUtc = new TimeOnly(12, 30) }],
             });
-            // The listing keeps the 3 cancelled ones as history; 3 new classes are scheduled.
+            // The 3 cleared classes are kept in the database as history but no longer listed, so the
+            // schedule shows only the new 3 (client: the old cancelled ones cluttered every portal).
             Assert.Equal(3, fresh.Count(s => s.Status == SessionStatus.Scheduled));
-            Assert.Equal(3, fresh.Count(s => s.Status == SessionStatus.Cancelled));
+            Assert.DoesNotContain(fresh, s => s.Status == SessionStatus.Cancelled);
+            Assert.Equal(3, await _db.Context.ClassSessions.CountAsync(s => s.BatchId == batch.Id && s.Status == SessionStatus.Cancelled));
         }
 
         [Fact]
@@ -5910,14 +6056,12 @@ namespace iucs.readernest.tests
                 RemainingSessionCount = 6,
             });
 
-            // ListAsync (what UpdateFutureScheduleAsync returns) includes the whole batch
-            // history, so the 3 just-cancelled originals are still in there alongside the 6
-            // freshly-placed ones -- same shape as UpdateFutureSchedule_WeekdayPatternChange_
-            // RegeneratesRemainingSessions_CancellingOldOnes above.
+            // The 3 just-cancelled originals are kept in the database as history but are no longer
+            // in the listing UpdateFutureScheduleAsync returns -- only the 6 fresh ones are shown.
             var scheduled = sessions.Where(s => s.Status == SessionStatus.Scheduled).ToList();
-            var cancelled = sessions.Where(s => s.Status == SessionStatus.Cancelled).ToList();
             Assert.Equal(6, scheduled.Count);
-            Assert.Equal(3, cancelled.Count);
+            Assert.DoesNotContain(sessions, s => s.Status == SessionStatus.Cancelled);
+            Assert.Equal(3, await _db.Context.ClassSessions.CountAsync(s => s.BatchId == batch.Id && s.Status == SessionStatus.Cancelled));
         }
 
         [Fact]

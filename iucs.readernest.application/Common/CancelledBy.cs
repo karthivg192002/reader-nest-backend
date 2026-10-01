@@ -44,6 +44,44 @@ namespace iucs.readernest.application.Common
             return string.IsNullOrWhiteSpace(name) ? role : $"{name} ({role})";
         }
 
+        /// <summary>
+        /// What a parent may see of a cancelled class's reason. Their own cancellation keeps the
+        /// reason they gave; a teacher's cancellation (personal leave, etc.) is reduced to the
+        /// fact that the teacher is unavailable, so the teacher's private leave reason and the
+        /// approver's name are never shown to a family; anything else keeps its detail but not
+        /// the staff member's name.
+        /// </summary>
+        public static string? ForParent(string? reason)
+        {
+            if (string.IsNullOrWhiteSpace(reason))
+            {
+                return reason;
+            }
+
+            const string prefix = "Cancelled by ";
+            if (!reason.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                return reason; // legacy free-text reason with no "who"
+            }
+
+            var rest = reason[prefix.Length..];
+            var sep = rest.IndexOf(": ", StringComparison.Ordinal);
+            var who = sep == -1 ? rest : rest[..sep];
+            var detail = sep == -1 ? string.Empty : rest[(sep + 2)..];
+
+            if (who.EndsWith("(Parent)", StringComparison.Ordinal) || who.StartsWith("every parent", StringComparison.Ordinal))
+            {
+                return reason;
+            }
+
+            if (who.EndsWith("(Teacher)", StringComparison.Ordinal))
+            {
+                return "Cancelled by Teacher: your teacher is unavailable, so this class has been cancelled.";
+            }
+
+            return detail.Length == 0 ? "Cancelled by the academy" : $"Cancelled by the academy: {detail}";
+        }
+
         public static string Reason(string who, string? detail)
         {
             var text = string.IsNullOrWhiteSpace(detail) ? $"Cancelled by {who}" : $"Cancelled by {who}: {detail.Trim()}";
