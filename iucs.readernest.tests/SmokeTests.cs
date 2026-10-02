@@ -96,6 +96,8 @@ namespace iucs.readernest.tests
         private BillingService CreateBillingService(FakePaymentGateway gateway) =>
             new(_db.UnitOfWork, _auditLog, gateway, _notifications, _db.CurrentUser, _bulkFileReader, _invoicePdfGenerator);
 
+        private ChildSchedulePreferenceService CreateSchedulePreferenceService() => new(_db.UnitOfWork, _auditLog);
+
         private EnrollmentService CreateEnrollmentService() => new(_db.UnitOfWork, _auditLog, CreateBillingService(), CreateBatchService(), _bulkFileReader);
 
         private MenuService CreateMenuService() => new(_db.UnitOfWork, _auditLog);
@@ -2954,6 +2956,80 @@ namespace iucs.readernest.tests
             Assert.Equal(SessionStatus.Scheduled, untouched!.Status); // never rescheduled
         }
 
+        private async Task<(User ParentUser, Child Child)> SeedParentWithChildAsync()
+        {
+            var parentUser = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var profile = new ParentProfile { UserId = parentUser.Id };
+            var child = new Child { ParentProfile = profile, FirstName = "Aarav", LastName = "Sharma" };
+            _db.Context.AddRange(profile, child);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+            return (parentUser, child);
+        }
+
+        private static SaveChildSchedulePreferenceRequest ValidPreference() => new()
+        {
+            DaysPerWeek = 2,
+            PreferredDays = ["Thu", "Mon"],
+            DayTimes = new() { ["Mon"] = "16:00", ["Thu"] = "18:00" },
+            PreferredStartDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)),
+            SchoolName = "  Green Valley School ",
+            Grade = "Grade 2",
+            DateOfBirth = new DateOnly(2018, 5, 1),
+        };
+
+        [Fact]
+        public async Task SchedulePreference_ParentSavesForExistingChild_NoDuplicateChild_AndStaffSeesIt()
+        {
+            var (parentUser, child) = await SeedParentWithChildAsync();
+            var service = CreateSchedulePreferenceService();
+
+            var before = await service.GetForParentAsync(parentUser.Id, child.Id);
+            Assert.False(before.HasSubmitted);
+            Assert.Equal("Aarav Sharma", before.ChildName); // pre-filled from the existing child
+
+            var saved = await service.SaveForParentAsync(parentUser.Id, child.Id, ValidPreference());
+
+            Assert.True(saved.HasSubmitted);
+            Assert.Equal(["Mon", "Thu"], saved.PreferredDays); // stored in week order
+            Assert.Equal("16:00", saved.DayTimes["Mon"]);
+            Assert.Equal("Green Valley School", saved.SchoolName);
+            _db.Context.ChangeTracker.Clear();
+            Assert.Equal(1, await _db.Context.Children.CountAsync()); // saved onto the existing child, none created
+            var updated = await _db.Context.Children.FirstAsync();
+            Assert.Equal("Grade 2", updated.AcademicLevel);
+            Assert.Equal(new DateOnly(2018, 5, 1), updated.DateOfBirth);
+
+            // Saving again updates in place.
+            var again = ValidPreference();
+            again.DaysPerWeek = 1; again.PreferredDays = ["Fri"]; again.DayTimes = new() { ["Fri"] = "17:00" };
+            await service.SaveForParentAsync(parentUser.Id, child.Id, again);
+            Assert.Equal(1, await _db.Context.ChildSchedulePreferences.CountAsync());
+
+            // Staff students directory carries it.
+            var student = (await CreateEnrollmentService().ListAllStudentsAsync()).Single();
+            Assert.Equal(["Fri"], student.SchedulePreference!.PreferredDays);
+        }
+
+        [Fact]
+        public async Task SchedulePreference_RejectsAnotherFamiliesChild_AndBadSchedules()
+        {
+            var (parentUser, child) = await SeedParentWithChildAsync();
+            var (otherParent, _) = await SeedParentWithChildAsync();
+            var service = CreateSchedulePreferenceService();
+
+            await Assert.ThrowsAsync<NotFoundException>(() => service.SaveForParentAsync(otherParent.Id, child.Id, ValidPreference()));
+
+            var wrongCount = ValidPreference(); wrongCount.DaysPerWeek = 3;
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.SaveForParentAsync(parentUser.Id, child.Id, wrongCount));
+
+            var missingTime = ValidPreference(); missingTime.DayTimes.Remove("Thu");
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.SaveForParentAsync(parentUser.Id, child.Id, missingTime));
+
+            var pastStart = ValidPreference(); pastStart.PreferredStartDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-10));
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.SaveForParentAsync(parentUser.Id, child.Id, pastStart));
+        }
+
         [Fact]
         public async Task CreateHoliday_CancelsClashingSessions_WithoutShiftingThem()
         {
@@ -3207,6 +3283,33 @@ namespace iucs.readernest.tests
             var afterThree = await gamification.GetLeaderboardAsync(sessionId, 10);
             Assert.Equal(3, afterThree.Single().Stars);
             Assert.NotEmpty(afterThree.Single().Badges);
+        }
+
+        [Fact]
+        public async Task AdminAndRmPortals_GetLeadsAndDemoScheduling_SoNewAdmissionWithoutDemoIsReachable()
+        {
+            foreach (var portal in new[] { "admin", "subadmin" })
+            {
+                _db.Context.MenuItems.Add(new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = portal, Section = "People", Label = "Enrollment Review", Path = $"/{portal}/enrollments", Icon = "ClipboardList",
+                    SectionOrder = 2, SortOrder = 3, IsActive = true, RequiredModule = PermissionModule.Admission.ToString(),
+                });
+            }
+            await _db.Context.SaveChangesAsync();
+
+            await iucs.readernest.api.Data.DatabaseInitializer.EnsureAdmissionPipelineMenusAsync(_db.Context);
+            await _db.Context.SaveChangesAsync();
+            await iucs.readernest.api.Data.DatabaseInitializer.EnsureAdmissionPipelineMenusAsync(_db.Context);
+            await _db.Context.SaveChangesAsync();
+
+            var paths = _db.Context.MenuItems.Select(m => m.Path).ToList();
+            Assert.Equal(paths.Count, paths.Distinct().Count());
+            foreach (var path in new[] { "/admin/leads", "/admin/demo-scheduling", "/subadmin/leads", "/subadmin/demo-scheduling" })
+            {
+                Assert.Contains(path, paths);
+            }
+            Assert.Equal(PermissionModule.Admission.ToString(), _db.Context.MenuItems.Single(m => m.Path == "/subadmin/leads").RequiredModule);
         }
 
         [Fact]

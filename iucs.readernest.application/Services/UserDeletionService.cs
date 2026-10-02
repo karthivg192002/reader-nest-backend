@@ -188,6 +188,7 @@ namespace iucs.readernest.application.Services
             await Track<Subscription>(s => s.ChildId == childId, "Subscription", "Subscriptions");
             await Track<BatchEnrollment>(e => e.ChildId == childId, "BatchEnrollment", "Batch enrollments");
             await Track<EnrollmentForm>(f => f.ChildId == childId, "EnrollmentForm", "Enrollment forms");
+            await Track<ChildSchedulePreference>(p => p.ChildId == childId, "ChildSchedulePreference", "Child schedule preferences");
             await Track<ProgressReport>(p => p.ChildId == childId, "ProgressReport", "Progress reports");
             await Track<StudentAward>(a => a.ChildId == childId, "StudentAward", "Gamification awards");
             await Track<SessionAttendance>(a => a.ChildId == childId, "SessionAttendance", "Class attendance records");
