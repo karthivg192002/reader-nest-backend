@@ -234,6 +234,81 @@ namespace iucs.readernest.application.Services
             return await GetAsync(booking.Id, cancellationToken);
         }
 
+        public async Task<DemoBookingDto> CreateDirectAdmissionLeadAsync(
+            CreateDirectAdmissionLeadRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            string parentName;
+            string parentEmail;
+            string? parentPhone;
+            Guid? departmentId = request.DepartmentId;
+            if (request.SiblingOfBookingId is { } siblingId)
+            {
+                // Same visibility as every other lead screen; the parent is copied verbatim so both
+                // children's payment links land on the one parent account (Terms asked only once).
+                var sibling = await GetAsync(siblingId, cancellationToken);
+                parentName = sibling.ParentName;
+                parentEmail = sibling.ParentEmail;
+                parentPhone = sibling.ParentPhone;
+                departmentId ??= sibling.DepartmentId;
+            }
+            else
+            {
+                if (string.IsNullOrWhiteSpace(request.ParentName))
+                {
+                    throw new DomainValidationException("Enter the parent's name.");
+                }
+                if (string.IsNullOrWhiteSpace(request.ParentPhone))
+                {
+                    throw new DomainValidationException("Enter the parent's mobile number.");
+                }
+                parentName = request.ParentName.Trim();
+                parentEmail = ParentLogin.ResolveLoginEmail(request.ParentEmail, request.ParentPhone);
+                parentPhone = request.ParentPhone.Trim();
+            }
+
+            if (departmentId.HasValue
+                && !await _unitOfWork.Repository<Department>().ExistsAsync(d => d.Id == departmentId.Value, cancellationToken))
+            {
+                throw new NotFoundException(nameof(Department), departmentId.Value);
+            }
+
+            // No ClassSession: there is no demo, so no teacher, no join link and no demo fee. It
+            // starts in FollowUpInProgress, a stage the payment link can be issued from.
+            var booking = new DemoBooking
+            {
+                ParentName = parentName,
+                ParentEmail = parentEmail,
+                ParentPhone = parentPhone,
+                ChildName = request.ChildName.Trim(),
+                ChildAge = request.ChildAge,
+                DepartmentId = departmentId,
+                ConversionStatus = ConversionStatus.FollowUpInProgress,
+            };
+            await _unitOfWork.Repository<DemoBooking>().AddAsync(booking, cancellationToken);
+            await _auditLog.StageAsync(AuditAction.Create, nameof(DemoBooking), booking.Id.ToString(),
+                request.SiblingOfBookingId is { } fromId
+                    ? $"{{\"note\":\"Direct admission (no demo) for a sibling from lead {fromId}\"}}"
+                    : "{\"note\":\"Direct admission (no demo)\"}",
+                cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            await _crmNotifier.PushLeadEventAsync("lead.created", new
+            {
+                booking.Id,
+                booking.ParentName,
+                booking.ParentEmail,
+                booking.ParentPhone,
+                booking.ChildName,
+                Department = departmentId.HasValue
+                    ? (await _unitOfWork.Repository<Department>().GetByIdAsync(departmentId.Value, cancellationToken))?.Name
+                    : null,
+                DemoAtUtc = (DateTime?)null,
+            }, cancellationToken);
+
+            return await GetAsync(booking.Id, cancellationToken);
+        }
+
         public async Task<DemoBookingDto> UpdateAsync(
             Guid bookingId,
             UpdateDemoBookingRequest request,
@@ -809,7 +884,7 @@ namespace iucs.readernest.application.Services
                         ParentEmail = g.Key,
                         ParentName = g.First().ParentName,
                         ParentPhone = g.First().ParentPhone,
-                        TotalDemos = dtos.Count,
+                        TotalDemos = dtos.Count(d => d.ClassSessionId.HasValue),
                         EnrolledCount = dtos.Count(d => d.ConversionStatus == ConversionStatus.Enrolled),
                         LastDemoAtUtc = dtos.Max(d => d.ScheduledStartAtUtc),
                         TotalPayable = dtos.Sum(d => d.PayableAmount),

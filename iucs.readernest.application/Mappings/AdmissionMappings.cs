@@ -32,7 +32,9 @@ namespace iucs.readernest.application.Mappings
                 MeetingRoomId = booking.ClassSession?.MeetingRoomId,
                 TeacherProfileId = booking.ClassSession?.TeacherProfileId,
                 TeacherName = teacher?.User is { } u ? $"{u.FirstName} {u.LastName}".Trim() : null,
-                PayableAmount = booking.ConversionStatus == ConversionStatus.Enrolled ? ConvertedDemoFee : NormalDemoFee,
+                // A direct-admission lead (no demo class) earns no demo fee.
+                PayableAmount = booking.ClassSessionId is null ? 0m
+                    : booking.ConversionStatus == ConversionStatus.Enrolled ? ConvertedDemoFee : NormalDemoFee,
                 ParentJoinedAtUtc = booking.ParentJoinedAtUtc,
                 CourseId = booking.CourseId,
                 CourseName = booking.Course?.Name,

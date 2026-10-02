@@ -12,6 +12,10 @@ namespace iucs.readernest.application.Services
 
         Task<DemoBookingDto> CreateAsync(CreateDemoBookingRequest request, CancellationToken cancellationToken = default);
 
+        /// <summary>A lead with no demo class (direct enrollment, or a sibling from another lead's demo),
+        /// ready for the counsellor to issue a payment link.</summary>
+        Task<DemoBookingDto> CreateDirectAdmissionLeadAsync(CreateDirectAdmissionLeadRequest request, CancellationToken cancellationToken = default);
+
         /// <summary>Per-parent demo record: every demo each parent has taken, grouped by email, with fee totals.</summary>
         Task<IReadOnlyList<ParentDemoHistoryDto>> ListParentHistoryAsync(string? search, CancellationToken cancellationToken = default);
 
