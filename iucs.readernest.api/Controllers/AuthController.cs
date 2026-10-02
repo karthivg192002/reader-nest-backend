@@ -35,8 +35,8 @@ namespace iucs.readernest.api.Controllers
         }
 
         /// <summary>
-        /// Always responds the same way whether or not the address has an account — the
-        /// frontend shows one fixed "if that email exists, we've sent a link" message either way.
+        /// 204 if the address/mobile number has an account and the reset link (or WhatsApp-only
+        /// staff alert) was sent; 404 otherwise — see AuthService.RequestPinResetAsync.
         /// </summary>
         [HttpPost("forgot-pin")]
         [AllowAnonymous]
@@ -44,6 +44,17 @@ namespace iucs.readernest.api.Controllers
         public async Task<IActionResult> ForgotPin(ForgotPinRequest request, CancellationToken cancellationToken)
         {
             await _authService.RequestPinResetAsync(request, cancellationToken);
+            return NoContent();
+        }
+
+        /// <summary>The signed-in user (any role, Admin included) changes their own PIN.</summary>
+        [HttpPost("change-pin")]
+        [Authorize]
+        [EnableRateLimiting("pin-reset")]
+        public async Task<IActionResult> ChangePin(ChangePinRequest request, CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            await _authService.ChangePinAsync(userId, request, cancellationToken);
             return NoContent();
         }
 

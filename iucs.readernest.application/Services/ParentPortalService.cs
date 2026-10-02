@@ -228,6 +228,7 @@ namespace iucs.readernest.application.Services
                 .Include(s => s.TeacherProfile).ThenInclude(t => t.User)
                 .Where(s => (s.BatchId != null && batchIds.Contains(s.BatchId.Value) || demoSessionIds.Contains(s.Id))
                             && s.ScheduledStartAtUtc < toUtc && s.ScheduledEndAtUtc > fromUtc)
+                .Where(SessionVisibility.IsShownInSchedule)
                 .OrderBy(s => s.ScheduledStartAtUtc)
                 .ToListAsync(cancellationToken);
 
@@ -245,6 +246,7 @@ namespace iucs.readernest.application.Services
                     {
                         dto.ChildIds = childIds;
                     }
+                    dto.CancellationReason = CancelledBy.ForParent(dto.CancellationReason);
                     return dto;
                 })
                 .ToList();

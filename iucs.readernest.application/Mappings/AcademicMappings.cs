@@ -60,6 +60,7 @@ namespace iucs.readernest.application.Mappings
                 PaymentPlanType = batch.PaymentPlanType,
                 PaymentAfterSessionsCount = batch.PaymentAfterSessionsCount,
                 PaymentDueDate = batch.PaymentDueDate,
+                TeacherPayoutPerClass = batch.TeacherPayoutPerClass,
             };
         }
 
@@ -73,6 +74,7 @@ namespace iucs.readernest.application.Mappings
                 AcademicLevel = enrollment.Child.AcademicLevel,
                 Status = enrollment.Status,
                 EnrolledAtUtc = enrollment.CreatedAtUtc,
+                ParentTimeZoneId = enrollment.Child.ParentProfile?.User?.TimeZoneId,
             };
         }
 

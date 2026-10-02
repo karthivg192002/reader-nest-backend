@@ -36,6 +36,10 @@ namespace iucs.readernest.application.Dto.Sessions
         /// monitor — the host's classroom admits them from the lobby automatically.</summary>
         public bool IsMonitor { get; set; }
 
+        /// <summary>The class's own teacher: a rejoin (after a drop) is announced to the room so
+        /// whoever holds it now admits her from the waiting room automatically.</summary>
+        public bool IsSessionTeacher { get; set; }
+
         /// <summary>True for a Demo-type session (demos are auto-recorded like any other class).</summary>
         public bool IsDemo { get; set; }
 

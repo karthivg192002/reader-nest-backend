@@ -30,6 +30,11 @@ namespace iucs.readernest.application.Common
             // Create + Edit + View here, with Edit covering the archive-as-delete action.
             new("sub-admin", PermissionModule.CourseBatchManagement, View: true, Create: true, Edit: true),
             new("sub-admin", PermissionModule.UserManagement, View: true),
+            // Parent Tickets is the Relationship Manager's own queue (families raise tickets now
+            // that WhatsApp/phone contact is retired). Reported live: an RM couldn't open parent
+            // tickets -- nothing guaranteed this grant, so any RM whose snapshot predated the
+            // module (or a preset re-save without the box) silently lost the whole screen.
+            new("sub-admin", PermissionModule.SupportTickets, View: true, Edit: true),
             // Lets a teacher see and resolve doubts the "Ask a Doubt" chatbot escalated —
             // Communication already gates Progress Reports/Email Templates for the same module.
             new("teacher", PermissionModule.Communication, View: true, Edit: true),
@@ -46,7 +51,14 @@ namespace iucs.readernest.application.Common
             new("management", PermissionModule.SessionCalendarManagement, View: true),
             // Short-class payout approval: Management / Owners decide full, partial or no payout
             // for any class that ran shorter than scheduled (Payout Approvals), alongside Admin.
-            new("management", PermissionModule.Payouts, View: true, Approve: true),
+            // Edit added alongside: staff compensation (fixed salary / collection percentage) is
+            // set and edited by Admin/Management (client requirement), same Payouts module.
+            new("management", PermissionModule.Payouts, View: true, Edit: true, Approve: true),
+            // Client requirement: an Admin's own leave is approved only by Management, never by
+            // Admin. The plain "Management" preset shipped read-only (no UserManagement grant at
+            // all), so without this there would be no one able to approve it — StaffLeaveService.
+            // ReviewAsync's own carve-out refuses an Admin reviewer on an Admin-submitted leave.
+            new("management", PermissionModule.UserManagement, View: true, Approve: true),
             new("parent", PermissionModule.SessionCalendarManagement, View: true),
             new("parent", PermissionModule.ContentAccessManagement, View: true),
             new("parent", PermissionModule.BillingFinance, View: true),

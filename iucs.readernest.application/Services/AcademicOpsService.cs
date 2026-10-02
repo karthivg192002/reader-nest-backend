@@ -1,5 +1,6 @@
 using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
+using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Academics;
 using iucs.readernest.application.Helper;
 using iucs.readernest.domain.Common;
@@ -21,6 +22,8 @@ namespace iucs.readernest.application.Services
         private readonly ICurrentUserService _currentUser;
         private readonly ISessionService _sessionService;
         private readonly IClassSessionEventLogService _eventLog;
+        private readonly IEmailTemplateService _emailTemplates;
+        private readonly IEmailSender _emailSender;
 
         public AcademicOpsService(
             IUnitOfWork unitOfWork,
@@ -28,7 +31,9 @@ namespace iucs.readernest.application.Services
             INotificationService notificationService,
             ICurrentUserService currentUser,
             ISessionService sessionService,
-            IClassSessionEventLogService eventLog)
+            IClassSessionEventLogService eventLog,
+            IEmailTemplateService emailTemplates,
+            IEmailSender emailSender)
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
@@ -36,6 +41,8 @@ namespace iucs.readernest.application.Services
             _currentUser = currentUser;
             _sessionService = sessionService;
             _eventLog = eventLog;
+            _emailTemplates = emailTemplates;
+            _emailSender = emailSender;
         }
 
         /// <summary>
@@ -389,70 +396,123 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             // Business rule: a class never runs on a holiday. Any session already scheduled
-            // on this date is automatically carried forward to the next available same-weekday
-            // slot (skipping further holidays), keeping the traceability link.
-            //
-            // request.Date is a local (DefaultTimeZoneId, Asia/Kolkata) calendar date, but
-            // treating its midnight as UTC midnight offset the whole matching window by +5:30 —
-            // a session genuinely on the holiday (e.g. 02:00 IST) fell just before the window
-            // and was never detected, running as normal, while a session the FOLLOWING day in
-            // that same 00:00-05:29 IST slot fell just inside it and was wrongly auto-cancelled
-            // and carried forward a week as if it were on the holiday. Mirrors
-            // StoreService.ListAvailableDemoSlotsAsync's own correct local-to-UTC conversion.
-            var zone = TimeZoneInfo.FindSystemTimeZoneById(DateTimeDisplay.DefaultTimeZoneId);
-            var dayStartLocal = request.Date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
-            var dayStart = TimeZoneInfo.ConvertTimeToUtc(dayStartLocal, zone);
-            var dayEnd = TimeZoneInfo.ConvertTimeToUtc(dayStartLocal.AddDays(1), zone);
-            var clashingSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
-                .Where(s => (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
-                            && s.ScheduledStartAtUtc >= dayStart
-                            && s.ScheduledStartAtUtc < dayEnd)
+            // on this date is cancelled — never shifted; the recurring schedule is untouched.
+            await CancelHolidaySessionsAsync(new[] { holiday }, fromUtc: null, cancellationToken);
+
+            return ToDto(holiday);
+        }
+
+        public async Task<(int Cancelled, int RemovedShifted)> ReconcileHolidaysAsync(CancellationToken cancellationToken = default)
+        {
+            // 1) Undo any earlier "carry forward to the next day/week" copies — a holiday only
+            //    cancels that day's classes; the recurring schedule must stay untouched.
+            var removed = await RemoveHolidayCarryForwardCopiesAsync(cancellationToken);
+
+            // 2) Cancel anything still sitting on a holiday date (bulk imports, older holidays).
+            //    Only upcoming sessions — a past session still marked Scheduled is a different
+            //    problem (stale status), not something to touch here.
+            var from = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1));
+            var holidays = await _unitOfWork.Repository<Holiday>().Query()
+                .Where(h => h.Date >= from)
                 .ToListAsync(cancellationToken);
+            var cancelled = await CancelHolidaySessionsAsync(holidays, DateTime.UtcNow, cancellationToken);
+            return (cancelled, removed);
+        }
 
-            // The next free same-weekday slot depends only on the holiday calendar, not on
-            // any individual session, so it is computed once here rather than re-derived
-            // inside the loop below — that probe was issuing a fresh ExistsAsync per session
-            // per candidate week while always arriving at the same answer.
-            var futureHolidayDates = (await _unitOfWork.Repository<Holiday>().Query()
-                    .Where(h => h.Date > request.Date)
-                    .Select(h => h.Date)
-                    .ToListAsync(cancellationToken))
-                .ToHashSet();
-
-            var offsetDays = 7;
-            while (futureHolidayDates.Contains(request.Date.AddDays(offsetDays)))
+        /// <summary>
+        /// Cancels (never moves) every Scheduled/CarriedForward class on the given holiday
+        /// dates. The batch's recurring schedule is left exactly as it was: no replacement
+        /// session is created. Demo sessions are left for a human — they are one-off bookings
+        /// a parent is waiting on, and scheduling onto a holiday is already blocked.
+        /// </summary>
+        private async Task<int> CancelHolidaySessionsAsync(
+            IReadOnlyCollection<Holiday> holidays, DateTime? fromUtc, CancellationToken cancellationToken)
+        {
+            if (holidays.Count == 0)
             {
-                offsetDays += 7;
+                return 0;
             }
 
-            foreach (var session in clashingSessions)
-            {
-                await _unitOfWork.Repository<ClassSession>().AddAsync(
-                    new ClassSession
-                    {
-                        BatchId = session.BatchId,
-                        TeacherProfileId = session.TeacherProfileId,
-                        Type = session.Type,
-                        Status = SessionStatus.CarriedForward,
-                        ScheduledStartAtUtc = session.ScheduledStartAtUtc.AddDays(offsetDays),
-                        ScheduledEndAtUtc = session.ScheduledEndAtUtc.AddDays(offsetDays),
-                        MeetingRoomId = session.MeetingRoomId,
-                        CarriedForwardFromSessionId = session.Id,
-                    },
-                    cancellationToken);
+            // Holiday.Date is a local (DefaultTimeZoneId, Asia/Kolkata) calendar date — its
+            // midnight must be converted local->UTC, not read as UTC midnight, or the matching
+            // window is offset by +5:30 and catches the wrong day's early-morning sessions.
+            var zone = TimeZoneInfo.FindSystemTimeZoneById(DateTimeDisplay.DefaultTimeZoneId);
+            var approver = await CancelledBy.DescribeAsync(_unitOfWork, _currentUser.UserId, cancellationToken);
+            var count = 0;
 
-                session.Status = SessionStatus.Cancelled;
-                session.CancellationReason = $"Holiday — {holiday.Name}; carried forward to {request.Date.AddDays(offsetDays):yyyy-MM-dd}";
+            foreach (var holiday in holidays)
+            {
+                var dayStartLocal = holiday.Date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+                var dayStart = TimeZoneInfo.ConvertTimeToUtc(dayStartLocal, zone);
+                var dayEnd = TimeZoneInfo.ConvertTimeToUtc(dayStartLocal.AddDays(1), zone);
+                var lowerBound = fromUtc.HasValue && fromUtc.Value > dayStart ? fromUtc.Value : dayStart;
+                var onDay = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                    .Where(s => (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                                && s.Type != SessionType.Demo
+                                && s.ScheduledStartAtUtc >= lowerBound
+                                && s.ScheduledStartAtUtc < dayEnd)
+                    .ToListAsync(cancellationToken);
+
+                foreach (var session in onDay)
+                {
+                    session.Status = SessionStatus.Cancelled;
+                    session.CancellationReason = CancelledBy.Reason(approver, $"holiday — {holiday.Name}");
+                }
+
+                count += onDay.Count;
             }
 
-            if (clashingSessions.Count > 0)
+            if (count > 0)
             {
                 await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), null,
-                    changesJson: $"{{\"holidayCarryForward\":{clashingSessions.Count}}}", cancellationToken: cancellationToken);
+                    changesJson: $"{{\"holidayCancelled\":{count}}}", cancellationToken: cancellationToken);
                 await _unitOfWork.SaveChangesAsync(cancellationToken);
             }
 
-            return ToDto(holiday);
+            return count;
+        }
+
+        /// <summary>
+        /// Removes the replacement sessions an earlier version of the holiday rule created
+        /// (original cancelled with "holiday — …; carried forward to …"), so the recurring
+        /// schedule is back to what it was. Only replacements that have not started are
+        /// removed; the original keeps its Cancelled status with a plain "holiday" reason.
+        /// </summary>
+        private async Task<int> RemoveHolidayCarryForwardCopiesAsync(CancellationToken cancellationToken)
+        {
+            var originals = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .Where(s => s.Status == SessionStatus.Cancelled
+                            && s.CancellationReason != null
+                            && s.CancellationReason.Contains("holiday — ")
+                            && s.CancellationReason.Contains("; carried forward to "))
+                .ToListAsync(cancellationToken);
+            if (originals.Count == 0)
+            {
+                return 0;
+            }
+
+            var originalIds = originals.Select(o => o.Id).ToList();
+            var copies = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .Where(s => s.CarriedForwardFromSessionId != null
+                            && originalIds.Contains(s.CarriedForwardFromSessionId.Value)
+                            && s.Status == SessionStatus.CarriedForward)
+                .ToListAsync(cancellationToken);
+
+            foreach (var copy in copies)
+            {
+                _unitOfWork.Repository<ClassSession>().Remove(copy);
+            }
+
+            foreach (var original in originals)
+            {
+                original.CancellationReason = System.Text.RegularExpressions.Regex.Replace(
+                    original.CancellationReason!, @"; carried forward to \S+", string.Empty);
+            }
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), null,
+                changesJson: $"{{\"holidayCarryForwardsUndone\":{copies.Count}}}", cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            return copies.Count;
         }
 
         public async Task DeleteHolidayAsync(Guid id, CancellationToken cancellationToken = default)
@@ -675,8 +735,9 @@ namespace iucs.readernest.application.Services
             {
                 leave.Sessions.Add(new LeaveRequestSession { ClassSessionId = session.Id, ClassSession = session });
                 session.Status = SessionStatus.Cancelled;
-                session.CancellationReason =
-                    $"Teacher self-cancelled via class-wise leave (within monthly allowance): {reason.Trim()}";
+                session.CancellationReason = CancelledBy.Reason(
+                    CancelledBy.Describe(teacher.User),
+                    $"teacher's class-wise leave, auto-approved within monthly allowance — {reason.Trim()}");
             }
 
             await _unitOfWork.Repository<LeaveRequest>().AddAsync(leave, cancellationToken);
@@ -772,8 +833,16 @@ namespace iucs.readernest.application.Services
         /// <summary>
         /// Tells exactly the families whose classes this leave cancelled — previously every
         /// parent in every batch this teacher teaches got a "teacher on leave" email, even for a
-        /// single cancelled class in someone else's batch. A cancelled demo has no enrolled
-        /// family; the admission team is told instead so they can reassign or reschedule it.
+        /// single cancelled class in someone else's batch. Client-reported confusion: a parent
+        /// who'd already received the 1-hour SessionReminderBackgroundService reminder for a
+        /// class that the teacher's leave then cancelled got only a vague "on leave {window}...
+        /// will be rescheduled" email with no mention of which class or that nothing shows up
+        /// automatically — this now names each family's own cancelled class(es) by name/time and
+        /// says CANCELLED, not a rescheduling that (for a teacher-leave cancellation, unlike a
+        /// parent's own cancellation) never actually happens on its own. A cancelled demo has no
+        /// enrolled family in this system — the lead is emailed directly here (previously only
+        /// admission staff were told, and had to remember to pass it on themselves), and
+        /// admission staff still get their own alert to actually reassign/reschedule it.
         /// </summary>
         private async Task NotifyAffectedFamiliesAsync(
             string teacherName,
@@ -781,19 +850,36 @@ namespace iucs.readernest.application.Services
             IReadOnlyCollection<ClassSession> cancelled,
             CancellationToken cancellationToken)
         {
-            var batchIds = cancelled.Where(s => s.BatchId.HasValue).Select(s => s.BatchId!.Value).Distinct().ToList();
-            if (batchIds.Count > 0)
+            var batchSessions = cancelled.Where(s => s.BatchId.HasValue).ToList();
+            if (batchSessions.Count > 0)
             {
-                var parents = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                var batchIds = batchSessions.Select(s => s.BatchId!.Value).Distinct().ToList();
+                var enrollments = await _unitOfWork.Repository<BatchEnrollment>().Query()
                     .Where(e => e.Status == EnrollmentStatus.Active && batchIds.Contains(e.BatchId))
-                    .Select(e => e.Child.ParentProfile.User)
-                    .Distinct()
+                    .Select(e => new { e.BatchId, ParentUser = e.Child.ParentProfile.User })
                     .ToListAsync(cancellationToken);
-                foreach (var parent in parents)
+
+                // Each parent sees only their OWN child's cancelled class(es), by name and time —
+                // not the leave's whole date range, which might span classes in other batches
+                // (and so other families) entirely.
+                var byParent = enrollments
+                    .GroupBy(e => e.ParentUser.Id)
+                    .Select(g => (Parent: g.First().ParentUser, Sessions: batchSessions.Where(s => g.Any(e => e.BatchId == s.BatchId!.Value)).ToList()));
+
+                foreach (var (parent, sessions) in byParent)
                 {
+                    var itemsHtml = string.Join("", sessions
+                        .OrderBy(s => s.ScheduledStartAtUtc)
+                        .Select(s => $"<li>{System.Net.WebUtility.HtmlEncode(s.Batch?.Name ?? "Class")} — " +
+                            $"{DateTimeDisplay.ToLocalRange(s.ScheduledStartAtUtc, s.ScheduledEndAtUtc, parent.TimeZoneId)}</li>"));
                     await _notificationService.SendTemplatedEmailAsync(
                         parent.Id, parent.Email, NotificationType.LeaveStatusUpdate, "leave-notify-parent",
-                        new Dictionary<string, string> { ["TeacherName"] = teacherName, ["Window"] = window },
+                        new Dictionary<string, string>
+                        {
+                            ["TeacherName"] = teacherName,
+                            ["SessionsList"] = itemsHtml,
+                            ["Count"] = sessions.Count == 1 ? "This class has" : $"These {sessions.Count} classes have",
+                        },
                         cancellationToken);
                 }
             }
@@ -806,19 +892,45 @@ namespace iucs.readernest.application.Services
 
             var demos = await _unitOfWork.Repository<DemoBooking>().Query()
                 .Where(b => b.ClassSessionId != null && demoSessionIds.Contains(b.ClassSessionId.Value))
-                .Select(b => new { b.ChildName, b.ParentName, b.ParentPhone, Start = b.ClassSession!.ScheduledStartAtUtc })
+                .Select(b => new { b.ChildName, b.ParentName, b.ParentEmail, b.ParentPhone, Start = b.ClassSession!.ScheduledStartAtUtc })
                 .ToListAsync(cancellationToken);
             if (demos.Count == 0)
             {
                 return;
             }
 
+            foreach (var demo in demos)
+            {
+                if (!string.IsNullOrWhiteSpace(demo.ParentEmail))
+                {
+                    try
+                    {
+                        var (subject, htmlBody) = await _emailTemplates.RenderAsync(
+                            "demo-cancelled-teacher-leave",
+                            new Dictionary<string, string>
+                            {
+                                ["ParentName"] = demo.ParentName,
+                                ["ChildName"] = demo.ChildName,
+                                ["TeacherName"] = teacherName,
+                                ["StartLocal"] = DateTimeDisplay.ToLocal(demo.Start),
+                            },
+                            cancellationToken);
+                        await _emailSender.SendAsync(demo.ParentEmail, subject, htmlBody, cancellationToken);
+                    }
+                    catch (Exception)
+                    {
+                        // Best-effort, same as every other reminder/alert fan-out in this method —
+                        // one failed lead email must not stop the rest or the staff alert below.
+                    }
+                }
+            }
+
             var rows = string.Join("", demos.Select(d =>
                 $"<li>{System.Net.WebUtility.HtmlEncode(d.ChildName)} (parent {System.Net.WebUtility.HtmlEncode(d.ParentName)}" +
                 $"{(string.IsNullOrWhiteSpace(d.ParentPhone) ? "" : ", " + System.Net.WebUtility.HtmlEncode(d.ParentPhone))}) — {DateTimeDisplay.ToLocal(d.Start)}</li>"));
             var body =
-                $"<p>{System.Net.WebUtility.HtmlEncode(teacherName)} is on leave, so these demo classes were cancelled:</p><ul>{rows}</ul>" +
-                "<p>Please reassign each demo to another teacher (or reschedule it) and let the parent know.</p>";
+                $"<p>{System.Net.WebUtility.HtmlEncode(teacherName)} is on leave, so these demo classes were cancelled (the parent/lead has already been emailed directly):</p><ul>{rows}</ul>" +
+                "<p>Please reassign each demo to another teacher (or reschedule it).</p>";
             var admissionStaff = await _unitOfWork.Repository<User>().Query()
                 .Where(u => (u.Role == UserRole.Admin || u.Role == UserRole.AdmissionTeam) && u.Status == UserStatus.Active)
                 .ToListAsync(cancellationToken);
@@ -1067,12 +1179,17 @@ namespace iucs.readernest.application.Services
                     // span (see LeaveRequestSession's own doc comment).
                     var sessionIds = leave.Sessions.Select(s => s.ClassSessionId).ToList();
                     affectedSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                        .Include(s => s.Batch)
                         .Where(s => sessionIds.Contains(s.Id) && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward))
                         .ToListAsync(cancellationToken);
                 }
                 else
                 {
+                    // Batch included — NotifyAffectedFamiliesAsync needs each cancelled
+                    // session's own batch name/time to tell each family exactly which of their
+                    // classes was cancelled, not just the leave's overall date range.
                     affectedSessions = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                        .Include(s => s.Batch)
                         .Where(s => s.TeacherProfileId == leave.TeacherProfileId
                             && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
                             && s.ScheduledStartAtUtc < leave.EndAtUtc
@@ -1081,12 +1198,19 @@ namespace iucs.readernest.application.Services
                 }
                 affectedCount = affectedSessions.Count;
 
+                // Who: the teacher on leave, and who approved it.
+                var teacherOnLeave = await _unitOfWork.Repository<User>().Query()
+                    .Include(u => u.RoleDefinition)
+                    .FirstAsync(u => u.TeacherProfile != null && u.TeacherProfile.Id == leave.TeacherProfileId, cancellationToken);
+                var approver = await CancelledBy.DescribeAsync(_unitOfWork, _currentUser.UserId, cancellationToken);
                 foreach (var session in affectedSessions)
                 {
                     session.Status = SessionStatus.Cancelled;
-                    session.CancellationReason = leave.IsClassWise
-                        ? $"Teacher on approved class-wise leave: {leave.Reason}"
-                        : $"Teacher on approved leave ({DateTimeDisplay.ToLocalDate(leave.StartAtUtc, "dd MMM yyyy")} – {DateTimeDisplay.ToLocalDate(leave.EndAtUtc, "dd MMM yyyy")}).";
+                    session.CancellationReason = CancelledBy.Reason(
+                        CancelledBy.Describe(teacherOnLeave),
+                        leave.IsClassWise
+                            ? $"teacher's class-wise leave, approved by {approver} — {leave.Reason}"
+                            : $"teacher's leave {DateTimeDisplay.ToLocalDate(leave.StartAtUtc, "dd MMM yyyy")} – {DateTimeDisplay.ToLocalDate(leave.EndAtUtc, "dd MMM yyyy")}, approved by {approver} — {leave.Reason}");
                 }
             }
 

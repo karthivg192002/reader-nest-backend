@@ -69,6 +69,38 @@ namespace iucs.readernest.application.Dto.Admission
     }
 
     /// <summary>
+    /// A lead with no demo class, so the counsellor can go straight to a payment link: a family
+    /// that wants to enroll without a demo, or a second child who sat in on a sibling's demo
+    /// (each child is its own lead, so each gets its own payment link, Enroll and details form).
+    /// </summary>
+    public class CreateDirectAdmissionLeadRequest
+    {
+        /// <summary>The demo/lead of the sibling this child sat in with. When set, the parent's
+        /// details are copied from it (so both children land on the same parent account) and the
+        /// parent fields below are ignored.</summary>
+        public Guid? SiblingOfBookingId { get; set; }
+
+        [MaxLength(200)]
+        public string? ParentName { get; set; }
+
+        /// <summary>Optional, as on a demo booking: blank means <see cref="ParentPhone"/> is the login.</summary>
+        [MaxLength(256)]
+        public string? ParentEmail { get; set; }
+
+        [MaxLength(20)]
+        public string? ParentPhone { get; set; }
+
+        [Required]
+        [MaxLength(200)]
+        public string ChildName { get; set; } = null!;
+
+        [Range(1, 18)]
+        public int? ChildAge { get; set; }
+
+        public Guid? DepartmentId { get; set; }
+    }
+
+    /// <summary>
     /// Corrects a booking's parent/child details (a mistyped email being the usual case) without
     /// touching its slot, teacher or pipeline stage — those have their own endpoints (reschedule,
     /// reassign, conversion-status). <see cref="Participants"/> replaces the extra-invitee list:

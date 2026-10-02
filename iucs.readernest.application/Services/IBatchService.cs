@@ -16,6 +16,12 @@ namespace iucs.readernest.application.Services
         Task<BatchDto> SetStatusAsync(Guid id, BatchStatus status, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Cancels every still-upcoming class of the batch in one go (the batch, its students and
+        /// history are kept), so staff can then generate a fresh schedule. Returns how many.
+        /// </summary>
+        Task<int> CancelUpcomingSessionsAsync(Guid id, Guid? cancelledByUserId, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Soft-deletes the batch (excluded from every future query via the global IsDeleted
         /// filter). Refused while it still has an active student — unlike Archive, a deleted
         /// batch disappears from every list rather than just changing status, which would strand

@@ -122,6 +122,8 @@ namespace iucs.readernest.application.Services
             Guid? teacherProfileId,
             CancellationToken cancellationToken = default)
         {
+            await RepriceZeroBatchEarningsAsync(teacherProfileId, cancellationToken);
+
             IQueryable<Payout> query = BaseQuery();
 
             if (year.HasValue)
@@ -156,6 +158,59 @@ namespace iucs.readernest.application.Services
             return await ListAsync(null, null, teacher.Id, cancellationToken);
         }
 
+        public async Task<TeacherEarningsSummaryDto> GetMyEarningsSummaryAsync(
+            Guid userId, int? year, int? month, CancellationToken cancellationToken = default)
+        {
+            var teacher = await _unitOfWork.Repository<TeacherProfile>()
+                .FirstOrDefaultAsync(t => t.UserId == userId, cancellationToken)
+                ?? throw new NotFoundException("No teacher profile is linked to the current account.");
+
+            var now = DateTime.UtcNow;
+            var periodYear = year ?? now.Year;
+            var periodMonth = month ?? now.Month;
+
+            await RepriceZeroBatchEarningsAsync(teacher.Id, cancellationToken);
+
+            var payout = await BaseQuery().FirstOrDefaultAsync(
+                p => p.TeacherProfileId == teacher.Id && p.PeriodYear == periodYear && p.PeriodMonth == periodMonth,
+                cancellationToken);
+
+            if (payout is null)
+            {
+                return new TeacherEarningsSummaryDto { PeriodYear = periodYear, PeriodMonth = periodMonth, TotalAmount = 0m, Batches = [] };
+            }
+
+            var batches = payout.Items
+                .Where(i => i.Type == PayoutItemType.SessionEarning)
+                .GroupBy(i => new
+                {
+                    BatchId = i.ClassSession?.BatchId,
+                    BatchName = i.ClassSession?.Batch?.Name ?? (i.ClassSession?.Type == SessionType.Demo ? "Demo class" : "Class session"),
+                    FlatRate = i.ClassSession?.Batch?.TeacherPayoutPerClass,
+                })
+                .Select(g => new TeacherBatchEarningsDto
+                {
+                    BatchId = g.Key.BatchId,
+                    BatchName = g.Key.BatchName,
+                    ClassesTaken = g.Count(),
+                    TotalEarned = g.Sum(i => i.Amount),
+                    // A per-minute-rate batch has no single fixed rate of its own -- the average
+                    // actually earned per class this month is the closest honest equivalent.
+                    RatePerClass = g.Key.FlatRate ?? (g.Count() > 0 ? Math.Round(g.Sum(i => i.Amount) / g.Count(), 2) : null),
+                })
+                .OrderByDescending(b => b.TotalEarned)
+                .ToList();
+
+            return new TeacherEarningsSummaryDto
+            {
+                PeriodYear = payout.PeriodYear,
+                PeriodMonth = payout.PeriodMonth,
+                Status = payout.Status,
+                TotalAmount = payout.TotalAmount,
+                Batches = batches,
+            };
+        }
+
         public async Task<PayoutItem> AccrueForSessionAsync(
             ClassSession session,
             PayoutItemType type,
@@ -165,10 +220,22 @@ namespace iucs.readernest.application.Services
             var sessionDate = DateOnly.FromDateTime(session.ScheduledStartAtUtc);
             var durationMinutes = (int)Math.Round((session.ScheduledEndAtUtc - session.ScheduledStartAtUtc).TotalMinutes);
 
+            // A batch created with its own flat per-class teacher payout (client requirement:
+            // "enter the teacher payout for that particular batch" at batch-creation time) prices
+            // every completed class in it at that flat amount instead of the per-minute rate
+            // card below — the two pricing models coexist per batch, never mixed for one session.
+            var batchFlatRate = session.BatchId.HasValue
+                ? await _unitOfWork.Repository<Batch>().Query()
+                    .Where(b => b.Id == session.BatchId.Value)
+                    .Select(b => b.TeacherPayoutPerClass)
+                    .FirstOrDefaultAsync(cancellationToken)
+                : null;
+
             // The rate effective on the session date: the teacher's own rate wins; teachers
             // without one are paid from the centre-wide default card (null teacher). Only
-            // when neither exists does a zero item accrue, so the gap is visible on the
-            // statement, never silent.
+            // when neither exists (and the batch has no flat rate either) does a zero item
+            // accrue, so the gap is visible on the statement, never silent. Still looked up even
+            // when a flat batch rate applies -- it's the source of the no-show penalty percentage.
             var rate = await _unitOfWork.Repository<PayoutRate>().Query()
                 .Where(r => r.TeacherProfileId == session.TeacherProfileId
                             && r.IsActive
@@ -183,12 +250,12 @@ namespace iucs.readernest.application.Services
                 .OrderByDescending(r => r.EffectiveFrom)
                 .FirstOrDefaultAsync(cancellationToken);
 
-            // Priced off the scheduled duration, not the teacher's actual attendance --
-            // a session's full rate is fixed the moment it's scheduled, so a dropped
-            // connection or early finish doesn't shrink pay on its own (that's what
+            // Priced off the scheduled duration/flat batch rate, not the teacher's actual
+            // attendance -- a session's full rate is fixed the moment it's scheduled, so a
+            // dropped connection or early finish doesn't shrink pay on its own (that's what
             // RequiresReview below is for; it flags the case for a human, never changes
             // the amount itself).
-            var sessionRate = Math.Round((rate?.RatePerMinute ?? 0m) * durationMinutes, 2);
+            var sessionRate = batchFlatRate ?? Math.Round((rate?.RatePerMinute ?? 0m) * durationMinutes, 2);
             var amount = type switch
             {
                 PayoutItemType.SessionEarning => sessionRate,
@@ -201,13 +268,13 @@ namespace iucs.readernest.application.Services
                 _ => 0m,
             };
 
-            if (rate is null)
+            if (rate is null && batchFlatRate is null)
             {
                 note = string.IsNullOrEmpty(note)
                     ? "No payout rate configured for this teacher."
                     : $"{note} (no payout rate configured for this teacher)";
             }
-            else if (type == PayoutItemType.TeacherNoShowDeduction && rate.TeacherNoShowPenaltyPercent != 100m)
+            else if (rate is not null && type == PayoutItemType.TeacherNoShowDeduction && rate.TeacherNoShowPenaltyPercent != 100m)
             {
                 note = $"{note} ({rate.TeacherNoShowPenaltyPercent:0.#}% of session rate)";
             }
@@ -298,7 +365,12 @@ namespace iucs.readernest.application.Services
                 ? session.ScheduledStartAtUtc
                 : joinedAtUtc;
             var minutes = (end - start).TotalMinutes;
-            return minutes <= 0 ? 0 : (int)Math.Round(minutes, MidpointRounding.AwayFromZero);
+            // Rounded UP to a whole minute: the join is stamped when the teacher's classroom
+            // connection is established (a few seconds to ~a minute after she clicks Start), so
+            // nearest-minute rounding turned "joined on time" into "1 min short" for any join
+            // 30+ seconds in (and a 29.4-minute class into 29). Only a FULL missing minute now
+            // counts as short -- a class that ran 28:00 of 30:00 is still 28 and still flagged.
+            return minutes <= 0 ? 0 : (int)Math.Ceiling(minutes - 0.0001);
         }
 
         public async Task NotifyPayoutReviewAsync(Guid payoutItemId, CancellationToken cancellationToken = default)
@@ -389,7 +461,10 @@ namespace iucs.readernest.application.Services
                 PayoutReviewDecision.Rejected => 0m,
                 _ => request.Amount ?? ProRate(fullAmount, item.ScheduledMinutes, item.DeliveredMinutes),
             };
-            if (request.Decision == PayoutReviewDecision.ApprovedPartial && (newAmount < 0 || newAmount > fullAmount))
+            // A class priced at 0 (no rate / batch payout configured when it was completed) has no
+            // "full amount" to cap a correction against, so the reviewer can enter what it is worth;
+            // the cap still applies to every class that was actually priced.
+            if (request.Decision == PayoutReviewDecision.ApprovedPartial && (newAmount < 0 || (fullAmount > 0 && newAmount > fullAmount)))
             {
                 throw new DomainValidationException($"A partial payout must be between 0 and the full amount ({fullAmount:0.00}).");
             }
@@ -715,6 +790,84 @@ namespace iucs.readernest.application.Services
             var payout = new Payout { TeacherProfileId = teacherProfileId, PeriodYear = year, PeriodMonth = month };
             await _unitOfWork.Repository<Payout>().AddAsync(payout, cancellationToken);
             return payout;
+        }
+
+        /// <summary>
+        /// A class's earning is frozen at the batch's flat rate the moment it completes, so a class
+        /// finished before the batch's per-class payout was entered accrued at 0 and stayed 0 even
+        /// after the rate was set (the teacher's Earnings page then showed "Rate 150, 4 classes,
+        /// earned 0"). Re-prices those items from the batch's current flat rate. Only still-Pending
+        /// payouts and only untouched SessionEarning items at exactly 0 (a reviewer's decision, or a
+        /// finalized/paid payout, is never overridden); idempotent, so safe to run on every read.
+        /// </summary>
+        private async Task RepriceZeroBatchEarningsAsync(Guid? teacherProfileId, CancellationToken cancellationToken)
+        {
+            var items = await _unitOfWork.Repository<PayoutItem>().TrackedQuery()
+                .Include(i => i.Payout)
+                .Include(i => i.ClassSession).ThenInclude(cs => cs!.Batch)
+                .Where(i => i.Type == PayoutItemType.SessionEarning
+                    && i.Amount == 0m
+                    && i.ReviewDecision == null
+                    && i.Payout.Status == PayoutStatus.Pending
+                    && (teacherProfileId == null || i.Payout.TeacherProfileId == teacherProfileId)
+                    && i.ClassSession != null)
+                .ToListAsync(cancellationToken);
+
+            if (items.Count == 0)
+            {
+                return;
+            }
+
+            // Per-minute rate cards, for zero items whose batch has no flat payout: the same
+            // "teacher's own rate wins, else the centre default, effective on the session date"
+            // lookup AccrueForSessionAsync uses.
+            var rates = await _unitOfWork.Repository<PayoutRate>().Query()
+                .Where(r => r.IsActive)
+                .ToListAsync(cancellationToken);
+
+            var changed = false;
+            foreach (var item in items)
+            {
+                var session = item.ClassSession!;
+                var flatRate = session.Batch?.TeacherPayoutPerClass;
+                decimal newAmount;
+                string source;
+                if (flatRate > 0m)
+                {
+                    newAmount = flatRate.Value;
+                    source = "the batch's per-class payout";
+                }
+                else
+                {
+                    var sessionDate = DateOnly.FromDateTime(session.ScheduledStartAtUtc);
+                    var rate = rates
+                        .Where(r => r.TeacherProfileId == item.Payout.TeacherProfileId && r.EffectiveFrom <= sessionDate)
+                        .OrderByDescending(r => r.EffectiveFrom).FirstOrDefault()
+                        ?? rates
+                            .Where(r => r.TeacherProfileId == null && r.EffectiveFrom <= sessionDate)
+                            .OrderByDescending(r => r.EffectiveFrom).FirstOrDefault();
+                    var minutes = (int)Math.Round((session.ScheduledEndAtUtc - session.ScheduledStartAtUtc).TotalMinutes);
+                    newAmount = Math.Round((rate?.RatePerMinute ?? 0m) * minutes, 2);
+                    source = "the per-minute rate card";
+                }
+
+                if (newAmount <= 0m)
+                {
+                    continue;
+                }
+
+                item.Amount = newAmount;
+                item.Note = string.IsNullOrEmpty(item.Note)
+                    ? $"Re-priced at {source}, set after this class was completed."
+                    : $"{item.Note} (re-priced at {source}, set after this class was completed)";
+                item.Payout.TotalAmount += newAmount;
+                changed = true;
+            }
+
+            if (changed)
+            {
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
         }
 
         private IQueryable<Payout> BaseQuery()

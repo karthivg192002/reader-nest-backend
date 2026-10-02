@@ -8,6 +8,9 @@ namespace iucs.readernest.application.Services
         /// <summary>Admin BI dashboard aggregates: students, revenue, conversion, occupancy, utilization.</summary>
         Task<DashboardSummaryDto> GetDashboardSummaryAsync(CancellationToken cancellationToken = default);
 
+        /// <summary>One staff member's own collections this and last month (IST), never the whole team's.</summary>
+        Task<MyCollectionsDto> GetMyCollectionsAsync(Guid userId, CancellationToken cancellationToken = default);
+
         /// <summary>CSV exports for the centralized reports (attendance | revenue | payouts | conversion).</summary>
         Task<string> ExportCsvAsync(string report, CancellationToken cancellationToken = default);
 
@@ -15,6 +18,14 @@ namespace iucs.readernest.application.Services
         /// BulkEmailBlast plus one BulkEmailRecipient row per recipient for the History view.</summary>
         Task<BulkEmailResultDto> SendBulkEmailAsync(
             Guid sentByUserId, BulkEmailRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>Queues the blast (Pending recipient rows) and returns immediately; delivery is
+        /// done by ProcessPendingBulkEmailAsync.</summary>
+        Task<BulkEmailResultDto> QueueBulkEmailAsync(
+            Guid sentByUserId, BulkEmailRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>Delivers all Pending bulk-email recipients; returns how many were attempted.</summary>
+        Task<int> ProcessPendingBulkEmailAsync(CancellationToken cancellationToken = default);
 
         /// <summary>Recipient count for the compose screen, resolved by the same rule the send uses.</summary>
         Task<BulkEmailResultDto> PreviewBulkEmailAsync(Guid? batchId, CancellationToken cancellationToken = default);

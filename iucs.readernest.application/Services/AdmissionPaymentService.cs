@@ -24,6 +24,10 @@ namespace iucs.readernest.application.Services
         Task<StartPublicAdmissionPaymentResultDto> StartPublicPaymentAsync(string token, StartPublicAdmissionPaymentRequest request, CancellationToken cancellationToken = default);
 
         Task<DemoBookingDto> VerifyAndEnrollAsync(Guid demoBookingId, CancellationToken cancellationToken = default);
+
+        /// <summary>For a first-time parent who still has to accept the Terms, the portal /pay link that shows
+        /// them before the gateway; null when no Terms are needed (the raw gateway link is fine then).</summary>
+        Task<PaymentLinkDto?> TermsFirstPayLinkAsync(Guid invoiceId, CancellationToken cancellationToken = default);
     }
 
     /// <summary>
@@ -166,7 +170,9 @@ namespace iucs.readernest.application.Services
             var shareMessage = string.Join("\n",
                 $"Hello {tracked.ParentName},",
                 "",
-                $"Thank you for attending the demo class. To confirm {tracked.ChildName}'s admission for {course.Name}, please complete the payment of {invoice.Currency} {amount:0.##} here:",
+                tracked.ClassSessionId is null
+                    ? $"Thank you for choosing The Reader Nest. To confirm {tracked.ChildName}'s admission for {course.Name}, please complete the payment of {invoice.Currency} {amount:0.##} here:"
+                    : $"Thank you for attending the demo class. To confirm {tracked.ChildName}'s admission for {course.Name}, please complete the payment of {invoice.Currency} {amount:0.##} here:",
                 tracked.PaymentLinkUrl,
                 "",
                 "You'll be asked to accept our Terms & Conditions before paying. Once we verify your payment, your login details will be emailed to you automatically.");
@@ -185,18 +191,18 @@ namespace iucs.readernest.application.Services
 
         public async Task<PublicAdmissionPaymentDto> GetPublicPaymentAsync(string token, CancellationToken cancellationToken = default)
         {
-            var booking = await LoadByTokenAsync(token, cancellationToken);
-            var invoice = booking.Invoice!;
+            var link = await LoadPayLinkAsync(token, cancellationToken);
+            var invoice = link.Invoice;
             return new PublicAdmissionPaymentDto
             {
-                ParentName = booking.ParentName,
-                ChildName = booking.ChildName,
-                CourseName = booking.Course?.Name ?? "Course",
+                ParentName = link.ParentName,
+                ChildName = link.ChildName,
+                CourseName = link.CourseName,
                 Amount = invoice.Amount,
                 AmountPaid = invoice.AmountPaid,
                 Currency = invoice.Currency,
                 IsPaid = invoice.Status == InvoiceStatus.Paid,
-                TermsRequired = await IsTermsRequiredAsync(booking, cancellationToken),
+                TermsRequired = await TermsRule.IsAcceptanceRequiredAsync(_unitOfWork, link.Parent, cancellationToken),
                 TermsUrl = await PolicySettings.GetAsync(_unitOfWork, PolicySettings.TermsUrlKey, cancellationToken),
                 TermsText = await PolicySettings.GetAsync(_unitOfWork, PolicySettings.TermsTextKey, cancellationToken),
             };
@@ -207,41 +213,69 @@ namespace iucs.readernest.application.Services
             StartPublicAdmissionPaymentRequest request,
             CancellationToken cancellationToken = default)
         {
-            var booking = await LoadByTokenAsync(token, cancellationToken);
-            var invoice = booking.Invoice!;
+            var link = await LoadPayLinkAsync(token, cancellationToken);
+            var invoice = link.Invoice;
             if (invoice.Status == InvoiceStatus.Paid)
             {
                 throw new DomainValidationException("This payment has already been completed. Thank you!");
             }
 
-            // Terms are only asked at the parent's FIRST payment; after that (this or a later
-            // admission, or Pay Now) they are never asked again.
-            if (await IsTermsRequiredAsync(booking, cancellationToken))
+            // Terms are only asked of a first-time parent, at their FIRST payment (TermsRule); after
+            // that (this or a later admission, or Pay Now) they are never asked again.
+            if (await TermsRule.IsAcceptanceRequiredAsync(_unitOfWork, link.Parent, cancellationToken))
             {
                 if (!request.TermsAccepted)
                 {
                     throw new DomainValidationException("Please accept the Terms & Conditions to continue with the payment.");
                 }
 
-                var tracked = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
-                    .FirstAsync(b => b.Id == booking.Id, cancellationToken);
-                tracked.TermsAcceptedAtUtc = DateTime.UtcNow;
-
-                var email = booking.ParentEmail.Trim().ToLowerInvariant();
-                var parentProfile = await _unitOfWork.Repository<ParentProfile>().TrackedQuery()
-                    .FirstOrDefaultAsync(p => p.User.Email == email, cancellationToken);
-                if (parentProfile is not null && parentProfile.TermsAcceptedAtUtc is null)
+                var acceptedAt = DateTime.UtcNow;
+                if (link.Booking is { } booking)
                 {
-                    parentProfile.TermsAcceptedAtUtc = tracked.TermsAcceptedAtUtc;
+                    var trackedBooking = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
+                        .FirstAsync(b => b.Id == booking.Id, cancellationToken);
+                    trackedBooking.TermsAcceptedAtUtc = acceptedAt;
+                }
+                if (link.Parent is { } parent)
+                {
+                    var trackedParent = await _unitOfWork.Repository<ParentProfile>().TrackedQuery()
+                        .FirstAsync(p => p.Id == parent.Id, cancellationToken);
+                    trackedParent.TermsAcceptedAtUtc ??= acceptedAt;
                 }
 
-                await _auditLog.StageAsync(AuditAction.Update, nameof(DemoBooking), tracked.Id.ToString(),
+                await _auditLog.StageAsync(AuditAction.Update, nameof(Invoice), invoice.Id.ToString(),
                     "{\"note\":\"Parent accepted the Terms & Conditions at their first payment\"}", cancellationToken);
                 await _unitOfWork.SaveChangesAsync(cancellationToken);
             }
 
-            var link = await _billingService.CreatePaymentLinkAsync(invoice.Id, cancellationToken);
-            return new StartPublicAdmissionPaymentResultDto { Url = link.Url };
+            var gatewayLink = await _billingService.CreatePaymentLinkAsync(invoice.Id, cancellationToken);
+            return new StartPublicAdmissionPaymentResultDto { Url = gatewayLink.Url };
+        }
+
+        public async Task<PaymentLinkDto?> TermsFirstPayLinkAsync(Guid invoiceId, CancellationToken cancellationToken = default)
+        {
+            var invoice = await _unitOfWork.Repository<Invoice>().Query()
+                .FirstOrDefaultAsync(i => i.Id == invoiceId, cancellationToken);
+            if (invoice is null || invoice.Status is InvoiceStatus.Paid or InvoiceStatus.Cancelled)
+            {
+                return null;
+            }
+
+            var parent = await _unitOfWork.Repository<ParentProfile>().Query()
+                .FirstOrDefaultAsync(p => p.Id == invoice.ParentProfileId, cancellationToken);
+            if (!await TermsRule.IsAcceptanceRequiredAsync(_unitOfWork, parent, cancellationToken))
+            {
+                return null;
+            }
+
+            return new PaymentLinkDto
+            {
+                InvoiceId = invoice.Id,
+                InvoiceNumber = invoice.InvoiceNumber,
+                Url = $"{BaseUrl()}/pay/{InvoicePayToken.Create(invoiceId, _configuration["Jwt:SigningKey"])}",
+                GatewayReference = string.Empty,
+                AmountDue = invoice.Amount - invoice.AmountPaid,
+            };
         }
 
         public async Task<DemoBookingDto> VerifyAndEnrollAsync(Guid demoBookingId, CancellationToken cancellationToken = default)
@@ -357,18 +391,6 @@ namespace iucs.readernest.application.Services
             return result;
         }
 
-        /// <summary>
-        /// Terms and Conditions are asked once, only of a parent enrolling for the first time (see
-        /// TermsRule): an existing parent who has paid before is never asked. Until the account exists
-        /// (it is made when the link is issued, so it normally does) the answer is "required".
-        /// </summary>
-        private async Task<bool> IsTermsRequiredAsync(DemoBooking booking, CancellationToken cancellationToken)
-        {
-            var email = booking.ParentEmail.Trim().ToLowerInvariant();
-            var parent = await _unitOfWork.Repository<ParentProfile>().Query()
-                .FirstOrDefaultAsync(p => p.User.Email == email, cancellationToken);
-            return await TermsRule.IsAcceptanceRequiredAsync(_unitOfWork, parent, cancellationToken);
-        }
 
         /// <summary>The parent's account (silent, no email) and profile, reused if one exists.</summary>
         private async Task<ParentProfile> EnsureParentProfileAsync(DemoBooking booking, CancellationToken cancellationToken)
@@ -400,6 +422,45 @@ namespace iucs.readernest.application.Services
             return await _unitOfWork.Repository<ParentProfile>().Query()
                 .FirstOrDefaultAsync(p => p.UserId == existing.Id, cancellationToken)
                 ?? throw new DomainValidationException("This parent account has no parent profile.");
+        }
+
+        /// <summary>Everything the public payment page needs, from either kind of /pay/{code} link.</summary>
+        private sealed record PayLink(Invoice Invoice, DemoBooking? Booking, ParentProfile? Parent, string ParentName, string ChildName, string CourseName);
+
+        private async Task<PayLink> LoadPayLinkAsync(string token, CancellationToken cancellationToken)
+        {
+            if (!string.IsNullOrWhiteSpace(token) && InvoicePayToken.LooksLikeInvoiceToken(token))
+            {
+                // A staff-shared invoice link (Payments, manual admission) for a first-time parent.
+                var invoiceId = InvoicePayToken.Read(token, _configuration["Jwt:SigningKey"])
+                    ?? throw new NotFoundException("This payment link is not valid.");
+                var invoice = await _unitOfWork.Repository<Invoice>().Query()
+                    .Include(i => i.Course)
+                    .Include(i => i.Child)
+                    .Include(i => i.ParentProfile).ThenInclude(p => p.User)
+                    .FirstOrDefaultAsync(i => i.Id == invoiceId, cancellationToken);
+                if (invoice is null || invoice.Status == InvoiceStatus.Cancelled)
+                {
+                    throw new NotFoundException("This payment link is no longer valid. Please ask your counsellor for a new one.");
+                }
+
+                var demo = await _unitOfWork.Repository<DemoBooking>().Query()
+                    .FirstOrDefaultAsync(b => b.InvoiceId == invoice.Id, cancellationToken);
+                return new PayLink(
+                    invoice,
+                    demo,
+                    invoice.ParentProfile,
+                    $"{invoice.ParentProfile.User.FirstName} {invoice.ParentProfile.User.LastName}".Trim(),
+                    invoice.Child is { } child ? $"{child.FirstName} {child.LastName}".Trim()
+                        : string.IsNullOrWhiteSpace(demo?.ChildName) ? "your child" : demo.ChildName,
+                    invoice.Course?.Name ?? "Course fee");
+            }
+
+            var booking = await LoadByTokenAsync(token, cancellationToken);
+            var email = booking.ParentEmail.Trim().ToLowerInvariant();
+            var bookingParent = await _unitOfWork.Repository<ParentProfile>().Query()
+                .FirstOrDefaultAsync(p => p.User.Email == email, cancellationToken);
+            return new PayLink(booking.Invoice!, booking, bookingParent, booking.ParentName, booking.ChildName, booking.Course?.Name ?? "Course");
         }
 
         private async Task<DemoBooking> LoadByTokenAsync(string token, CancellationToken cancellationToken)

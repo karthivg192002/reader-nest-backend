@@ -31,6 +31,9 @@ namespace iucs.readernest.application.Services
         // that without reopening an old, genuinely-over class to rejoining indefinitely.
         private static readonly TimeSpan RejoinGraceAfterCompleted = TimeSpan.FromMinutes(10);
 
+        /// <summary>How long after its scheduled end a teacher can still join her own class (matches the join button's grace).</summary>
+        private static readonly TimeSpan TeacherLateJoinGrace = TimeSpan.FromHours(3);
+
         private static readonly SessionStatus[] TerminalStatuses =
         [
             SessionStatus.Completed,
@@ -77,7 +80,8 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default)
         {
             var query = BaseQuery()
-                .Where(s => s.ScheduledStartAtUtc < toUtc && s.ScheduledEndAtUtc > fromUtc);
+                .Where(s => s.ScheduledStartAtUtc < toUtc && s.ScheduledEndAtUtc > fromUtc)
+                .Where(SessionVisibility.IsShownInSchedule);
 
             if (teacherProfileId.HasValue)
             {
@@ -125,14 +129,29 @@ namespace iucs.readernest.application.Services
             }
 
             var batchIds = dtos.Where(d => d.BatchId.HasValue).Select(d => d.BatchId!.Value).Distinct().ToList();
-            var namesByBatch = batchIds.Count == 0
-                ? new Dictionary<Guid, List<string>>()
-                : (await _unitOfWork.Repository<BatchEnrollment>().Query()
-                        .Where(e => batchIds.Contains(e.BatchId) && e.Status == EnrollmentStatus.Active)
-                        .Select(e => new { e.BatchId, e.Child.FirstName, e.Child.LastName })
-                        .ToListAsync(cancellationToken))
-                    .GroupBy(e => e.BatchId)
-                    .ToDictionary(g => g.Key, g => g.Select(e => $"{e.FirstName} {e.LastName}".Trim()).OrderBy(n => n).ToList());
+            var batchStudents = batchIds.Count == 0
+                ? []
+                : await _unitOfWork.Repository<BatchEnrollment>().Query()
+                    .Where(e => batchIds.Contains(e.BatchId) && e.Status == EnrollmentStatus.Active)
+                    .Select(e => new { e.BatchId, e.Child.FirstName, e.Child.LastName, ParentTimeZone = e.Child.ParentProfile.User.TimeZoneId })
+                    .ToListAsync(cancellationToken);
+            var namesByBatch = batchStudents
+                .GroupBy(e => e.BatchId)
+                .ToDictionary(g => g.Key, g => g.Select(e => $"{e.FirstName} {e.LastName}".Trim()).OrderBy(n => n).ToList());
+            // Reported live: staff schedule in India time, and an early-morning IST slot is the
+            // previous evening for a family in the Americas -- the parent saw classes on different
+            // days than agreed and staff couldn't see it. Staff views show the family's own local
+            // day/time from this.
+            var zonesByBatch = batchStudents
+                .GroupBy(e => e.BatchId)
+                .ToDictionary(g => g.Key, g => g.Select(e => e.ParentTimeZone).Where(z => !string.IsNullOrWhiteSpace(z)).Distinct().ToList());
+            foreach (var dto in dtos)
+            {
+                if (dto.BatchId is { } id && zonesByBatch.TryGetValue(id, out var zones))
+                {
+                    dto.ParentTimeZones = zones;
+                }
+            }
 
             var demoIds = dtos.Where(d => d.Type == SessionType.Demo).Select(d => d.Id).ToList();
             var demosBySession = demoIds.Count == 0
@@ -380,7 +399,8 @@ namespace iucs.readernest.application.Services
             }
 
             session.Status = SessionStatus.Cancelled;
-            session.CancellationReason = request.Reason;
+            session.CancellationReason = CancelledBy.Reason(
+                await CancelledBy.DescribeAsync(_unitOfWork, _currentUser.UserId, cancellationToken), request.Reason);
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
@@ -513,8 +533,9 @@ namespace iucs.readernest.application.Services
                 // of the course (after the batch's last scheduled class), skipping holidays and the
                 // batch's other classes.
                 session.Status = SessionStatus.Cancelled;
-                var storedReason = $"Cancelled by parent ({parentName}): {reason}";
-                session.CancellationReason = storedReason.Length <= 500 ? storedReason : storedReason[..500];
+                session.CancellationReason = isGroupClass
+                    ? CancelledBy.Reason("every parent in the group", $"last to cancel was {parentName} — {reason}")
+                    : CancelledBy.Reason($"{parentName} (Parent)", reason);
 
                 var duration = session.ScheduledEndAtUtc - session.ScheduledStartAtUtc;
                 var lastClassStart = await _unitOfWork.Repository<ClassSession>().Query()
@@ -992,12 +1013,18 @@ namespace iucs.readernest.application.Services
             // CarriedForward) for what's really one class slot — confirmed live across 19
             // batches. Fetched once for the window rather than queried per candidate day, same
             // as the holiday lookup above.
-            var windowEndExclusive = windowEnd.ToDateTime(TimeOnly.MinValue).AddDays(1);
+            // Both bounds MUST be DateTimeKind.Utc: PostgreSQL's driver refuses an Unspecified
+            // DateTime against a timestamptz column and throws before anything is saved. Reported
+            // live as "Couldn't cancel the class -- something went wrong on our side": every
+            // parent cancellation (and every no-show carry-forward) failed right here. SQLite, used
+            // by the tests, accepts either kind, which is how this slipped through.
+            var windowStartUtc = windowStart.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+            var windowEndExclusive = windowEnd.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc).AddDays(1);
             var batchSessions = batchId is null
                 ? new List<DateTime[]>()
                 : await _unitOfWork.Repository<ClassSession>().Query()
                     .Where(s => s.BatchId == batchId
-                        && s.ScheduledStartAtUtc >= windowStart.ToDateTime(TimeOnly.MinValue)
+                        && s.ScheduledStartAtUtc >= windowStartUtc
                         && s.ScheduledStartAtUtc < windowEndExclusive)
                     .Select(s => new[] { s.ScheduledStartAtUtc, s.ScheduledEndAtUtc })
                     .ToListAsync(cancellationToken);
@@ -1489,7 +1516,7 @@ namespace iucs.readernest.application.Services
                 foreach (var session in remainingSessions)
                 {
                     session.Status = SessionStatus.Cancelled;
-                    session.CancellationReason = "Schedule adjusted";
+                    session.CancellationReason = SessionVisibility.ScheduleAdjustedReason;
                 }
 
                 var sessionRepository = _unitOfWork.Repository<ClassSession>();
@@ -1903,10 +1930,22 @@ namespace iucs.readernest.application.Services
             // hasn't opened for joining yet." on anything more than 10 minutes away. A genuine
             // participant (Teacher/Parent) still only gets the real join window.
             var isMonitor = user.Role is UserRole.Admin or UserRole.SubAdmin or UserRole.AdmissionTeam;
+            // Client (reported live, repeatedly): Join must be open "at all times for everyone" --
+            // teachers and parents (staff monitors already had no window). A genuine participant
+            // (checked above) can join any time before the class and until 3 hours after its end,
+            // even once the system auto-marked it. Only a class that was cancelled or moved is closed.
+            var isParticipant = !isMonitor;
             var now = DateTime.UtcNow;
-            if (!isMonitor && now < session.ScheduledStartAtUtc.AddMinutes(-10))
+            if (isParticipant)
             {
-                throw new DomainValidationException("This class hasn't opened for joining yet.");
+                if (session.Status is SessionStatus.Cancelled or SessionStatus.Rescheduled)
+                {
+                    throw new DomainValidationException("This class was cancelled or moved, so it can't be joined.");
+                }
+                if (now > session.ScheduledEndAtUtc + TeacherLateJoinGrace && session.Status != SessionStatus.InProgress)
+                {
+                    throw new DomainValidationException("This class has already ended.");
+                }
             }
             // This deployment's Jitsi has no duration cap (see docs/LONG_DURATION_SESSIONS.md) and
             // JitsiLive.tsx's own "Continue Class" flow exists specifically so classes can legitimately
@@ -1917,7 +1956,7 @@ namespace iucs.readernest.application.Services
             // keeps the original cutoff so a stale/abandoned booking can't be joined indefinitely.
             var withinCompletedGrace = session.Status == SessionStatus.Completed
                 && now <= (session.ActualEndAtUtc ?? session.ScheduledEndAtUtc) + RejoinGraceAfterCompleted;
-            if (!isMonitor && !withinCompletedGrace && session.Status != SessionStatus.InProgress && now > session.ScheduledEndAtUtc)
+            if (!isMonitor && !isParticipant && !withinCompletedGrace && session.Status != SessionStatus.InProgress && now > session.ScheduledEndAtUtc)
             {
                 throw new DomainValidationException("This class has already ended.");
             }
@@ -1985,6 +2024,8 @@ namespace iucs.readernest.application.Services
                 IsDemo = session.Type == SessionType.Demo,
                 DisplayName = $"{user.FirstName} {user.LastName}".Trim(),
                 IsMonitor = isMonitor,
+                IsSessionTeacher = user.Role == UserRole.Teacher
+                    && await _unitOfWork.Repository<TeacherProfile>().ExistsAsync(t => t.Id == session.TeacherProfileId && t.UserId == user.Id, cancellationToken),
                 StaffNames = staffNames,
             };
         }

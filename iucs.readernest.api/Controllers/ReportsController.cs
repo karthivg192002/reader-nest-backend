@@ -28,6 +28,16 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _reportsService.GetDashboardSummaryAsync(cancellationToken));
         }
 
+        /// <summary>The caller's own collections (an admission counselor's dashboard figure) --
+        /// only ever their own, so no module permission is needed beyond being signed in staff.</summary>
+        [HttpGet("my-collections")]
+        [Authorize(Roles = $"{nameof(UserRole.AdmissionTeam)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.Admin)}")]
+        public async Task<ActionResult<MyCollectionsDto>> MyCollections(CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _reportsService.GetMyCollectionsAsync(userId, cancellationToken));
+        }
+
         /// <summary>CSV export: attendance | revenue | payouts | conversion.</summary>
         [HttpGet("export/{report}")]
         [HasPermission(PermissionModule.ReportsAnalytics, PermissionAction.View)]
@@ -59,20 +69,23 @@ namespace iucs.readernest.api.Controllers
     public class CommunicationsController : ControllerBase
     {
         private readonly IReportsService _reportsService;
-
         public CommunicationsController(IReportsService reportsService)
         {
             _reportsService = reportsService;
         }
 
-        /// <summary>Bulk email to all active parents, or scoped to one batch.</summary>
+        /// <summary>
+        /// Bulk email to all active parents, or scoped to one batch. Queued: this only records
+        /// the blast and its Pending recipients and answers at once; BulkEmailQueueBackgroundService
+        /// delivers them, and Bulk Email History shows progress.
+        /// </summary>
         [HttpPost("bulk-email")]
         [HasPermission(PermissionModule.Communication, PermissionAction.Create)]
         public async Task<ActionResult<BulkEmailResultDto>> BulkEmail(
             BulkEmailRequest request,
             CancellationToken cancellationToken)
         {
-            return Ok(await _reportsService.SendBulkEmailAsync(UserId(), request, cancellationToken));
+            return Ok(await _reportsService.QueueBulkEmailAsync(UserId(), request, cancellationToken));
         }
 
         /// <summary>Live recipient count for the compose screen (same rule as the send).</summary>

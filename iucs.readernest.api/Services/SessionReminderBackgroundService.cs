@@ -73,8 +73,33 @@ namespace iucs.readernest.api.Services
                             && s.ScheduledStartAtUtc < windowEnd)
                 .ToListAsync(cancellationToken);
 
+            // Reported live: parents saw a class as cancelled yet got "your class starts in one
+            // hour". A class whose teacher has leave still awaiting review is about to be
+            // cancelled, so no reminder goes out for it (approval cancels it; if rejected, it runs).
+            // Approved leave counts too: approval cancels the sessions that existed at the time, but
+            // a session created inside an approved window afterwards (schedule extended/adjusted,
+            // make-up or carry-forward landing there) is still Scheduled while its teacher is away.
+            if (upcoming.Count > 0)
+            {
+                var pendingLeaves = await unitOfWork.Repository<LeaveRequest>().Query()
+                    .Where(l => l.Status == LeaveStatus.Pending || l.Status == LeaveStatus.Approved)
+                    .Select(l => new { l.TeacherProfileId, l.IsClassWise, l.StartAtUtc, l.EndAtUtc, SessionIds = l.Sessions.Select(x => x.ClassSessionId).ToList() })
+                    .ToListAsync(cancellationToken);
+                if (pendingLeaves.Count > 0)
+                {
+                    upcoming = upcoming
+                        .Where(s => !pendingLeaves.Any(l => l.IsClassWise
+                            ? l.SessionIds.Contains(s.Id)
+                            : l.TeacherProfileId == s.TeacherProfileId && l.StartAtUtc < s.ScheduledEndAtUtc && l.EndAtUtc > s.ScheduledStartAtUtc))
+                        .ToList();
+                }
+            }
+
             var demoBookingsBySessionId = new Dictionary<Guid, DemoBooking>();
             var parentUsersByBatchId = new Dictionary<Guid, List<User>>();
+            // Parents whose every child in the class is marked absent (they cancelled a group class
+            // for their child, so their portal shows it as cancelled) get no reminder for it.
+            var absentParentsBySessionId = new Dictionary<Guid, HashSet<Guid>>();
             if (upcoming.Count > 0)
             {
                 // Both recipient lookups are resolved for the whole window up front. Done
@@ -94,13 +119,34 @@ namespace iucs.readernest.api.Services
                 {
                     var enrolments = await unitOfWork.Repository<BatchEnrollment>().Query()
                         .Where(e => batchIds.Contains(e.BatchId) && e.Status == EnrollmentStatus.Active)
-                        .Select(e => new { e.BatchId, User = e.Child.ParentProfile.User })
+                        .Select(e => new { e.BatchId, e.ChildId, User = e.Child.ParentProfile.User })
                         .ToListAsync(cancellationToken);
                     parentUsersByBatchId = enrolments
                         .GroupBy(e => e.BatchId)
                         .ToDictionary(
                             g => g.Key,
                             g => g.Select(e => e.User).DistinctBy(u => u.Id).ToList());
+
+                    var batchSessionIds = upcoming.Where(s => s.BatchId is not null).Select(s => s.Id).ToList();
+                    var absent = (await unitOfWork.Repository<SessionAttendance>().Query()
+                            .Where(a => batchSessionIds.Contains(a.ClassSessionId) && a.ChildId != null && a.Status == AttendanceStatus.Absent)
+                            .Select(a => new { a.ClassSessionId, ChildId = a.ChildId!.Value })
+                            .ToListAsync(cancellationToken))
+                        .ToLookup(a => a.ClassSessionId, a => a.ChildId);
+                    foreach (var session in upcoming.Where(s => s.BatchId is not null && absent.Contains(s.Id)))
+                    {
+                        var absentChildren = absent[session.Id].ToHashSet();
+                        var absentParents = enrolments
+                            .Where(e => e.BatchId == session.BatchId)
+                            .GroupBy(e => e.User.Id)
+                            .Where(g => g.All(e => absentChildren.Contains(e.ChildId)))
+                            .Select(g => g.Key)
+                            .ToHashSet();
+                        if (absentParents.Count > 0)
+                        {
+                            absentParentsBySessionId[session.Id] = absentParents;
+                        }
+                    }
                 }
             }
 
@@ -114,8 +160,20 @@ namespace iucs.readernest.api.Services
                 // one bad recipient abort the batch.
                 try
                 {
+                    // The list above is a snapshot from the start of this cycle; re-check the live
+                    // status so a class cancelled in the meantime (teacher leave approved, parent
+                    // cancelled, rescheduled) never still gets its "starts in one hour" email.
+                    var liveStatus = await unitOfWork.Repository<ClassSession>().Query()
+                        .Where(s => s.Id == session.Id)
+                        .Select(s => (SessionStatus?)s.Status)
+                        .FirstOrDefaultAsync(cancellationToken);
+                    if (liveStatus is not (SessionStatus.Scheduled or SessionStatus.CarriedForward))
+                    {
+                        continue;
+                    }
+
                     await SendRemindersForSessionAsync(
-                        session, demoBookingsBySessionId, parentUsersByBatchId,
+                        session, demoBookingsBySessionId, parentUsersByBatchId, absentParentsBySessionId.GetValueOrDefault(session.Id),
                         notifications, emailTemplates, emailSender, sessionService, configuration, cancellationToken);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -179,6 +237,7 @@ namespace iucs.readernest.api.Services
             ClassSession session,
             Dictionary<Guid, DemoBooking> demoBookingsBySessionId,
             Dictionary<Guid, List<User>> parentUsersByBatchId,
+            HashSet<Guid>? absentParentIds,
             INotificationService notifications,
             IEmailTemplateService emailTemplates,
             IEmailSender emailSender,
@@ -241,6 +300,11 @@ namespace iucs.readernest.api.Services
             var appJoinUrl = $"{frontendBaseUrl}/parent/live/{session.Id}";
             foreach (var parent in parentUsers)
             {
+                if (absentParentIds is not null && absentParentIds.Contains(parent.Id))
+                {
+                    continue; // their child is marked absent: the class is cancelled for them
+                }
+
                 await notifications.SendTemplatedEmailAsync(
                     parent.Id, parent.Email, NotificationType.SessionReminder,
                     "session-reminder-parent",

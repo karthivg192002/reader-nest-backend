@@ -37,6 +37,7 @@ namespace iucs.readernest.application
             services.AddScoped<IGamificationService, GamificationService>();
             services.AddScoped<IBillingService, BillingService>();
             services.AddScoped<IPayoutService, PayoutService>();
+            services.AddScoped<IStaffPayoutService, StaffPayoutService>();
             services.AddScoped<IProgressReportService, ProgressReportService>();
             services.AddScoped<IParentFeedbackService, ParentFeedbackService>();
             services.AddScoped<IResourceFolderService, ResourceFolderService>();

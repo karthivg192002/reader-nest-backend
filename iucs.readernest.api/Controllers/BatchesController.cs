@@ -79,6 +79,20 @@ namespace iucs.readernest.api.Controllers
         /// already has sessions, where GenerateSchedule above refuses to run. Only still-upcoming
         /// sessions are touched; anything already completed/in progress is untouched.
         /// </summary>
+        /// <summary>
+        /// Cancels all of the batch's upcoming classes at once, keeping the batch, its students and
+        /// its history — the alternative to deleting and recreating a batch to change its schedule.
+        /// A fresh schedule can then be generated from Manage.
+        /// </summary>
+        [HttpPost("{id:guid}/cancel-upcoming")]
+        [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Edit)]
+        public async Task<ActionResult<object>> CancelUpcoming(Guid id, CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var cancelled = await _batchService.CancelUpcomingSessionsAsync(id, userId, cancellationToken);
+            return Ok(new { cancelled });
+        }
+
         [HttpPut("{id:guid}/schedule")]
         [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Edit)]
         public async Task<ActionResult<IReadOnlyList<ClassSessionDto>>> UpdateFutureSchedule(

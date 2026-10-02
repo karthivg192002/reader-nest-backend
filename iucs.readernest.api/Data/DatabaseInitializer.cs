@@ -56,6 +56,7 @@ namespace iucs.readernest.api.Data
             await EnsureItAdminMenuAsync(context);
             await EnsureExecutiveMenuAsync(context);
             await RelabelExecutiveDashboardMenuAsync(context);
+            await RelabelTeacherPayoutMenuAsync(context);
             await EnsureBulkEmailHistoryMenuAsync(context);
             await BackfillMenuRequiredModulesAsync(context);
             await SeedIntegrationsAsync(context);
@@ -64,6 +65,8 @@ namespace iucs.readernest.api.Data
             await EnsureJitsiAutoRecordConfigAsync(context);
             await SeedEmailTemplatesAsync(context);
             await ReconcileJoinLinkEmailTemplatesAsync(context);
+            await ReconcileLeaveNotifyParentEmailTemplateAsync(context);
+            await EnsureDemoCancelledLeaveEmailTemplateAsync(context);
             await ReconcileWelcomeCredentialsPinTemplateAsync(context);
             await EnsureEmailTemplatesMenuAsync(context);
             await EnsureProgressReportEmailTemplateAsync(context);
@@ -75,6 +78,7 @@ namespace iucs.readernest.api.Data
             await EnsureSupportTicketMenusAsync(context);
             await EnsurePayoutApprovalsMenusAsync(context);
             await EnsureStaffLeaveMenusAsync(context);
+            await EnsureStaffPayrollMenusAsync(context);
             await EnsureAccessRequestEmailTemplatesAsync(context);
             await EnsurePaymentPlanReminderEmailTemplatesAsync(context);
             await ReconcileOrgNameEmailTemplatesAsync(context);
@@ -92,8 +96,75 @@ namespace iucs.readernest.api.Data
             await SeedChatFaqsAsync(context);
             await EnsureAdditionalChatFaqsAsync(context);
             await BackfillPlainTextNotificationBodiesAsync(context);
+            await EnsurePresetPortalModuleMenusAsync(context);
 
             await context.SaveChangesAsync();
+        }
+
+        /// <summary>
+        /// Reported live: "I give permission but the menu doesn't show." The Coordinator,
+        /// Admission and Management portals were seeded with only their own handful of screens,
+        /// so granting one of them a module those screens don't cover (Parent Tickets, Batches,
+        /// Billing, ...) changed nothing they could see -- every page was already routed there,
+        /// just never linked. Copies the RM portal's module-gated items into each of these
+        /// portals for every module the portal has no item for yet; the menu endpoint still
+        /// hides anything the person's grants don't include, so nothing appears ungranted.
+        /// Modules a portal already covers with its own tailored screen (e.g. Admission's
+        /// Payment Tracking for Billing) are left alone, so existing menus don't change.
+        /// Runs last so every earlier step's additions are visible. Idempotent per path.
+        /// </summary>
+        public static async Task EnsurePresetPortalModuleMenusAsync(ReaderNestDbContext context)
+        {
+            string[] portals = ["coordinator", "admission", "management"];
+            await context.MenuItems.Where(m => m.Portal == "subadmin" || portals.Contains(m.Portal)).LoadAsync();
+            var local = context.MenuItems.Local;
+
+            var source = local
+                .Where(m => m.Portal == "subadmin" && m.IsActive && m.RequiredModule != null)
+                .OrderBy(m => m.SectionOrder).ThenBy(m => m.SortOrder)
+                .ToList();
+
+            foreach (var portal in portals)
+            {
+                var existing = local.Where(m => m.Portal == portal).ToList();
+                var coveredModules = existing.Where(m => m.RequiredModule != null).Select(m => m.RequiredModule!).ToHashSet();
+                var sectionOrders = existing
+                    .Where(m => m.Section != null)
+                    .GroupBy(m => m.Section!)
+                    .ToDictionary(g => g.Key, g => g.Min(m => m.SectionOrder));
+                var nextSectionOrder = existing.Count == 0 ? 1 : existing.Max(m => m.SectionOrder) + 1;
+
+                foreach (var item in source)
+                {
+                    var path = $"/{portal}{item.Path["/subadmin".Length..]}";
+                    if (coveredModules.Contains(item.RequiredModule!) || existing.Any(m => m.Path == path))
+                    {
+                        continue;
+                    }
+
+                    var section = item.Section ?? "More";
+                    if (!sectionOrders.TryGetValue(section, out var sectionOrder))
+                    {
+                        sectionOrder = nextSectionOrder++;
+                        sectionOrders[section] = sectionOrder;
+                    }
+
+                    var copy = new MenuItem
+                    {
+                        Portal = portal,
+                        Section = section,
+                        SectionOrder = sectionOrder,
+                        Label = item.Label,
+                        Path = path,
+                        Icon = item.Icon,
+                        SortOrder = existing.Where(m => m.Section == section).Select(m => m.SortOrder + 1).DefaultIfEmpty(0).Max(),
+                        IsActive = true,
+                        RequiredModule = item.RequiredModule,
+                    };
+                    context.MenuItems.Add(copy);
+                    existing.Add(copy);
+                }
+            }
         }
 
         private static async Task SeedAdminAsync(
@@ -387,11 +458,19 @@ namespace iucs.readernest.api.Data
             // RoleDefinition. Preloaded once for every role in `additions`, even non-Sub-Admin
             // ones (teacher/parent/admission), where this query simply returns nothing since
             // no user is both that role's assignee and UserRole.SubAdmin.
+            // A Sub Admin with no role assigned at all lands on the Relationship Manager portal
+            // (MenuService.ResolvePortalAsync), so it gets that preset's required grants too --
+            // otherwise an older RM account created before role presets existed never heals.
             var roleIds = roles.Select(r => r.Id).ToList();
-            var subAdminUserIds = await context.Users
-                .Where(u => u.Role == UserRole.SubAdmin && u.RoleDefinitionId.HasValue && roleIds.Contains(u.RoleDefinitionId.Value))
-                .Select(u => new { u.Id, u.RoleDefinitionId })
-                .ToListAsync();
+            var relationshipManagerRoleId = roles.FirstOrDefault(r => r.Name == "sub-admin")?.Id;
+            var subAdminUserIds = (await context.Users
+                    .Where(u => u.Role == UserRole.SubAdmin
+                                && (u.RoleDefinitionId == null || roleIds.Contains(u.RoleDefinitionId.Value)))
+                    .Select(u => new { u.Id, u.RoleDefinitionId })
+                    .ToListAsync())
+                .Select(u => new { u.Id, RoleDefinitionId = u.RoleDefinitionId ?? relationshipManagerRoleId })
+                .Where(u => u.RoleDefinitionId.HasValue)
+                .ToList();
             var existingSubAdminGrants = await context.SubAdminPermissions
                 .Where(p => subAdminUserIds.Select(u => u.Id).Contains(p.UserId))
                 .ToListAsync();
@@ -567,6 +646,22 @@ namespace iucs.readernest.api.Data
         }
 
         /// <summary>
+        /// One-time relabel: the teacher's "/teacher/payout" menu item was seeded as "My Payout"
+        /// before the client asked for it to read "My Earnings" (the batch-wise breakdown is the
+        /// same page, PayoutsController.MineSummary just added a new endpoint it now also calls).
+        /// Only touches a row still carrying the old default label, so a title a teacher's admin
+        /// already customised via Menu Manager is left alone.
+        /// </summary>
+        private static async Task RelabelTeacherPayoutMenuAsync(ReaderNestDbContext context)
+        {
+            var item = await context.MenuItems.FirstOrDefaultAsync(m => m.Portal == "teacher" && m.Path == "/teacher/payout");
+            if (item is not null && item.Label == "My Payout")
+            {
+                item.Label = "My Earnings";
+            }
+        }
+
+        /// <summary>
         /// (portal, section, label, path, lucide icon, required module); orders derive from
         /// array position. Shared by the first-boot seed and the existing-database backfill
         /// so the module mapping lives in exactly one place. A null module means the item is
@@ -614,7 +709,7 @@ namespace iucs.readernest.api.Data
             ("teacher", "Teaching", "Demo Feedback", "/teacher/demo-feedback", "ClipboardCheck", PermissionModule.SessionCalendarManagement.ToString()),
             ("teacher", "Teaching", "Student Doubts", "/teacher/doubts", "MessageCircleQuestion", PermissionModule.Communication.ToString()),
             ("teacher", "My Account", "Leave Management", "/teacher/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
-            ("teacher", "My Account", "My Payout", "/teacher/payout", "Banknote", PermissionModule.Payouts.ToString()),
+            ("teacher", "My Account", "My Earnings", "/teacher/payout", "Banknote", PermissionModule.Payouts.ToString()),
             ("teacher", "My Account", "Resources", "/teacher/resources", "FolderOpen", PermissionModule.ContentAccessManagement.ToString()),
             ("parent", null, "Dashboard", "/parent", "LayoutDashboard", null),
             ("parent", "Learning", "Schedule & Live Class", "/parent/schedule", "CalendarClock", PermissionModule.SessionCalendarManagement.ToString()),
@@ -2486,6 +2581,9 @@ namespace iucs.readernest.api.Data
         /// <summary>
         /// Staff leave, for a DB seeded before it existed: "My Leave" (always visible) in each
         /// admin-team portal, and "Staff Leave" review for Admin / Founder, gated on UserManagement.
+        /// Admin also gets its own "My Leave" (client requirement: Admin can apply for leave too,
+        /// alongside the "Staff Leave" review screen it already had) — reviewed only by Management,
+        /// never by another Admin (StaffLeaveService.ReviewAsync's own carve-out).
         /// </summary>
         private static async Task EnsureStaffLeaveMenusAsync(ReaderNestDbContext context)
         {
@@ -2497,6 +2595,16 @@ namespace iucs.readernest.api.Data
                 ("management", "/management/sessions", "My Leave", "my-leave", null),
                 ("admin", "/admin/leave", "Staff Leave", "staff-leave", PermissionModule.UserManagement.ToString()),
                 ("executive", "/executive/leave", "Staff Leave", "staff-leave", PermissionModule.UserManagement.ToString()),
+                ("admin", "/admin/staff-leave", "My Leave", "my-leave", (string?)null),
+                ("executive", "/executive/staff-leave", "My Leave", "my-leave", null),
+                // Teacher-leave review for the Sub Admin-type portals. Coordinator's preset has always
+                // held LeaveManagement view+approve ("leave approval"), but only Admin/IT Admin/
+                // Executive had a screen to use it on. Gated on the module, so it shows only for
+                // accounts actually granted LeaveManagement.
+                ("subadmin", "/subadmin/my-leave", "Leave Management", "leave", PermissionModule.LeaveManagement.ToString()),
+                ("admission", "/admission/my-leave", "Leave Management", "leave", PermissionModule.LeaveManagement.ToString()),
+                ("coordinator", "/coordinator/my-leave", "Leave Management", "leave", PermissionModule.LeaveManagement.ToString()),
+                ("management", "/management/my-leave", "Leave Management", "leave", PermissionModule.LeaveManagement.ToString()),
             })
             {
                 var path = $"/{portal}/{slug}";
@@ -2521,6 +2629,55 @@ namespace iucs.readernest.api.Data
                     Label = label,
                     Path = path,
                     Icon = "CalendarOff",
+                    SortOrder = anchor.SortOrder + 1,
+                    IsActive = true,
+                    RequiredModule = module,
+                });
+            }
+        }
+
+        /// <summary>
+        /// Staff pay (client requirement — fixed salary for Coordinator/Relationship
+        /// Manager/Admin, collection percentage for Admission): "My Salary" (self-view, always
+        /// visible) in every admin-team portal including Admin/Founder, and "Staff Payroll" (set
+        /// / edit amounts) for Admin and Founder only, gated on Payouts.
+        /// </summary>
+        private static async Task EnsureStaffPayrollMenusAsync(ReaderNestDbContext context)
+        {
+            foreach (var (portal, anchorPath, label, slug, module) in new[]
+            {
+                ("subadmin", "/subadmin/my-leave", "My Salary", "my-salary", (string?)null),
+                ("admission", "/admission/my-leave", "My Salary", "my-salary", null),
+                ("coordinator", "/coordinator/my-leave", "My Salary", "my-salary", null),
+                ("management", "/management/my-leave", "My Salary", "my-salary", null),
+                ("admin", "/admin/my-leave", "My Salary", "my-salary", null),
+                ("executive", "/executive/my-leave", "My Salary", "my-salary", null),
+                ("admin", "/admin/payout-approvals", "Staff Payroll", "staff-payroll", PermissionModule.Payouts.ToString()),
+                ("executive", "/executive/payout-approvals", "Staff Payroll", "staff-payroll", PermissionModule.Payouts.ToString()),
+            })
+            {
+                var path = $"/{portal}/{slug}";
+                if (context.MenuItems.Local.Any(m => m.Portal == portal && m.Path == path) ||
+                    await context.MenuItems.AnyAsync(m => m.Portal == portal && m.Path == path))
+                {
+                    continue;
+                }
+
+                var anchor = context.MenuItems.Local.FirstOrDefault(m => m.Portal == portal && m.Path == anchorPath)
+                    ?? await context.MenuItems.FirstOrDefaultAsync(m => m.Portal == portal && m.Path == anchorPath);
+                if (anchor is null)
+                {
+                    continue;
+                }
+
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = portal,
+                    Section = anchor.Section,
+                    SectionOrder = anchor.SectionOrder,
+                    Label = label,
+                    Path = path,
+                    Icon = "Wallet",
                     SortOrder = anchor.SortOrder + 1,
                     IsActive = true,
                     RequiredModule = module,
@@ -2702,6 +2859,62 @@ namespace iucs.readernest.api.Data
                 existing.HtmlBody = seed.HtmlBody;
                 existing.PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders);
             }
+        }
+
+        /// <summary>
+        /// SeedEmailTemplatesAsync is insert-only, so a live DB never picks up template text
+        /// changes on its own. Client-reported confusion: a parent who already got the 1-hour
+        /// SessionReminderBackgroundService reminder for a class, then had it cancelled by the
+        /// teacher's leave, got only a vague "on leave {{Window}}... will be rescheduled" email —
+        /// no mention of which class, and "rescheduled" isn't even what actually happens (unlike
+        /// a parent's own cancellation, a teacher-leave cancellation doesn't auto-create a make-up
+        /// session; NotifyAffectedFamiliesAsync's own doc comment has the detail). Replaces it
+        /// with one naming each family's own cancelled class(es) by name/time. Skips any row that
+        /// already has the new {{SessionsList}} token (idempotent, and leaves an admin's own
+        /// subsequent edits alone).
+        /// </summary>
+        private static async Task ReconcileLeaveNotifyParentEmailTemplateAsync(ReaderNestDbContext context)
+        {
+            var seed = EmailTemplateSeedData.All.First(s => s.Key == "leave-notify-parent");
+            var existing = await context.EmailTemplates.FirstOrDefaultAsync(t => t.Key == seed.Key);
+            if (existing is null || existing.HtmlBody.Contains("{{SessionsList}}"))
+            {
+                return;
+            }
+
+            existing.Subject = seed.Subject;
+            existing.HtmlBody = seed.HtmlBody;
+            existing.PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders);
+        }
+
+        /// <summary>
+        /// SeedEmailTemplatesAsync is insert-only, so a DB seeded before this template existed
+        /// never picks it up: a demo's parent/lead previously got no automated email at all when
+        /// the assigned teacher's leave cancelled their demo — only internal admission staff were
+        /// told, and had to remember to pass it on themselves (see NotifyAffectedFamiliesAsync).
+        /// </summary>
+        private static async Task EnsureDemoCancelledLeaveEmailTemplateAsync(ReaderNestDbContext context)
+        {
+            const string key = "demo-cancelled-teacher-leave";
+            if (context.EmailTemplates.Local.Any(t => t.Key == key) ||
+                await context.EmailTemplates.AnyAsync(t => t.Key == key))
+            {
+                return;
+            }
+
+            var seed = EmailTemplateSeedData.All.First(s => s.Key == key);
+            context.EmailTemplates.Add(new EmailTemplate
+            {
+                Key = seed.Key,
+                Name = seed.Name,
+                Description = seed.Description,
+                Category = seed.Category,
+                Subject = seed.Subject,
+                HtmlBody = seed.HtmlBody,
+                PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders),
+                IsActive = true,
+                IsSystem = true,
+            });
         }
 
         /// <summary>

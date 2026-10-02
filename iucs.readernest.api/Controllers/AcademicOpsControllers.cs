@@ -33,6 +33,15 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _academicOps.CreateHolidayAsync(request, cancellationToken));
         }
 
+        /// <summary>Restores the recurring schedule after the old carry-forward rule and cancels any class still on a holiday.</summary>
+        [HttpPost("reconcile")]
+        [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Edit)]
+        public async Task<ActionResult<object>> Reconcile(CancellationToken cancellationToken)
+        {
+            var (cancelled, removedShifted) = await _academicOps.ReconcileHolidaysAsync(cancellationToken);
+            return Ok(new { cancelledSessions = cancelled, removedShiftedSessions = removedShifted });
+        }
+
         [HttpDelete("{id:guid}")]
         [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Delete)]
         public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)

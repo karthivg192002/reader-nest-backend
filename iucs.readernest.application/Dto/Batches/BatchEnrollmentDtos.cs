@@ -17,6 +17,9 @@ namespace iucs.readernest.application.Dto.Batches
         public EnrollmentStatus Status { get; set; }
 
         public DateTime EnrolledAtUtc { get; set; }
+
+        /// <summary>The parent's own time zone: staff scheduling in India time see the family's local day/time.</summary>
+        public string? ParentTimeZoneId { get; set; }
     }
 
     /// <summary>An active, approved child not yet placed in this specific batch — candidates for the "Assign students" picker.</summary>
