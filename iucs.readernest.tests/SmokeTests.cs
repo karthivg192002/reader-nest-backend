@@ -3491,6 +3491,41 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task EnrollmentForm_ForAnExistingChild_EditsInPlace_AndApprovalNeverCreatesASecondChild()
+        {
+            // Client: counselor-created students' families shared their preferred schedule over
+            // WhatsApp; they now fill it in on the portal against the child that already exists.
+            var parentUser = await _db.SeedUserAsync($"pref-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var profile = new ParentProfile { UserId = parentUser.Id, EnrollmentFormCompleted = true };
+            _db.Context.ParentProfiles.Add(profile);
+            await _db.Context.SaveChangesAsync();
+            var child = new Child { ParentProfileId = profile.Id, FirstName = "Dhiya", LastName = "B" };
+            _db.Context.Children.Add(child);
+            await _db.Context.SaveChangesAsync();
+
+            var enrollment = CreateEnrollmentService();
+            string Answers(string days) =>
+                $"{{\"childName\":\"Dhiya B\",\"dob\":\"2020-01-01\",\"grade\":\"1\",\"courseInterest\":\"c\",\"preferredDays\":[{days}],\"startDate\":\"2026-11-01\"}}";
+            var first = await enrollment.SubmitAsync(parentUser.Id, new SubmitEnrollmentFormRequest { FormDataJson = Answers("\"Mon\""), ChildId = child.Id });
+            var second = await enrollment.SubmitAsync(parentUser.Id, new SubmitEnrollmentFormRequest { FormDataJson = Answers("\"Tue\""), ChildId = child.Id });
+            Assert.Equal(first.Id, second.Id);
+            Assert.Equal(child.Id, second.ChildId);
+            Assert.Contains("Tue", second.FormDataJson);
+
+            // Another family's child can't be targeted.
+            var otherParent = await _db.SeedUserAsync($"pref-other-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            _db.Context.ParentProfiles.Add(new ParentProfile { UserId = otherParent.Id });
+            await _db.Context.SaveChangesAsync();
+            await Assert.ThrowsAsync<NotFoundException>(() =>
+                enrollment.SubmitAsync(otherParent.Id, new SubmitEnrollmentFormRequest { FormDataJson = Answers("\"Mon\""), ChildId = child.Id }));
+
+            // Approved without a date of birth: no new child, the existing one is used.
+            var approved = await enrollment.ReviewAsync(second.Id, new ReviewEnrollmentFormRequest { Approve = true });
+            Assert.Equal("Approved", approved.Status.ToString());
+            Assert.Equal(1, await _db.Context.Children.CountAsync(c => c.ParentProfileId == profile.Id));
+        }
+
+        [Fact]
         public async Task ApproveAccessRequest_ActuallyGrantsTheRequestedModules_NotJustAStatusFlip()
         {
             // Regression: ReviewAsync used to only flip the request's Status to Approved and

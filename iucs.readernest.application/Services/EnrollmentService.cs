@@ -57,9 +57,39 @@ namespace iucs.readernest.application.Services
 
             var parent = await GetParentAsync(parentUserId, cancellationToken);
 
+            // Details for a child who already exists (created by the admission counselor at
+            // enrollment): the family used to send the preferred schedule etc. over WhatsApp.
+            // One open form per child -- resubmitting edits it in place until staff approve it.
+            if (request.ChildId is { } existingChildId)
+            {
+                var ownsChild = await _unitOfWork.Repository<Child>()
+                    .ExistsAsync(c => c.Id == existingChildId && c.ParentProfileId == parent.Id, cancellationToken);
+                if (!ownsChild)
+                {
+                    throw new NotFoundException(nameof(Child), existingChildId);
+                }
+
+                var childForm = await _unitOfWork.Repository<EnrollmentForm>().FirstOrDefaultAsync(
+                    f => f.ParentProfileId == parent.Id && f.ChildId == existingChildId && f.Status != EnrollmentFormStatus.Approved,
+                    cancellationToken);
+                if (childForm is null)
+                {
+                    childForm = new EnrollmentForm { ParentProfileId = parent.Id, ChildId = existingChildId };
+                    await _unitOfWork.Repository<EnrollmentForm>().AddAsync(childForm, cancellationToken);
+                }
+
+                childForm.FormDataJson = request.FormDataJson;
+                childForm.Status = EnrollmentFormStatus.Submitted;
+                childForm.SubmittedAtUtc = DateTime.UtcNow;
+
+                await _auditLog.StageAsync(AuditAction.Create, nameof(EnrollmentForm), childForm.Id.ToString(), cancellationToken: cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                return await GetAsync(childForm.Id, cancellationToken);
+            }
+
             // A rejected form is resubmitted in place; otherwise every submission is a new child enrollment
             var form = await _unitOfWork.Repository<EnrollmentForm>().FirstOrDefaultAsync(
-                f => f.ParentProfileId == parent.Id && f.Status == EnrollmentFormStatus.Rejected,
+                f => f.ParentProfileId == parent.Id && f.ChildId == null && f.Status == EnrollmentFormStatus.Rejected,
                 cancellationToken);
 
             if (form is null)
@@ -196,31 +226,46 @@ namespace iucs.readernest.application.Services
                     await ValidateBatchForAssignmentAsync(request.BatchId.Value, cancellationToken);
                 }
 
-                // Not [Required] on the DTO — that would also reject Approve=false requests,
-                // which never touch this field. DateOfBirth stays optional on Child itself
-                // (age display already handles null), but a genuinely missing value at
-                // approval is worth catching explicitly rather than silently creating a
-                // Child nobody can show an age for.
-                if (request.ChildDateOfBirth is null)
-                {
-                    throw new DomainValidationException("Child's date of birth is required to approve this enrollment.");
-                }
                 if (request.ChildDateOfBirth > DateOnly.FromDateTime(DateTime.UtcNow))
                 {
                     throw new DomainValidationException("Child's date of birth cannot be in the future.");
                 }
 
-                var (firstName, lastName) = ResolveChildName(form, request);
-                child = new Child
+                if (form.ChildId is { } existingChildId)
                 {
-                    ParentProfileId = form.ParentProfileId,
-                    FirstName = firstName,
-                    LastName = lastName,
-                    DateOfBirth = request.ChildDateOfBirth,
-                };
-                await _unitOfWork.Repository<Child>().AddAsync(child, cancellationToken);
+                    // Details for a child who already exists (see SubmitAsync): nothing to create,
+                    // just fill in a missing date of birth if the reviewer gave one.
+                    child = await _unitOfWork.Repository<Child>().GetByIdAsync(existingChildId, cancellationToken)
+                        ?? throw new NotFoundException(nameof(Child), existingChildId);
+                    if (child.DateOfBirth is null && request.ChildDateOfBirth is not null)
+                    {
+                        child.DateOfBirth = request.ChildDateOfBirth;
+                        _unitOfWork.Repository<Child>().Update(child);
+                    }
+                }
+                else
+                {
+                    // Not [Required] on the DTO — that would also reject Approve=false requests,
+                    // which never touch this field. DateOfBirth stays optional on Child itself
+                    // (age display already handles null), but a genuinely missing value at
+                    // approval is worth catching explicitly rather than silently creating a
+                    // Child nobody can show an age for.
+                    if (request.ChildDateOfBirth is null)
+                    {
+                        throw new DomainValidationException("Child's date of birth is required to approve this enrollment.");
+                    }
 
-                form.Child = child;
+                    var (firstName, lastName) = ResolveChildName(form, request);
+                    child = new Child
+                    {
+                        ParentProfileId = form.ParentProfileId,
+                        FirstName = firstName,
+                        LastName = lastName,
+                        DateOfBirth = request.ChildDateOfBirth,
+                    };
+                    await _unitOfWork.Repository<Child>().AddAsync(child, cancellationToken);
+                    form.Child = child;
+                }
                 form.Status = EnrollmentFormStatus.Approved;
 
                 if (parentProfile is not null)
