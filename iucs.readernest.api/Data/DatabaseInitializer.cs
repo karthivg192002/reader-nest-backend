@@ -95,8 +95,75 @@ namespace iucs.readernest.api.Data
             await SeedChatFaqsAsync(context);
             await EnsureAdditionalChatFaqsAsync(context);
             await BackfillPlainTextNotificationBodiesAsync(context);
+            await EnsurePresetPortalModuleMenusAsync(context);
 
             await context.SaveChangesAsync();
+        }
+
+        /// <summary>
+        /// Reported live: "I give permission but the menu doesn't show." The Coordinator,
+        /// Admission and Management portals were seeded with only their own handful of screens,
+        /// so granting one of them a module those screens don't cover (Parent Tickets, Batches,
+        /// Billing, ...) changed nothing they could see -- every page was already routed there,
+        /// just never linked. Copies the RM portal's module-gated items into each of these
+        /// portals for every module the portal has no item for yet; the menu endpoint still
+        /// hides anything the person's grants don't include, so nothing appears ungranted.
+        /// Modules a portal already covers with its own tailored screen (e.g. Admission's
+        /// Payment Tracking for Billing) are left alone, so existing menus don't change.
+        /// Runs last so every earlier step's additions are visible. Idempotent per path.
+        /// </summary>
+        public static async Task EnsurePresetPortalModuleMenusAsync(ReaderNestDbContext context)
+        {
+            string[] portals = ["coordinator", "admission", "management"];
+            await context.MenuItems.Where(m => m.Portal == "subadmin" || portals.Contains(m.Portal)).LoadAsync();
+            var local = context.MenuItems.Local;
+
+            var source = local
+                .Where(m => m.Portal == "subadmin" && m.IsActive && m.RequiredModule != null)
+                .OrderBy(m => m.SectionOrder).ThenBy(m => m.SortOrder)
+                .ToList();
+
+            foreach (var portal in portals)
+            {
+                var existing = local.Where(m => m.Portal == portal).ToList();
+                var coveredModules = existing.Where(m => m.RequiredModule != null).Select(m => m.RequiredModule!).ToHashSet();
+                var sectionOrders = existing
+                    .Where(m => m.Section != null)
+                    .GroupBy(m => m.Section!)
+                    .ToDictionary(g => g.Key, g => g.Min(m => m.SectionOrder));
+                var nextSectionOrder = existing.Count == 0 ? 1 : existing.Max(m => m.SectionOrder) + 1;
+
+                foreach (var item in source)
+                {
+                    var path = $"/{portal}{item.Path["/subadmin".Length..]}";
+                    if (coveredModules.Contains(item.RequiredModule!) || existing.Any(m => m.Path == path))
+                    {
+                        continue;
+                    }
+
+                    var section = item.Section ?? "More";
+                    if (!sectionOrders.TryGetValue(section, out var sectionOrder))
+                    {
+                        sectionOrder = nextSectionOrder++;
+                        sectionOrders[section] = sectionOrder;
+                    }
+
+                    var copy = new MenuItem
+                    {
+                        Portal = portal,
+                        Section = section,
+                        SectionOrder = sectionOrder,
+                        Label = item.Label,
+                        Path = path,
+                        Icon = item.Icon,
+                        SortOrder = existing.Where(m => m.Section == section).Select(m => m.SortOrder + 1).DefaultIfEmpty(0).Max(),
+                        IsActive = true,
+                        RequiredModule = item.RequiredModule,
+                    };
+                    context.MenuItems.Add(copy);
+                    existing.Add(copy);
+                }
+            }
         }
 
         private static async Task SeedAdminAsync(

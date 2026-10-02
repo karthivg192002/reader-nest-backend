@@ -3196,6 +3196,46 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task PresetPortals_GetAMenuItemForEveryGrantableModule_WithoutTouchingTheirOwnScreens()
+        {
+            // Reported live: a Coordinator granted Parent Tickets saw no menu item for it.
+            _db.Context.MenuItems.AddRange(
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "subadmin", Section = "Delegated Work", Label = "Parent Tickets", Path = "/subadmin/support-tickets", Icon = "LifeBuoy",
+                    SectionOrder = 2, SortOrder = 4, IsActive = true, RequiredModule = PermissionModule.SupportTickets.ToString(),
+                },
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "subadmin", Section = "Finance", Label = "Billing & Finance", Path = "/subadmin/billing", Icon = "Wallet",
+                    SectionOrder = 5, SortOrder = 0, IsActive = true, RequiredModule = PermissionModule.BillingFinance.ToString(),
+                },
+                new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = "admission", Section = "CRM", Label = "Payment Tracking", Path = "/admission/payments", Icon = "Wallet",
+                    SectionOrder = 2, SortOrder = 1, IsActive = true, RequiredModule = PermissionModule.BillingFinance.ToString(),
+                });
+            await _db.Context.SaveChangesAsync();
+
+            await iucs.readernest.api.Data.DatabaseInitializer.EnsurePresetPortalModuleMenusAsync(_db.Context);
+            await _db.Context.SaveChangesAsync();
+            await iucs.readernest.api.Data.DatabaseInitializer.EnsurePresetPortalModuleMenusAsync(_db.Context);
+            await _db.Context.SaveChangesAsync();
+
+            var paths = _db.Context.MenuItems.Select(m => m.Path).ToList();
+            Assert.Equal(paths.Count, paths.Distinct().Count());
+            Assert.Contains("/coordinator/support-tickets", paths);
+            Assert.Contains("/admission/support-tickets", paths);
+            Assert.Contains("/management/support-tickets", paths);
+            Assert.Contains("/coordinator/billing", paths);
+            // Admission already covers Billing with its own Payment Tracking screen -- unchanged.
+            Assert.DoesNotContain("/admission/billing", paths);
+
+            var coordinatorTickets = _db.Context.MenuItems.Single(m => m.Path == "/coordinator/support-tickets");
+            Assert.Equal(PermissionModule.SupportTickets.ToString(), coordinatorTickets.RequiredModule);
+        }
+
+        [Fact]
         public async Task SubAdminModuleMenus_AreIdempotent_AndGatedByGrantedModule()
         {
             var rm = await _db.SeedUserAsync($"rm-menu-{Guid.NewGuid():N}@test.com", "x", UserRole.SubAdmin);
