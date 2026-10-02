@@ -12,8 +12,8 @@ namespace iucs.readernest.application.Services
 
         Task DeleteHolidayAsync(Guid id, CancellationToken cancellationToken = default);
 
-        /// <summary>Cancels + carries forward to the next working day any upcoming session sitting on a holiday date. Returns how many were moved.</summary>
-        Task<int> ReconcileHolidaysAsync(CancellationToken cancellationToken = default);
+        /// <summary>Undoes earlier holiday carry-forward copies and cancels (never moves) upcoming sessions still on a holiday date.</summary>
+        Task<(int Cancelled, int RemovedShifted)> ReconcileHolidaysAsync(CancellationToken cancellationToken = default);
 
         // Teacher leave workflow
         /// <summary>
