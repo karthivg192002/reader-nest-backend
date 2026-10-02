@@ -8,6 +8,9 @@ namespace iucs.readernest.application.Services
         /// <summary>Admin BI dashboard aggregates: students, revenue, conversion, occupancy, utilization.</summary>
         Task<DashboardSummaryDto> GetDashboardSummaryAsync(CancellationToken cancellationToken = default);
 
+        /// <summary>One staff member's own collections this and last month (IST), never the whole team's.</summary>
+        Task<MyCollectionsDto> GetMyCollectionsAsync(Guid userId, CancellationToken cancellationToken = default);
+
         /// <summary>CSV exports for the centralized reports (attendance | revenue | payouts | conversion).</summary>
         Task<string> ExportCsvAsync(string report, CancellationToken cancellationToken = default);
 

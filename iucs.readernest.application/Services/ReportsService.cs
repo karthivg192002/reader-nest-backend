@@ -1,4 +1,5 @@
 using System.Text;
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Reports;
 using iucs.readernest.application.Helper;
@@ -411,6 +412,53 @@ namespace iucs.readernest.application.Services
                 WeeklyAttendanceTrend = weeklyAttendanceTrend,
                 BatchOccupancyByCourse = batchOccupancyByCourse,
                 ConversionRateTrend = conversionRateTrend,
+            };
+        }
+
+        public async Task<MyCollectionsDto> GetMyCollectionsAsync(Guid userId, CancellationToken cancellationToken = default)
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById(DateTimeDisplay.DefaultTimeZoneId);
+            var localNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, zone);
+            var localMonthStart = new DateTime(localNow.Year, localNow.Month, 1, 0, 0, 0, DateTimeKind.Unspecified);
+            var thisMonthStart = TimeZoneInfo.ConvertTimeToUtc(localMonthStart, zone);
+            var lastMonthStart = TimeZoneInfo.ConvertTimeToUtc(localMonthStart.AddMonths(-1), zone);
+
+            var payments = await CollectionOwnership.OwnedBy(
+                    _unitOfWork.Repository<PaymentTransaction>().Query(),
+                    _unitOfWork.Repository<DemoBooking>().Query(),
+                    userId)
+                .Where(t => t.Status == TransactionStatus.Success && t.PaidAtUtc != null && t.PaidAtUtc >= lastMonthStart)
+                .Select(t => new
+                {
+                    PaidAtUtc = t.PaidAtUtc!.Value,
+                    t.Amount,
+                    t.Invoice.InvoiceNumber,
+                    ParentFirst = t.Invoice.ParentProfile.User.FirstName,
+                    ParentLast = t.Invoice.ParentProfile.User.LastName,
+                    ChildFirst = t.Invoice.Child != null ? t.Invoice.Child.FirstName : null,
+                    ChildLast = t.Invoice.Child != null ? t.Invoice.Child.LastName : null,
+                    t.Method,
+                })
+                .ToListAsync(cancellationToken);
+
+            var thisMonth = payments.Where(p => p.PaidAtUtc >= thisMonthStart).ToList();
+            return new MyCollectionsDto
+            {
+                ThisMonth = thisMonth.Sum(p => p.Amount),
+                ThisMonthPayments = thisMonth.Count,
+                LastMonth = payments.Where(p => p.PaidAtUtc < thisMonthStart).Sum(p => p.Amount),
+                Payments = thisMonth
+                    .OrderByDescending(p => p.PaidAtUtc)
+                    .Select(p => new MyCollectionPaymentDto
+                    {
+                        PaidAtUtc = DateTime.SpecifyKind(p.PaidAtUtc, DateTimeKind.Utc),
+                        Amount = p.Amount,
+                        InvoiceNumber = p.InvoiceNumber,
+                        ParentName = $"{p.ParentFirst} {p.ParentLast}".Trim(),
+                        ChildName = p.ChildFirst is null ? null : $"{p.ChildFirst} {p.ChildLast}".Trim(),
+                        Method = p.Method?.ToString(),
+                    })
+                    .ToList(),
             };
         }
 

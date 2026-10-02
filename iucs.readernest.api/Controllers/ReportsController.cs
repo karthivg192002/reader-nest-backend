@@ -28,6 +28,16 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _reportsService.GetDashboardSummaryAsync(cancellationToken));
         }
 
+        /// <summary>The caller's own collections (an admission counselor's dashboard figure) --
+        /// only ever their own, so no module permission is needed beyond being signed in staff.</summary>
+        [HttpGet("my-collections")]
+        [Authorize(Roles = $"{nameof(UserRole.AdmissionTeam)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.Admin)}")]
+        public async Task<ActionResult<MyCollectionsDto>> MyCollections(CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _reportsService.GetMyCollectionsAsync(userId, cancellationToken));
+        }
+
         /// <summary>CSV export: attendance | revenue | payouts | conversion.</summary>
         [HttpGet("export/{report}")]
         [HasPermission(PermissionModule.ReportsAnalytics, PermissionAction.View)]
