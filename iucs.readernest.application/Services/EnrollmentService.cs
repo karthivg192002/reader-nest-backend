@@ -403,13 +403,15 @@ namespace iucs.readernest.application.Services
 
             // Resolve each child's current course in one pass (child → batch enrollment → batch → course).
             var childIds = children.Select(c => c.Id).ToList();
+            // Only the course name is needed — project it rather than loading every enrollment
+            // with its full Batch and Course entities.
             var enrollments = await _unitOfWork.Repository<BatchEnrollment>().Query()
                 .Where(e => childIds.Contains(e.ChildId))
-                .Include(e => e.Batch).ThenInclude(b => b.Course)
+                .Select(e => new { e.ChildId, CourseName = e.Batch.Course.Name })
                 .ToListAsync(cancellationToken);
             var courseByChild = enrollments
                 .GroupBy(e => e.ChildId)
-                .ToDictionary(g => g.Key, g => g.First().Batch.Course.Name);
+                .ToDictionary(g => g.Key, g => g.First().CourseName);
 
             // Paid total per child — surfaced so the delete/withdraw flow can warn admin/
             // coordinator staff that money was actually collected before they remove the record.
