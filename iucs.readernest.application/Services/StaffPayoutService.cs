@@ -1,6 +1,8 @@
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Payouts;
 using iucs.readernest.application.Mappings;
+using iucs.readernest.domain.Entities.Admission;
 using iucs.readernest.domain.Entities.Billing;
 using iucs.readernest.domain.Entities.Payouts;
 using iucs.readernest.domain.Entities.Users;
@@ -186,13 +188,15 @@ namespace iucs.readernest.application.Services
                 var monthEnd = monthStart.AddMonths(1);
 
                 // "Total amount collected by them during the month" (client requirement): every
-                // successful payment transaction on an invoice THIS staff member created —
-                // Invoice.CreatedBy is stamped automatically (AuditableEntityInterceptor) by
-                // whoever was logged in when the admission payment was recorded.
-                collectionRaw = await _unitOfWork.Repository<PaymentTransaction>().Query()
+                // successful payment that is THIS staff member's collection -- their own demo
+                // leads' payments (even when the parent paid online), otherwise invoices they
+                // created. Same rule as the counselor's own dashboard figure (CollectionOwnership).
+                collectionRaw = await CollectionOwnership.OwnedBy(
+                        _unitOfWork.Repository<PaymentTransaction>().Query(),
+                        _unitOfWork.Repository<DemoBooking>().Query(),
+                        user.Id)
                     .Where(t => t.Status == TransactionStatus.Success
-                        && t.PaidAtUtc != null && t.PaidAtUtc >= monthStart && t.PaidAtUtc < monthEnd
-                        && t.Invoice.CreatedBy == user.Id)
+                        && t.PaidAtUtc != null && t.PaidAtUtc >= monthStart && t.PaidAtUtc < monthEnd)
                     .SumAsync(t => (decimal?)t.Amount, cancellationToken) ?? 0m;
 
                 // Floored DOWN to the nearest ₹10,000 before the percentage is applied (client

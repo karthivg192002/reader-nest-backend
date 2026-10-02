@@ -7559,6 +7559,46 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task MyCollections_CountsOnlyTheCounselorsOwnPayments_IncludingHerDemoLeadsPaidOnline()
+        {
+            // Client: "we don't want all payments recorded together for all the counsellors."
+            var counselorA = await _db.SeedUserAsync($"counsel-a-{Guid.NewGuid():N}@test.com", "x", UserRole.AdmissionTeam);
+            var counselorB = await _db.SeedUserAsync($"counsel-b-{Guid.NewGuid():N}@test.com", "x", UserRole.AdmissionTeam);
+            var (billing, leadInvoice) = await SeedInvoiceAsync(amount: 5000);
+            var ownDto = await billing.CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = leadInvoice.ParentProfileId, DepartmentId = WellKnownDepartments.Phonics, Amount = 3000,
+                DueDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)),
+            });
+            var ownInvoice = await _db.Context.Invoices.AsNoTracking().FirstAsync(i => i.Id == ownDto.Id);
+
+            // A's demo lead paid online: the invoice itself has no staff creator.
+            var booking = new DemoBooking { ParentName = "Lead Parent", ParentEmail = $"lead-{Guid.NewGuid():N}@test.com", ChildName = "Dhiya", InvoiceId = leadInvoice.Id };
+            _db.Context.DemoBookings.Add(booking);
+            await _db.Context.SaveChangesAsync();
+            booking.CreatedBy = counselorA.Id;
+            (await _db.Context.Invoices.FirstAsync(i => i.Id == leadInvoice.Id)).CreatedBy = null;
+            (await _db.Context.Invoices.FirstAsync(i => i.Id == ownInvoice.Id)).CreatedBy = counselorB.Id;
+            foreach (var (invoice, amount) in new[] { (leadInvoice, 5000m), (ownInvoice, 3000m) })
+            {
+                _db.Context.PaymentTransactions.Add(new PaymentTransaction
+                {
+                    InvoiceId = invoice.Id, PaymentAccountId = invoice.PaymentAccountId, Amount = amount, Currency = invoice.Currency,
+                    Status = TransactionStatus.Success, PaidAtUtc = DateTime.UtcNow, Method = PaymentMethod.Upi,
+                });
+            }
+            await _db.Context.SaveChangesAsync();
+
+            var reports = new ReportsService(_db.UnitOfWork, _notifications);
+            var a = await reports.GetMyCollectionsAsync(counselorA.Id);
+            var b = await reports.GetMyCollectionsAsync(counselorB.Id);
+            Assert.Equal(5000m, a.ThisMonth);
+            Assert.Equal(1, a.ThisMonthPayments);
+            Assert.Equal(3000m, b.ThisMonth);
+            Assert.Single(b.Payments);
+        }
+
+        [Fact]
         public async Task ConfirmCashIntent_StillClosesAGenuinelyCompetingIntent()
         {
             // The guard above must not blunt what the sweep is actually for: a DIFFERENT pending

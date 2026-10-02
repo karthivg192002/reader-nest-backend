@@ -422,6 +422,14 @@ namespace iucs.readernest.application.Services
                 query = query.Where(i => i.ParentProfileId == parentProfileId.Value);
             }
 
+            // An admission counselor's Payment Tracking shows only her own collections (client
+            // requirement), not the whole team's -- see CollectionOwnership.
+            if (_currentUser.UserId is { } callerId
+                && await _unitOfWork.Repository<User>().ExistsAsync(u => u.Id == callerId && u.Role == UserRole.AdmissionTeam, cancellationToken))
+            {
+                query = CollectionOwnership.OwnedBy(query, _unitOfWork.Repository<DemoBooking>().Query(), callerId);
+            }
+
             // Counted before the includes matter: EF translates this to a COUNT over the
             // filtered set, so the joins cost nothing on this half of the round trip.
             var totalCount = await query.CountAsync(cancellationToken);
