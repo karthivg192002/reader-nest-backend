@@ -28,14 +28,25 @@ namespace iucs.readernest.application.Services
 
         public async Task<IReadOnlyList<BatchDto>> ListAsync(BatchStatus? status, CancellationToken cancellationToken = default)
         {
-            var query = BaseQuery();
+            // No Include(Enrollments): that dragged every enrollment row ever made for every
+            // batch into memory (and multiplied the joined rows) just to count the active ones.
+            var query = _unitOfWork.Repository<Batch>().Query()
+                .Include(b => b.Course)
+                .Include(b => b.TeacherProfile).ThenInclude(t => t.User)
+                .AsQueryable();
             if (status.HasValue)
             {
                 query = query.Where(b => b.Status == status.Value);
             }
 
             var batches = await query.OrderBy(b => b.Name).ToListAsync(cancellationToken);
-            return batches.Select(b => b.ToDto(ActiveEnrollmentCount(b))).ToList();
+            var batchIds = batches.Select(b => b.Id).ToList();
+            var activeCounts = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.Status == EnrollmentStatus.Active && batchIds.Contains(e.BatchId))
+                .GroupBy(e => e.BatchId)
+                .Select(g => new { BatchId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.BatchId, x => x.Count, cancellationToken);
+            return batches.Select(b => b.ToDto(activeCounts.GetValueOrDefault(b.Id))).ToList();
         }
 
         public async Task<BatchDto> GetAsync(Guid id, CancellationToken cancellationToken = default)
