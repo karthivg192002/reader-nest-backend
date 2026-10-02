@@ -390,11 +390,19 @@ namespace iucs.readernest.api.Data
             // RoleDefinition. Preloaded once for every role in `additions`, even non-Sub-Admin
             // ones (teacher/parent/admission), where this query simply returns nothing since
             // no user is both that role's assignee and UserRole.SubAdmin.
+            // A Sub Admin with no role assigned at all lands on the Relationship Manager portal
+            // (MenuService.ResolvePortalAsync), so it gets that preset's required grants too --
+            // otherwise an older RM account created before role presets existed never heals.
             var roleIds = roles.Select(r => r.Id).ToList();
-            var subAdminUserIds = await context.Users
-                .Where(u => u.Role == UserRole.SubAdmin && u.RoleDefinitionId.HasValue && roleIds.Contains(u.RoleDefinitionId.Value))
-                .Select(u => new { u.Id, u.RoleDefinitionId })
-                .ToListAsync();
+            var relationshipManagerRoleId = roles.FirstOrDefault(r => r.Name == "sub-admin")?.Id;
+            var subAdminUserIds = (await context.Users
+                    .Where(u => u.Role == UserRole.SubAdmin
+                                && (u.RoleDefinitionId == null || roleIds.Contains(u.RoleDefinitionId.Value)))
+                    .Select(u => new { u.Id, u.RoleDefinitionId })
+                    .ToListAsync())
+                .Select(u => new { u.Id, RoleDefinitionId = u.RoleDefinitionId ?? relationshipManagerRoleId })
+                .Where(u => u.RoleDefinitionId.HasValue)
+                .ToList();
             var existingSubAdminGrants = await context.SubAdminPermissions
                 .Where(p => subAdminUserIds.Select(u => u.Id).Contains(p.UserId))
                 .ToListAsync();
