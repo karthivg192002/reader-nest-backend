@@ -30,6 +30,11 @@ namespace iucs.readernest.application.Common
             // Create + Edit + View here, with Edit covering the archive-as-delete action.
             new("sub-admin", PermissionModule.CourseBatchManagement, View: true, Create: true, Edit: true),
             new("sub-admin", PermissionModule.UserManagement, View: true),
+            // Parent Tickets is the Relationship Manager's own queue (families raise tickets now
+            // that WhatsApp/phone contact is retired). Reported live: an RM couldn't open parent
+            // tickets -- nothing guaranteed this grant, so any RM whose snapshot predated the
+            // module (or a preset re-save without the box) silently lost the whole screen.
+            new("sub-admin", PermissionModule.SupportTickets, View: true, Edit: true),
             // Lets a teacher see and resolve doubts the "Ask a Doubt" chatbot escalated —
             // Communication already gates Progress Reports/Email Templates for the same module.
             new("teacher", PermissionModule.Communication, View: true, Edit: true),
