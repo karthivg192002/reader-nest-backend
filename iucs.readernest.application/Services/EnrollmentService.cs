@@ -469,6 +469,11 @@ namespace iucs.readernest.application.Services
                 .Select(g => new { ChildId = g.Key, Total = g.Sum(i => i.AmountPaid) })
                 .ToDictionaryAsync(g => g.ChildId, g => g.Total, cancellationToken);
 
+            var preferences = await _unitOfWork.Repository<ChildSchedulePreference>().Query()
+                .Include(p => p.Course)
+                .Where(p => childIds.Contains(p.ChildId))
+                .ToDictionaryAsync(p => p.ChildId, cancellationToken);
+
             var today = DateOnly.FromDateTime(DateTime.UtcNow);
             return children.Select(c => new StudentDto
             {
@@ -483,6 +488,9 @@ namespace iucs.readernest.application.Services
                 RmNotes = c.RmNotes,
                 IsActive = c.IsActive,
                 PaidInvoiceTotal = paidTotalByChild.GetValueOrDefault(c.Id),
+                SchedulePreference = preferences.TryGetValue(c.Id, out var preference)
+                    ? ChildSchedulePreferenceMapper.ToDto(c, preference)
+                    : null,
             }).ToList();
         }
 

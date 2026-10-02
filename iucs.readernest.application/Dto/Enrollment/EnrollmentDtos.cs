@@ -125,6 +125,10 @@ namespace iucs.readernest.application.Dto.Enrollment
         /// value is surfaced as a warning before delete/withdraw, since removing the record
         /// does not itself refund anything; that stays a manual step in Billing &amp; Finance.</summary>
         public decimal PaidInvoiceTotal { get; set; }
+
+        /// <summary>What the parent filled in from the portal (preferred days/times, start date, school…);
+        /// null until they have, so staff can see who still owes the centre their schedule.</summary>
+        public ChildSchedulePreferenceDto? SchedulePreference { get; set; }
     }
 
     public class UpdateChildNotesRequest

@@ -33,6 +33,7 @@ namespace iucs.readernest.domain.Data
         public DbSet<ParentProfile> ParentProfiles => Set<ParentProfile>();
         public DbSet<TeacherProfile> TeacherProfiles => Set<TeacherProfile>();
         public DbSet<Child> Children => Set<Child>();
+        public DbSet<ChildSchedulePreference> ChildSchedulePreferences => Set<ChildSchedulePreference>();
         public DbSet<SubAdminPermission> SubAdminPermissions => Set<SubAdminPermission>();
         public DbSet<RoleDefinition> RoleDefinitions => Set<RoleDefinition>();
         public DbSet<RolePermission> RolePermissions => Set<RolePermission>();
