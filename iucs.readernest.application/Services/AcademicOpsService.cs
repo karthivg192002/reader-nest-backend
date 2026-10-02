@@ -396,34 +396,36 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             // Business rule: a class never runs on a holiday. Any session already scheduled
-            // on this date is cancelled and carried forward to the next working day.
-            await CarryForwardHolidaySessionsAsync(new[] { holiday }, fromUtc: null, cancellationToken);
+            // on this date is cancelled — never shifted; the recurring schedule is untouched.
+            await CancelHolidaySessionsAsync(new[] { holiday }, fromUtc: null, cancellationToken);
 
             return ToDto(holiday);
         }
 
-        public async Task<int> ReconcileHolidaysAsync(CancellationToken cancellationToken = default)
+        public async Task<(int Cancelled, int RemovedShifted)> ReconcileHolidaysAsync(CancellationToken cancellationToken = default)
         {
-            // Catches sessions that ended up on a holiday date without going through
-            // CreateHolidayAsync's sweep (bulk imports, holidays that pre-date the sweep).
-            // Only upcoming sessions — a past session still marked Scheduled is a different
-            // problem (stale status), not something to silently re-date.
+            // 1) Undo any earlier "carry forward to the next day/week" copies — a holiday only
+            //    cancels that day's classes; the recurring schedule must stay untouched.
+            var removed = await RemoveHolidayCarryForwardCopiesAsync(cancellationToken);
+
+            // 2) Cancel anything still sitting on a holiday date (bulk imports, older holidays).
+            //    Only upcoming sessions — a past session still marked Scheduled is a different
+            //    problem (stale status), not something to touch here.
             var from = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1));
             var holidays = await _unitOfWork.Repository<Holiday>().Query()
                 .Where(h => h.Date >= from)
                 .ToListAsync(cancellationToken);
-            return await CarryForwardHolidaySessionsAsync(holidays, DateTime.UtcNow, cancellationToken);
+            var cancelled = await CancelHolidaySessionsAsync(holidays, DateTime.UtcNow, cancellationToken);
+            return (cancelled, removed);
         }
 
         /// <summary>
-        /// Cancels every Scheduled/CarriedForward session on the given holiday dates and
-        /// creates a CarriedForward replacement on the next working day: the first following
-        /// day that is not itself a holiday, where the batch has no session at that time and
-        /// the teacher is free. If no teacher-free day exists within 14 days the first
-        /// batch-collision-free working day is used (conflict recorded in the audit log); if
-        /// none exists at all the session is cancelled without a replacement.
+        /// Cancels (never moves) every Scheduled/CarriedForward class on the given holiday
+        /// dates. The batch's recurring schedule is left exactly as it was: no replacement
+        /// session is created. Demo sessions are left for a human — they are one-off bookings
+        /// a parent is waiting on, and scheduling onto a holiday is already blocked.
         /// </summary>
-        private async Task<int> CarryForwardHolidaySessionsAsync(
+        private async Task<int> CancelHolidaySessionsAsync(
             IReadOnlyCollection<Holiday> holidays, DateTime? fromUtc, CancellationToken cancellationToken)
         {
             if (holidays.Count == 0)
@@ -435,12 +437,9 @@ namespace iucs.readernest.application.Services
             // midnight must be converted local->UTC, not read as UTC midnight, or the matching
             // window is offset by +5:30 and catches the wrong day's early-morning sessions.
             var zone = TimeZoneInfo.FindSystemTimeZoneById(DateTimeDisplay.DefaultTimeZoneId);
-            var allHolidayDates = (await _unitOfWork.Repository<Holiday>().Query()
-                    .Select(h => h.Date)
-                    .ToListAsync(cancellationToken))
-                .ToHashSet();
+            var approver = await CancelledBy.DescribeAsync(_unitOfWork, _currentUser.UserId, cancellationToken);
+            var count = 0;
 
-            var moves = new List<(ClassSession Session, Holiday Holiday)>();
             foreach (var holiday in holidays)
             {
                 var dayStartLocal = holiday.Date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
@@ -449,141 +448,72 @@ namespace iucs.readernest.application.Services
                 var lowerBound = fromUtc.HasValue && fromUtc.Value > dayStart ? fromUtc.Value : dayStart;
                 var onDay = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
                     .Where(s => (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
+                                && s.Type != SessionType.Demo
                                 && s.ScheduledStartAtUtc >= lowerBound
                                 && s.ScheduledStartAtUtc < dayEnd)
                     .ToListAsync(cancellationToken);
-                moves.AddRange(onDay.Select(s => (s, holiday)));
+
+                foreach (var session in onDay)
+                {
+                    session.Status = SessionStatus.Cancelled;
+                    session.CancellationReason = CancelledBy.Reason(approver, $"holiday — {holiday.Name}");
+                }
+
+                count += onDay.Count;
             }
 
-            if (moves.Count == 0)
+            if (count > 0)
+            {
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), null,
+                    changesJson: $"{{\"holidayCancelled\":{count}}}", cancellationToken: cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+
+            return count;
+        }
+
+        /// <summary>
+        /// Removes the replacement sessions an earlier version of the holiday rule created
+        /// (original cancelled with "holiday — …; carried forward to …"), so the recurring
+        /// schedule is back to what it was. Only replacements that have not started are
+        /// removed; the original keeps its Cancelled status with a plain "holiday" reason.
+        /// </summary>
+        private async Task<int> RemoveHolidayCarryForwardCopiesAsync(CancellationToken cancellationToken)
+        {
+            var originals = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .Where(s => s.Status == SessionStatus.Cancelled
+                            && s.CancellationReason != null
+                            && s.CancellationReason.Contains("holiday — ")
+                            && s.CancellationReason.Contains("; carried forward to "))
+                .ToListAsync(cancellationToken);
+            if (originals.Count == 0)
             {
                 return 0;
             }
 
-            // One query for everything a candidate slot could collide with, instead of probing
-            // per session per candidate day.
-            const int searchDays = 14;
-            var rangeStart = moves.Min(m => m.Session.ScheduledStartAtUtc).AddDays(1);
-            var rangeEnd = moves.Max(m => m.Session.ScheduledStartAtUtc).AddDays(searchDays + 1);
-            var teacherIds = moves.Select(m => m.Session.TeacherProfileId).Distinct().ToList();
-            var batchIds = moves.Where(m => m.Session.BatchId.HasValue).Select(m => m.Session.BatchId!.Value).Distinct().ToList();
-            var occupied = (await _unitOfWork.Repository<ClassSession>().Query()
-                    .Where(s => s.Status != SessionStatus.Cancelled
-                                && s.ScheduledStartAtUtc >= rangeStart
-                                && s.ScheduledStartAtUtc < rangeEnd
-                                && (teacherIds.Contains(s.TeacherProfileId)
-                                    || (s.BatchId != null && batchIds.Contains(s.BatchId.Value))))
-                    .Select(s => new OccupiedSlot(s.TeacherProfileId, s.BatchId, s.Status, s.ScheduledStartAtUtc, s.ScheduledEndAtUtc))
-                    .ToListAsync(cancellationToken))
-                .ToList();
+            var originalIds = originals.Select(o => o.Id).ToList();
+            var copies = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .Where(s => s.CarriedForwardFromSessionId != null
+                            && originalIds.Contains(s.CarriedForwardFromSessionId.Value)
+                            && s.Status == SessionStatus.CarriedForward)
+                .ToListAsync(cancellationToken);
 
-            var approver = await CancelledBy.DescribeAsync(_unitOfWork, _currentUser.UserId, cancellationToken);
-            var conflicts = 0;
-            var withoutReplacement = 0;
-
-            foreach (var (session, holiday) in moves.OrderBy(m => m.Session.ScheduledStartAtUtc))
+            foreach (var copy in copies)
             {
-                var duration = session.ScheduledEndAtUtc - session.ScheduledStartAtUtc;
-                DateTime? chosen = null;
-                var teacherConflict = false;
+                _unitOfWork.Repository<ClassSession>().Remove(copy);
+            }
 
-                // Pass 0: teacher free and batch free. Pass 1: batch free only (the batch
-                // unique index forbids two sessions at the same start; a teacher clash is
-                // recorded rather than blocking the carry-forward).
-                for (var pass = 0; pass < 2 && chosen is null; pass++)
-                {
-                    for (var i = 1; i <= searchDays; i++)
-                    {
-                        var start = session.ScheduledStartAtUtc.AddDays(i);
-                        var end = start.Add(duration);
-                        var localDate = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(start, zone));
-                        if (allHolidayDates.Contains(localDate))
-                        {
-                            continue;
-                        }
-
-                        var batchTaken = session.BatchId.HasValue && occupied.Any(o =>
-                            o.BatchId == session.BatchId && o.Start < end && o.End > start);
-                        if (batchTaken)
-                        {
-                            continue;
-                        }
-
-                        var teacherBusy = occupied.Any(o =>
-                            o.TeacherProfileId == session.TeacherProfileId
-                            && (o.Status == SessionStatus.Scheduled || o.Status == SessionStatus.InProgress || o.Status == SessionStatus.CarriedForward)
-                            && o.Start < end && o.End > start);
-                        if (teacherBusy && pass == 0)
-                        {
-                            continue;
-                        }
-
-                        chosen = start;
-                        teacherConflict = teacherBusy;
-                        break;
-                    }
-                }
-
-                session.Status = SessionStatus.Cancelled;
-                if (chosen is null)
-                {
-                    withoutReplacement++;
-                    session.CancellationReason = CancelledBy.Reason(approver,
-                        $"holiday — {holiday.Name}; no free slot in the next {searchDays} days, needs manual rescheduling");
-                    continue;
-                }
-
-                if (teacherConflict)
-                {
-                    conflicts++;
-                }
-
-                var newStart = chosen.Value;
-                var newEnd = newStart.Add(duration);
-                var carriedForward = new ClassSession
-                {
-                    BatchId = session.BatchId,
-                    TeacherProfileId = session.TeacherProfileId,
-                    Type = session.Type,
-                    Status = SessionStatus.CarriedForward,
-                    ScheduledStartAtUtc = newStart,
-                    ScheduledEndAtUtc = newEnd,
-                    MeetingRoomId = session.MeetingRoomId,
-                    CarriedForwardFromSessionId = session.Id,
-                };
-                await _unitOfWork.Repository<ClassSession>().AddAsync(carriedForward, cancellationToken);
-                occupied.Add(new OccupiedSlot(session.TeacherProfileId, session.BatchId, SessionStatus.CarriedForward, newStart, newEnd));
-
-                session.CancellationReason = CancelledBy.Reason(approver,
-                    $"holiday — {holiday.Name}; carried forward to {TimeZoneInfo.ConvertTimeFromUtc(newStart, zone):yyyy-MM-dd}");
-
-                // A demo's only link to its parent is the DemoBooking row; leaving it pointing
-                // at the now-cancelled session would strand the booking.
-                if (session.Type == SessionType.Demo)
-                {
-                    var booking = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
-                        .Include(b => b.Participants)
-                        .FirstOrDefaultAsync(b => b.ClassSessionId == session.Id, cancellationToken);
-                    if (booking is not null)
-                    {
-                        booking.ClassSessionId = carriedForward.Id;
-                        booking.ParentJoinedAtUtc = null;
-                        foreach (var participant in booking.Participants)
-                        {
-                            participant.HasJoined = false;
-                        }
-                    }
-                }
+            foreach (var original in originals)
+            {
+                original.CancellationReason = System.Text.RegularExpressions.Regex.Replace(
+                    original.CancellationReason!, @"; carried forward to \S+", string.Empty);
             }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), null,
-                changesJson: $"{{\"holidayCarryForward\":{moves.Count},\"teacherConflicts\":{conflicts},\"withoutReplacement\":{withoutReplacement}}}",
-                cancellationToken: cancellationToken);
+                changesJson: $"{{\"holidayCarryForwardsUndone\":{copies.Count}}}", cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
-            return moves.Count;
+            return copies.Count;
         }
-
-        private sealed record OccupiedSlot(Guid TeacherProfileId, Guid? BatchId, SessionStatus Status, DateTime Start, DateTime End);
 
         public async Task DeleteHolidayAsync(Guid id, CancellationToken cancellationToken = default)
         {
