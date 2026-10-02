@@ -57,6 +57,20 @@ namespace iucs.readernest.api.Controllers
             return CreatedAtAction(nameof(Get), new { id = booking.Id }, booking);
         }
 
+        /// <summary>
+        /// A lead with no demo class, ready for a payment link: a family enrolling without a demo,
+        /// or a second child from a sibling's demo (pass SiblingOfBookingId to copy the parent).
+        /// </summary>
+        [HttpPost("direct-admission")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Create)]
+        public async Task<ActionResult<DemoBookingDto>> CreateDirectAdmission(
+            CreateDirectAdmissionLeadRequest request,
+            CancellationToken cancellationToken)
+        {
+            var booking = await _demoBookingService.CreateDirectAdmissionLeadAsync(request, cancellationToken);
+            return CreatedAtAction(nameof(Get), new { id = booking.Id }, booking);
+        }
+
         [HttpPut("{id:guid}/conversion-status")]
         [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
         public async Task<ActionResult<DemoBookingDto>> UpdateConversionStatus(

@@ -4225,6 +4225,90 @@ namespace iucs.readernest.tests
             Assert.DoesNotContain(invoiceId, await AdmissionInvoices.ExemptFromOverdueHandlingAsync(_db.UnitOfWork));
         }
 
+        /// <summary>Client request 2026-10-02: two kids in one demo each need their own payment link.</summary>
+        [Fact]
+        public async Task DirectAdmission_ForSiblingFromADemo_GetsItsOwnPaymentLinkOnTheSameParent()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Super Reader", Type = CourseType.Group,
+                DurationMinutes = 45, Price = 5000, TotalSessions = 36, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            _db.Context.AddRange(teacher, category, course,
+                new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" });
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Ravi Iyer", ParentEmail = "ravi.iyer@example.com", ParentPhone = "9777777777", ChildName = "Anu",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+                Participants = [new DemoParticipantDto { Name = "Kavi", IsChild = true }],
+            });
+
+            var sibling = await demoService.CreateDirectAdmissionLeadAsync(new CreateDirectAdmissionLeadRequest
+            {
+                SiblingOfBookingId = demo.Id, ChildName = "Kavi",
+                // Ignored: a sibling always takes the original lead's parent.
+                ParentName = "Someone Else", ParentEmail = "other@example.com",
+            });
+
+            Assert.Equal("ravi.iyer@example.com", sibling.ParentEmail);
+            Assert.Equal("Ravi Iyer", sibling.ParentName);
+            Assert.Null(sibling.ClassSessionId);
+            Assert.Equal(0m, sibling.PayableAmount);
+
+            var admission = new AdmissionPaymentService(
+                _db.UnitOfWork, demoService, CreateUserService(), CreateBillingService(), _notifications, _auditLog, new ConfigurationBuilder().Build());
+            var first = await admission.SendPaymentLinkAsync(demo.Id, new SendAdmissionPaymentLinkRequest { CourseId = course.Id });
+            var second = await admission.SendPaymentLinkAsync(sibling.Id, new SendAdmissionPaymentLinkRequest { CourseId = course.Id, Amount = 4000 });
+
+            Assert.NotEqual(first.PaymentUrl, second.PaymentUrl);
+            Assert.NotEqual(first.Booking.InvoiceId, second.Booking.InvoiceId);
+            Assert.Contains("Kavi", second.ShareMessage);
+            var invoices = await _db.Context.Invoices.Where(i => i.Id == first.Booking.InvoiceId || i.Id == second.Booking.InvoiceId).ToListAsync();
+            Assert.Single(invoices.Select(i => i.ParentProfileId).Distinct());
+            Assert.All(invoices, i => Assert.NotEqual(InvoiceStatus.Cancelled, i.Status));
+        }
+
+        /// <summary>Client request 2026-10-02: a family that wants to enroll without a demo.</summary>
+        [Fact]
+        public async Task DirectAdmission_WithoutADemo_CanBeSentAPaymentLink()
+        {
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Super Reader", Type = CourseType.Group,
+                DurationMinutes = 45, Price = 5000, TotalSessions = 36, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            _db.Context.AddRange(category, course,
+                new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" });
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+
+            var lead = await demoService.CreateDirectAdmissionLeadAsync(new CreateDirectAdmissionLeadRequest
+            {
+                ParentName = "Pooja", ParentPhone = "9888888888", ChildName = "Tara", ChildAge = 6,
+            });
+
+            Assert.Null(lead.ClassSessionId);
+            Assert.Null(lead.TeacherProfileId);
+            Assert.Equal(ConversionStatus.FollowUpInProgress, lead.ConversionStatus);
+
+            var admission = new AdmissionPaymentService(
+                _db.UnitOfWork, demoService, CreateUserService(), CreateBillingService(), _notifications, _auditLog, new ConfigurationBuilder().Build());
+            var link = await admission.SendPaymentLinkAsync(lead.Id, new SendAdmissionPaymentLinkRequest { CourseId = course.Id });
+
+            Assert.Equal(ConversionStatus.PaymentPending, link.Booking.ConversionStatus);
+            Assert.DoesNotContain("demo", link.ShareMessage, StringComparison.OrdinalIgnoreCase);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => demoService.CreateDirectAdmissionLeadAsync(
+                new CreateDirectAdmissionLeadRequest { ParentName = "No Phone", ChildName = "X" }));
+        }
+
         [Fact]
         public async Task ReadyForEnrollment_ForNoEmailParent_HandsStaffTheNewMobileLoginPin()
         {

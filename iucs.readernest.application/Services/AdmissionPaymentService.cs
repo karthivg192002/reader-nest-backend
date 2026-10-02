@@ -170,7 +170,9 @@ namespace iucs.readernest.application.Services
             var shareMessage = string.Join("\n",
                 $"Hello {tracked.ParentName},",
                 "",
-                $"Thank you for attending the demo class. To confirm {tracked.ChildName}'s admission for {course.Name}, please complete the payment of {invoice.Currency} {amount:0.##} here:",
+                tracked.ClassSessionId is null
+                    ? $"Thank you for choosing The Reader Nest. To confirm {tracked.ChildName}'s admission for {course.Name}, please complete the payment of {invoice.Currency} {amount:0.##} here:"
+                    : $"Thank you for attending the demo class. To confirm {tracked.ChildName}'s admission for {course.Name}, please complete the payment of {invoice.Currency} {amount:0.##} here:",
                 tracked.PaymentLinkUrl,
                 "",
                 "You'll be asked to accept our Terms & Conditions before paying. Once we verify your payment, your login details will be emailed to you automatically.");
