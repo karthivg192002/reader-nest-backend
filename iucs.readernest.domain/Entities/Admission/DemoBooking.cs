@@ -14,6 +14,8 @@ namespace iucs.readernest.domain.Entities.Admission
     /// account yet; the conversion funnel is tracked to Enrolled/NotInterested.
     /// </summary>
     [Index(nameof(ConversionStatus))]
+    // Parent portal / enrollment / feedback look a parent's demos up by their email.
+    [Index(nameof(ParentEmail))]
     [Index(nameof(PaymentToken), IsUnique = true)]
     public class DemoBooking : AuditEntity
     {

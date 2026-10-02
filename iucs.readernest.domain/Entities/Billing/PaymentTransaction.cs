@@ -10,6 +10,8 @@ namespace iucs.readernest.domain.Entities.Billing
     /// carry the generated receipt. System-generated, so BaseEntity (no user audit columns).
     /// </summary>
     [Index(nameof(GatewayTransactionId))]
+    // Revenue totals and recent-payment lists filter by status and paid date.
+    [Index(nameof(Status), nameof(PaidAtUtc))]
     public class PaymentTransaction : BaseEntity
     {
         public Guid InvoiceId { get; set; }

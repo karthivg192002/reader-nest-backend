@@ -13,6 +13,7 @@ using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using iucs.readernest.domain.Repository;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace iucs.readernest.application.Services
 {
@@ -20,11 +21,18 @@ namespace iucs.readernest.application.Services
     {
         private readonly IUnitOfWork _unitOfWork;
         private readonly INotificationService _notificationService;
+        private readonly IMemoryCache? _cache;
 
-        public ReportsService(IUnitOfWork unitOfWork, INotificationService notificationService)
+        // The dashboard summary is org-wide (not per user) and a screenful of aggregates; a
+        // minute of staleness is invisible, recomputing it on every page view is not.
+        private const string DashboardSummaryCacheKey = "reports:dashboard-summary";
+        private static readonly TimeSpan DashboardSummaryTtl = TimeSpan.FromSeconds(60);
+
+        public ReportsService(IUnitOfWork unitOfWork, INotificationService notificationService, IMemoryCache? cache = null)
         {
             _unitOfWork = unitOfWork;
             _notificationService = notificationService;
+            _cache = cache;
         }
 
         public async Task<IReadOnlyList<TeacherPerformanceDto>> GetTeacherPerformanceAsync(CancellationToken cancellationToken = default)
@@ -201,13 +209,33 @@ namespace iucs.readernest.application.Services
 
         public async Task<DashboardSummaryDto> GetDashboardSummaryAsync(CancellationToken cancellationToken = default)
         {
+            if (_cache is null)
+            {
+                return await ComputeDashboardSummaryAsync(cancellationToken);
+            }
+
+            // GetOrCreateAsync doesn't lock, so concurrent cold hits may each compute once —
+            // harmless, and still far cheaper than computing on every request.
+            var summary = await _cache.GetOrCreateAsync(DashboardSummaryCacheKey, entry =>
+            {
+                entry.AbsoluteExpirationRelativeToNow = DashboardSummaryTtl;
+                return ComputeDashboardSummaryAsync(cancellationToken);
+            });
+            return summary!;
+        }
+
+        private async Task<DashboardSummaryDto> ComputeDashboardSummaryAsync(CancellationToken cancellationToken)
+        {
             var totalStudents = await _unitOfWork.Repository<Child>().Query().CountAsync(cancellationToken);
             var activeStudents = await _unitOfWork.Repository<Child>().Query().CountAsync(c => c.IsActive, cancellationToken);
             var totalEnrollments = await _unitOfWork.Repository<BatchEnrollment>().Query()
                 .CountAsync(e => e.Status == EnrollmentStatus.Active, cancellationToken);
 
+            // Grouped in the database: this used to pull every invoice ever raised into memory
+            // just to sum them, getting slower with every invoice.
             var invoices = await _unitOfWork.Repository<Invoice>().Query()
-                .Select(i => new { DepartmentName = i.Department.Name, i.Amount, i.AmountPaid, i.Status, i.CourseId, CourseName = i.Course != null ? i.Course.Name : null })
+                .GroupBy(i => new { DepartmentName = i.Department.Name, i.CourseId, CourseName = i.Course != null ? i.Course.Name : null, i.Status })
+                .Select(g => new { g.Key.DepartmentName, g.Key.CourseId, g.Key.CourseName, g.Key.Status, Amount = g.Sum(i => i.Amount), AmountPaid = g.Sum(i => i.AmountPaid) })
                 .ToListAsync(cancellationToken);
             var revenueCollected = invoices.Sum(i => i.AmountPaid);
             var revenuePending = invoices
@@ -311,26 +339,28 @@ namespace iucs.readernest.application.Services
             var today = DateTime.UtcNow.Date;
             var mondayThisWeek = today.AddDays(-(((int)today.DayOfWeek + 6) % 7));
             var attendanceWindowStart = mondayThisWeek.AddDays(-7 * 5);
-            var attendanceRows = await _unitOfWork.Repository<SessionAttendance>().Query()
-                .Where(a => a.ParticipantType == ParticipantType.Student
-                    && a.ClassSession.ScheduledStartAtUtc >= attendanceWindowStart)
-                .Select(a => new { a.Status, a.ClassSession.ScheduledStartAtUtc })
-                .ToListAsync(cancellationToken);
-            var weeklyAttendanceTrend = Enumerable.Range(0, 6)
-                .Select(offset =>
+            // One small grouped count per week instead of loading six weeks of attendance rows
+            // (one per student per class) just to bucket them in memory.
+            var weeklyAttendanceTrend = new List<AttendanceWeekDto>();
+            for (var offset = 0; offset < 6; offset++)
+            {
+                var weekStart = attendanceWindowStart.AddDays(7 * offset);
+                var weekEnd = weekStart.AddDays(7);
+                var counts = await _unitOfWork.Repository<SessionAttendance>().Query()
+                    .Where(a => a.ParticipantType == ParticipantType.Student
+                        && a.ClassSession.ScheduledStartAtUtc >= weekStart
+                        && a.ClassSession.ScheduledStartAtUtc < weekEnd)
+                    .GroupBy(a => a.Status == AttendanceStatus.Absent)
+                    .Select(g => new { Absent = g.Key, Count = g.Count() })
+                    .ToListAsync(cancellationToken);
+                var total = counts.Sum(c => c.Count);
+                var present = counts.Where(c => !c.Absent).Sum(c => c.Count);
+                weeklyAttendanceTrend.Add(new AttendanceWeekDto
                 {
-                    var weekStart = attendanceWindowStart.AddDays(7 * offset);
-                    var weekEnd = weekStart.AddDays(7);
-                    var week = attendanceRows.Where(r => r.ScheduledStartAtUtc >= weekStart && r.ScheduledStartAtUtc < weekEnd).ToList();
-                    return new AttendanceWeekDto
-                    {
-                        Week = weekStart.ToString("dd MMM"),
-                        Attendance = week.Count == 0
-                            ? 0
-                            : Math.Round(100.0 * week.Count(r => r.Status != AttendanceStatus.Absent) / week.Count, 1),
-                    };
-                })
-                .ToList();
+                    Week = weekStart.ToString("dd MMM"),
+                    Attendance = total == 0 ? 0 : Math.Round(100.0 * present / total, 1),
+                });
+            }
 
             // Batch occupancy split by course (active batches only, highest fill first).
             var occupancyByCourseRows = await _unitOfWork.Repository<Batch>().Query()
