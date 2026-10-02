@@ -282,17 +282,25 @@ namespace iucs.readernest.application.Services
                 .ToList();
 
             // Revenue trend: successful payments grouped into the last 6 calendar months (oldest first).
-            var trendStart = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(-5);
-            var successfulPayments = await _unitOfWork.Repository<PaymentTransaction>().Query()
-                .Where(t => t.Status == TransactionStatus.Success && t.PaidAtUtc != null && t.PaidAtUtc >= trendStart)
-                .Select(t => new { t.PaidAtUtc, t.Amount })
-                .ToListAsync(cancellationToken);
+            // Months are the academy's local (IST) calendar months, not UTC ones -- a UTC month
+            // put every payment made between 00:00 and 05:30 IST on the 1st into the previous
+            // month, so "Revenue This Month" on the dashboards didn't match what staff collected.
+            var zone = TimeZoneInfo.FindSystemTimeZoneById(DateTimeDisplay.DefaultTimeZoneId);
+            var localNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, zone);
+            var localTrendStart = new DateTime(localNow.Year, localNow.Month, 1, 0, 0, 0, DateTimeKind.Unspecified).AddMonths(-5);
+            var trendStart = TimeZoneInfo.ConvertTimeToUtc(localTrendStart, zone);
+            var successfulPayments = (await _unitOfWork.Repository<PaymentTransaction>().Query()
+                    .Where(t => t.Status == TransactionStatus.Success && t.PaidAtUtc != null && t.PaidAtUtc >= trendStart)
+                    .Select(t => new { t.PaidAtUtc, t.Amount })
+                    .ToListAsync(cancellationToken))
+                .Select(t => new { PaidLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(t.PaidAtUtc!.Value, DateTimeKind.Utc), zone), t.Amount })
+                .ToList();
             var revenueTrend = Enumerable.Range(0, 6)
                 .Select(offset =>
                 {
-                    var month = trendStart.AddMonths(offset);
+                    var month = localTrendStart.AddMonths(offset);
                     var revenue = successfulPayments
-                        .Where(p => p.PaidAtUtc!.Value.Year == month.Year && p.PaidAtUtc.Value.Month == month.Month)
+                        .Where(p => p.PaidLocal.Year == month.Year && p.PaidLocal.Month == month.Month)
                         .Sum(p => p.Amount);
                     return new RevenuePointDto { Month = month.ToString("MMM"), Revenue = revenue };
                 })
