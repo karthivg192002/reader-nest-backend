@@ -30,6 +30,13 @@ namespace iucs.readernest.application.Dto.Enrollment
         /// <summary>Answers keyed by field id; the schema is client-configurable so no fixed columns.</summary>
         [Required]
         public string FormDataJson { get; set; } = null!;
+
+        /// <summary>
+        /// Set when the parent is filling in details (preferred schedule, school, start date, ...)
+        /// for a child who already exists -- e.g. one an admission counselor created at
+        /// enrollment. Approving such a form never creates a second child. Null = a new child.
+        /// </summary>
+        public Guid? ChildId { get; set; }
     }
 
     public class ReviewEnrollmentFormRequest
