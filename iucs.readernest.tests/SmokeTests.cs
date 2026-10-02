@@ -3210,6 +3210,33 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task AdminAndRmPortals_GetLeadsAndDemoScheduling_SoNewAdmissionWithoutDemoIsReachable()
+        {
+            foreach (var portal in new[] { "admin", "subadmin" })
+            {
+                _db.Context.MenuItems.Add(new domain.Entities.Navigation.MenuItem
+                {
+                    Portal = portal, Section = "People", Label = "Enrollment Review", Path = $"/{portal}/enrollments", Icon = "ClipboardList",
+                    SectionOrder = 2, SortOrder = 3, IsActive = true, RequiredModule = PermissionModule.Admission.ToString(),
+                });
+            }
+            await _db.Context.SaveChangesAsync();
+
+            await iucs.readernest.api.Data.DatabaseInitializer.EnsureAdmissionPipelineMenusAsync(_db.Context);
+            await _db.Context.SaveChangesAsync();
+            await iucs.readernest.api.Data.DatabaseInitializer.EnsureAdmissionPipelineMenusAsync(_db.Context);
+            await _db.Context.SaveChangesAsync();
+
+            var paths = _db.Context.MenuItems.Select(m => m.Path).ToList();
+            Assert.Equal(paths.Count, paths.Distinct().Count());
+            foreach (var path in new[] { "/admin/leads", "/admin/demo-scheduling", "/subadmin/leads", "/subadmin/demo-scheduling" })
+            {
+                Assert.Contains(path, paths);
+            }
+            Assert.Equal(PermissionModule.Admission.ToString(), _db.Context.MenuItems.Single(m => m.Path == "/subadmin/leads").RequiredModule);
+        }
+
+        [Fact]
         public async Task PresetPortals_GetAMenuItemForEveryGrantableModule_WithoutTouchingTheirOwnScreens()
         {
             // Reported live: a Coordinator granted Parent Tickets saw no menu item for it.
