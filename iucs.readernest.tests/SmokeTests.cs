@@ -6361,8 +6361,11 @@ namespace iucs.readernest.tests
             }
             await _db.Context.SaveChangesAsync();
 
-            var otherDay1 = oldDay == DayOfWeek.Sunday ? DayOfWeek.Monday : oldDay - 1;
-            var otherDay2 = oldDay == DayOfWeek.Saturday ? DayOfWeek.Sunday : oldDay + 1;
+            // The day before and the day after, wrapping round the week. (The old Sunday case picked
+            // Monday for both, so on any run where day7 fell on a Sunday the request carried a
+            // duplicate weekday and the test failed for a reason unrelated to what it checks.)
+            var otherDay1 = (DayOfWeek)(((int)oldDay + 6) % 7);
+            var otherDay2 = (DayOfWeek)(((int)oldDay + 1) % 7);
 
             var sessions = await CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
             {
