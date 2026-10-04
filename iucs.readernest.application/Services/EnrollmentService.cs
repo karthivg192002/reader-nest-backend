@@ -256,14 +256,32 @@ namespace iucs.readernest.application.Services
                     }
 
                     var (firstName, lastName) = ResolveChildName(form, request);
-                    child = new Child
+
+                    // Reported live: one family ended up with the same child three times -- the
+                    // parent submitted the form more than once and approving each created another
+                    // Child. A child of this parent with the same name is the same child: link the
+                    // form to it instead of creating a duplicate.
+                    var first = firstName.Trim().ToLower();
+                    var last = (lastName ?? string.Empty).Trim().ToLower();
+                    var sameNamed = await _unitOfWork.Repository<Child>().TrackedQuery()
+                        .Where(c => c.ParentProfileId == form.ParentProfileId && c.FirstName.ToLower() == first)
+                        .ToListAsync(cancellationToken);
+                    child = sameNamed.FirstOrDefault(c => (c.LastName ?? string.Empty).Trim().ToLower() == last);
+                    if (child is null)
                     {
-                        ParentProfileId = form.ParentProfileId,
-                        FirstName = firstName,
-                        LastName = lastName,
-                        DateOfBirth = request.ChildDateOfBirth,
-                    };
-                    await _unitOfWork.Repository<Child>().AddAsync(child, cancellationToken);
+                        child = new Child
+                        {
+                            ParentProfileId = form.ParentProfileId,
+                            FirstName = firstName,
+                            LastName = lastName,
+                            DateOfBirth = request.ChildDateOfBirth,
+                        };
+                        await _unitOfWork.Repository<Child>().AddAsync(child, cancellationToken);
+                    }
+                    else if (child.DateOfBirth is null)
+                    {
+                        child.DateOfBirth = request.ChildDateOfBirth;
+                    }
                     form.Child = child;
                 }
                 form.Status = EnrollmentFormStatus.Approved;

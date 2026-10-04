@@ -35,6 +35,14 @@ namespace iucs.readernest.domain.Entities.Users
         /// <summary>Preferred start time per chosen day as JSON, e.g. {"Mon":"16:00","Thu":"18:00"}.</summary>
         public string DayTimesJson { get; set; } = "{}";
 
+        /// <summary>
+        /// IANA time zone the days/times above are in -- the parent's own zone when they chose them
+        /// (e.g. "Australia/Melbourne"). Null on rows saved before this existed, which were picked
+        /// in the academy's zone (Asia/Kolkata). Staff views convert to IST with it.
+        /// </summary>
+        [MaxLength(64)]
+        public string? TimeZoneId { get; set; }
+
         [MaxLength(200)]
         public string? SchoolName { get; set; }
 

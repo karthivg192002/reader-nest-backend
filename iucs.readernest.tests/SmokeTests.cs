@@ -3012,6 +3012,28 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task SchedulePreference_KeepsTheZoneTheParentChoseIn_DefaultingToTheirAccountZone()
+        {
+            // Reported live: a Melbourne parent's "6:00 PM" was read as 6:00 PM India time.
+            var (parentUser, child) = await SeedParentWithChildAsync();
+            var service = CreateSchedulePreferenceService();
+
+            var chosen = ValidPreference();
+            chosen.TimeZoneId = "Australia/Melbourne";
+            Assert.Equal("Australia/Melbourne", (await service.SaveForParentAsync(parentUser.Id, child.Id, chosen)).TimeZoneId);
+
+            // No (or an unknown) zone sent: the parent account's own zone is used.
+            var unknown = ValidPreference();
+            unknown.TimeZoneId = "Not/AZone";
+            var saved = await service.SaveForParentAsync(parentUser.Id, child.Id, unknown);
+            var accountZone = await _db.Context.Users.Where(u => u.Id == parentUser.Id).Select(u => u.TimeZoneId).FirstAsync();
+            Assert.Equal(accountZone, saved.TimeZoneId);
+
+            var student = (await CreateEnrollmentService().ListAllStudentsAsync()).Single();
+            Assert.Equal(accountZone, student.SchedulePreference!.TimeZoneId);
+        }
+
+        [Fact]
         public async Task SchedulePreference_RejectsAnotherFamiliesChild_AndBadSchedules()
         {
             var (parentUser, child) = await SeedParentWithChildAsync();
@@ -3591,6 +3613,27 @@ namespace iucs.readernest.tests
             var user = await _db.Context.Users.SingleAsync(u => u.Email == email);
             Assert.Equal(0, user.FailedLoginAttempts);
             Assert.Null(user.LockoutEndUtc);
+        }
+
+        [Fact]
+        public async Task EnrollmentForm_SubmittedTwiceForTheSameChild_ApprovingBothKeepsOneChild()
+        {
+            // Reported live: a family showed "Elaahi" three times after repeat submissions were approved.
+            var parentUser = await _db.SeedUserAsync($"dup-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var profile = new ParentProfile { UserId = parentUser.Id };
+            _db.Context.ParentProfiles.Add(profile);
+            await _db.Context.SaveChangesAsync();
+
+            var enrollment = CreateEnrollmentService();
+            const string answers = "{\"childName\":\"Elaahi Shah\",\"dob\":\"2019-05-01\",\"grade\":\"2\",\"courseInterest\":\"c\"}";
+            var first = await enrollment.SubmitAsync(parentUser.Id, new SubmitEnrollmentFormRequest { FormDataJson = answers });
+            await enrollment.ReviewAsync(first.Id, new ReviewEnrollmentFormRequest { Approve = true, ChildDateOfBirth = new DateOnly(2019, 5, 1) });
+            var second = await enrollment.SubmitAsync(parentUser.Id, new SubmitEnrollmentFormRequest { FormDataJson = answers.Replace("Elaahi Shah", "elaahi shah ") });
+            var approved = await enrollment.ReviewAsync(second.Id, new ReviewEnrollmentFormRequest { Approve = true, ChildDateOfBirth = new DateOnly(2019, 5, 1) });
+
+            var children = await _db.Context.Children.Where(c => c.ParentProfileId == profile.Id).ToListAsync();
+            var child = Assert.Single(children);
+            Assert.Equal(child.Id, approved.ChildId);
         }
 
         [Fact]
