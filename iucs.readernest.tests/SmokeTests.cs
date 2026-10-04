@@ -3012,6 +3012,28 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task SchedulePreference_KeepsTheZoneTheParentChoseIn_DefaultingToTheirAccountZone()
+        {
+            // Reported live: a Melbourne parent's "6:00 PM" was read as 6:00 PM India time.
+            var (parentUser, child) = await SeedParentWithChildAsync();
+            var service = CreateSchedulePreferenceService();
+
+            var chosen = ValidPreference();
+            chosen.TimeZoneId = "Australia/Melbourne";
+            Assert.Equal("Australia/Melbourne", (await service.SaveForParentAsync(parentUser.Id, child.Id, chosen)).TimeZoneId);
+
+            // No (or an unknown) zone sent: the parent account's own zone is used.
+            var unknown = ValidPreference();
+            unknown.TimeZoneId = "Not/AZone";
+            var saved = await service.SaveForParentAsync(parentUser.Id, child.Id, unknown);
+            var accountZone = await _db.Context.Users.Where(u => u.Id == parentUser.Id).Select(u => u.TimeZoneId).FirstAsync();
+            Assert.Equal(accountZone, saved.TimeZoneId);
+
+            var student = (await CreateEnrollmentService().ListAllStudentsAsync()).Single();
+            Assert.Equal(accountZone, student.SchedulePreference!.TimeZoneId);
+        }
+
+        [Fact]
         public async Task SchedulePreference_RejectsAnotherFamiliesChild_AndBadSchedules()
         {
             var (parentUser, child) = await SeedParentWithChildAsync();

@@ -34,6 +34,9 @@ namespace iucs.readernest.application.Dto.Enrollment
         /// <summary>Preferred start time per day, "HH:mm" 24-hour.</summary>
         public Dictionary<string, string> DayTimes { get; set; } = [];
 
+        /// <summary>IANA zone the day times are in (the parent's own); null = the academy's zone (Asia/Kolkata).</summary>
+        public string? TimeZoneId { get; set; }
+
         public string? SchoolName { get; set; }
 
         public string? PriorExperience { get; set; }
@@ -62,6 +65,10 @@ namespace iucs.readernest.application.Dto.Enrollment
         /// <summary>One "HH:mm" time for every chosen day.</summary>
         [Required]
         public Dictionary<string, string> DayTimes { get; set; } = [];
+
+        /// <summary>IANA zone the parent picked the times in; defaults to the parent account's zone.</summary>
+        [MaxLength(64)]
+        public string? TimeZoneId { get; set; }
 
         [MaxLength(200)]
         public string? SchoolName { get; set; }

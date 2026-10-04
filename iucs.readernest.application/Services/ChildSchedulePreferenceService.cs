@@ -78,6 +78,9 @@ namespace iucs.readernest.application.Services
             pref.DaysPerWeek = request.DaysPerWeek;
             pref.PreferredDays = string.Join(',', days);
             pref.DayTimesJson = JsonSerializer.Serialize(dayTimes);
+            // The times are the parent's local times: a family in Melbourne choosing "6:00 PM"
+            // means 6 PM Melbourne (12:30 PM IST). Keep the zone so staff see both.
+            pref.TimeZoneId = await ResolveTimeZoneAsync(parentUserId, request.TimeZoneId, cancellationToken);
             pref.SchoolName = Clean(request.SchoolName);
             pref.PriorExperience = Clean(request.PriorExperience);
             pref.Allergies = Clean(request.Allergies);
@@ -99,6 +102,20 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return await GetForParentAsync(parentUserId, childId, cancellationToken);
+        }
+
+        /// <summary>The zone the parent picked in if it's a real one, else their account's zone.</summary>
+        private async Task<string?> ResolveTimeZoneAsync(Guid parentUserId, string? requested, CancellationToken cancellationToken)
+        {
+            if (!string.IsNullOrWhiteSpace(requested) && TimeZoneInfo.TryFindSystemTimeZoneById(requested.Trim(), out _))
+            {
+                return requested.Trim();
+            }
+
+            return await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.Id == parentUserId)
+                .Select(u => u.TimeZoneId)
+                .FirstOrDefaultAsync(cancellationToken);
         }
 
         /// <summary>One valid time per chosen day, exactly <c>DaysPerWeek</c> distinct weekdays, returned in week order.</summary>
@@ -178,6 +195,7 @@ namespace iucs.readernest.application.Services
             dto.DaysPerWeek = pref.DaysPerWeek;
             dto.PreferredDays = pref.PreferredDays.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList();
             dto.DayTimes = JsonSerializer.Deserialize<Dictionary<string, string>>(pref.DayTimesJson) ?? [];
+            dto.TimeZoneId = pref.TimeZoneId;
             dto.SchoolName = pref.SchoolName;
             dto.PriorExperience = pref.PriorExperience;
             dto.Allergies = pref.Allergies;
