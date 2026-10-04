@@ -3594,6 +3594,27 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task EnrollmentForm_SubmittedTwiceForTheSameChild_ApprovingBothKeepsOneChild()
+        {
+            // Reported live: a family showed "Elaahi" three times after repeat submissions were approved.
+            var parentUser = await _db.SeedUserAsync($"dup-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var profile = new ParentProfile { UserId = parentUser.Id };
+            _db.Context.ParentProfiles.Add(profile);
+            await _db.Context.SaveChangesAsync();
+
+            var enrollment = CreateEnrollmentService();
+            const string answers = "{\"childName\":\"Elaahi Shah\",\"dob\":\"2019-05-01\",\"grade\":\"2\",\"courseInterest\":\"c\"}";
+            var first = await enrollment.SubmitAsync(parentUser.Id, new SubmitEnrollmentFormRequest { FormDataJson = answers });
+            await enrollment.ReviewAsync(first.Id, new ReviewEnrollmentFormRequest { Approve = true, ChildDateOfBirth = new DateOnly(2019, 5, 1) });
+            var second = await enrollment.SubmitAsync(parentUser.Id, new SubmitEnrollmentFormRequest { FormDataJson = answers.Replace("Elaahi Shah", "elaahi shah ") });
+            var approved = await enrollment.ReviewAsync(second.Id, new ReviewEnrollmentFormRequest { Approve = true, ChildDateOfBirth = new DateOnly(2019, 5, 1) });
+
+            var children = await _db.Context.Children.Where(c => c.ParentProfileId == profile.Id).ToListAsync();
+            var child = Assert.Single(children);
+            Assert.Equal(child.Id, approved.ChildId);
+        }
+
+        [Fact]
         public async Task EnrollmentForm_ForAnExistingChild_EditsInPlace_AndApprovalNeverCreatesASecondChild()
         {
             // Client: counselor-created students' families shared their preferred schedule over
