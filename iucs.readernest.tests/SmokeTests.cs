@@ -3034,6 +3034,26 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task SchedulePreference_GroupBatch_AcceptsTwoDistinctSlotsPerDay()
+        {
+            var (parentUser, child) = await SeedParentWithChildAsync();
+            var service = CreateSchedulePreferenceService();
+
+            var group = ValidPreference();
+            group.DayTimes = new() { ["Mon"] = "16:00,18:00", ["Thu"] = "17:00,20:00" };
+            var saved = await service.SaveForParentAsync(parentUser.Id, child.Id, group);
+            Assert.Equal("16:00,18:00", saved.DayTimes["Mon"]);
+
+            var sameSlotTwice = ValidPreference();
+            sameSlotTwice.DayTimes = new() { ["Mon"] = "16:00,16:00", ["Thu"] = "17:00,20:00" };
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.SaveForParentAsync(parentUser.Id, child.Id, sameSlotTwice));
+
+            var threeSlots = ValidPreference();
+            threeSlots.DayTimes = new() { ["Mon"] = "16:00,17:00,18:00", ["Thu"] = "17:00,20:00" };
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.SaveForParentAsync(parentUser.Id, child.Id, threeSlots));
+        }
+
+        [Fact]
         public async Task SchedulePreference_RejectsAnotherFamiliesChild_AndBadSchedules()
         {
             var (parentUser, child) = await SeedParentWithChildAsync();
@@ -10819,10 +10839,14 @@ namespace iucs.readernest.tests
             var admission = new AdmissionPaymentService(
                 _db.UnitOfWork, demoService, CreateUserService(), billing, _notifications, _auditLog, new ConfigurationBuilder().Build());
 
-            // Nothing to verify before a link exists; a discount can't exceed the course fee.
+            // Nothing to verify before a link exists.
             await Assert.ThrowsAsync<DomainValidationException>(() => admission.VerifyAndEnrollAsync(demo.Id));
-            await Assert.ThrowsAsync<DomainValidationException>(() => admission.SendPaymentLinkAsync(
-                demo.Id, new SendAdmissionPaymentLinkRequest { CourseId = course.Id, Amount = 17000 }));
+
+            // The agreed amount may exceed the list price (e.g. off-hours classes priced higher);
+            // that link is then re-issued below at the discounted amount (nothing was paid on it).
+            var above = await admission.SendPaymentLinkAsync(
+                demo.Id, new SendAdmissionPaymentLinkRequest { CourseId = course.Id, Amount = 17000 });
+            Assert.Equal(17000, above.Amount);
 
             // Counsellor issues the link at the agreed, discounted amount.
             _emailSender.Sent.Clear();

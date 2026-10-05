@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using iucs.readernest.api.Auth;
 using iucs.readernest.application.Dto.Payouts;
+using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
 using Microsoft.AspNetCore.Authorization;
@@ -73,6 +74,16 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken = default)
         {
             return Ok(await _payoutService.ListApprovalsAsync(pending, cancellationToken));
+        }
+
+        /// <summary>The recordings of the class behind an approval row, so the reviewer can watch it before deciding.</summary>
+        [HttpGet("approvals/{itemId:guid}/recordings")]
+        [HasPermission(PermissionModule.Payouts, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<SessionRecordingDto>>> ListApprovalRecordings(
+            Guid itemId,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _payoutService.ListApprovalRecordingsAsync(itemId, cancellationToken));
         }
 
         /// <summary>Approve a short class for full payout, partial payout, or reject it.</summary>
