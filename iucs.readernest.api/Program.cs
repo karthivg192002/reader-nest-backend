@@ -76,7 +76,12 @@ builder.Services.AddScoped<ISmsSender, SmsSender>();
 builder.Services.AddSingleton<StorageSyncService>();
 if (string.Equals(builder.Configuration["Storage:Provider"], "Local", StringComparison.OrdinalIgnoreCase))
 {
-    builder.Services.AddSingleton<LocalFileStorage>();
+    // With S3 still configured it doubles as the fallback for files not yet copied to this server.
+    builder.Services.AddSingleton(sp => new LocalFileStorage(
+        sp.GetRequiredService<IWebHostEnvironment>(),
+        builder.Configuration,
+        sp.GetRequiredService<IHttpContextAccessor>(),
+        S3FileStorage.IsConfigured(builder.Configuration) ? new S3FileStorage(builder.Configuration) : null));
     builder.Services.AddSingleton<IFileStorage>(sp => sp.GetRequiredService<LocalFileStorage>());
     builder.Services.AddSingleton<IDirectUploadStorage>(sp => sp.GetRequiredService<LocalFileStorage>());
 }

@@ -205,6 +205,32 @@ namespace iucs.readernest.tests
             Assert.Equal(2, live.FailedFiles.Count);
         }
 
+        [Fact]
+        public async Task OnLocal_AFileNotCopiedYet_IsServedFromS3_NotReportedMissing()
+        {
+            var config = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Storage:LocalPath"] = _root,
+                    ["Jwt:SigningKey"] = "test-signing-key-test-signing-key",
+                    ["Api:BaseUrl"] = "https://api.example.test",
+                    ["Storage:S3:Endpoint"] = "objects.example.test",
+                    ["Storage:S3:AccessKey"] = "key",
+                    ["Storage:S3:SecretKey"] = "secret",
+                    ["Storage:S3:BucketName"] = "readernest",
+                })
+                .Build();
+            Assert.True(S3FileStorage.IsConfigured(config));
+            var withFallback = new LocalFileStorage(new TestEnvironment(), config, new HttpContextAccessor(), new S3FileStorage(config));
+
+            // Only in S3: the link goes to S3.
+            Assert.Contains("objects.example.test", withFallback.GetReadUrl("0f8c2b9e4d1a4c6b8e2f7a9d3c5b1e0f.pdf", TimeSpan.FromHours(1), "application/pdf"));
+
+            // Copied to this server: served from here.
+            var stored = await withFallback.StoreAsync(new MemoryStream([1, 2, 3]), "deck.pdf");
+            Assert.StartsWith("https://api.example.test/api/storage/local/files/", withFallback.GetReadUrl(stored.RelativePath, TimeSpan.FromHours(1), null));
+        }
+
         private sealed class TestEnvironment : IWebHostEnvironment
         {
             public string WebRootPath { get; set; } = Path.GetTempPath();

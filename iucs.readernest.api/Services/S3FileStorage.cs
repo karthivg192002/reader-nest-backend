@@ -27,6 +27,11 @@ namespace iucs.readernest.api.Services
         private readonly IAmazonS3 _client;
         private readonly string _bucket;
 
+        /// <summary>True when every Storage:S3:* value is set (endpoint, keys, bucket).</summary>
+        public static bool IsConfigured(IConfiguration configuration) =>
+            new[] { "Endpoint", "AccessKey", "SecretKey", "BucketName" }
+                .All(k => !string.IsNullOrWhiteSpace(configuration[$"Storage:S3:{k}"]));
+
         public S3FileStorage(IConfiguration configuration)
         {
             // appsettings.json seeds these as "" (so the key names are discoverable), not

@@ -1,7 +1,11 @@
 using iucs.readernest.api.Auth;
 using iucs.readernest.api.Services;
+using iucs.readernest.domain.Entities.Resources;
+using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Enums;
+using iucs.readernest.domain.Repository;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace iucs.readernest.api.Controllers
 {
@@ -18,9 +22,11 @@ namespace iucs.readernest.api.Controllers
         private readonly IConfiguration _configuration;
         private readonly IWebHostEnvironment _environment;
         private readonly IHttpContextAccessor _httpContext;
+        private readonly IUnitOfWork _unitOfWork;
 
-        public StorageController(StorageSyncService sync, IConfiguration configuration, IWebHostEnvironment environment, IHttpContextAccessor httpContext)
+        public StorageController(StorageSyncService sync, IConfiguration configuration, IWebHostEnvironment environment, IHttpContextAccessor httpContext, IUnitOfWork unitOfWork)
         {
+            _unitOfWork = unitOfWork;
             _sync = sync;
             _configuration = configuration;
             _environment = environment;
@@ -43,6 +49,12 @@ namespace iucs.readernest.api.Controllers
             /// Null when it can't be told (not Linux).
             /// </summary>
             public bool? LocalFolderMounted { get; set; }
+            /// <summary>Files the portal uses (resources and class presentations) -- the readiness check before switching to Local.</summary>
+            public int PortalFiles { get; set; }
+            /// <summary>How many of those are on this server's disk already.</summary>
+            public int PortalFilesOnServer { get; set; }
+            /// <summary>A few of the ones that aren't (their keys), to look up if needed.</summary>
+            public List<string> MissingOnServerSample { get; set; } = [];
             public StorageSyncProgress? Sync { get; set; }
         }
 
@@ -54,20 +66,32 @@ namespace iucs.readernest.api.Controllers
 
         [HttpGet("status")]
         [HasPermission(PermissionModule.Settings, PermissionAction.View)]
-        public ActionResult<StorageStatusDto> Status()
+        public async Task<ActionResult<StorageStatusDto>> Status(CancellationToken cancellationToken)
         {
             var local = new LocalFileStorage(_environment, _configuration, _httpContext);
+
+            // Every stored file the database points at. A resource can also point at an outside link
+            // (a class recording filed by reference), which isn't a stored file.
+            var resourceKeys = await _unitOfWork.Repository<Resource>().Query().Select(r => r.FileUrl).ToListAsync(cancellationToken);
+            var presentationKeys = await _unitOfWork.Repository<SessionPresentation>().Query().Select(p => p.StorageUrl).ToListAsync(cancellationToken);
+            var portalKeys = resourceKeys.Concat(presentationKeys)
+                .Where(k => !string.IsNullOrWhiteSpace(k) && !k.Contains("://", StringComparison.Ordinal))
+                .Distinct()
+                .ToList();
+            var missing = portalKeys.Where(k => local.ExistingFilePath(k) is null).ToList();
             var files = local.ListKeys().Select(k => local.ExistingFilePath(k)).Where(p => p is not null).ToList();
             return Ok(new StorageStatusDto
             {
                 Provider = string.Equals(_configuration["Storage:Provider"], "Local", StringComparison.OrdinalIgnoreCase) ? "Local" : "S3",
-                S3Configured = new[] { "Endpoint", "AccessKey", "SecretKey", "BucketName" }
-                    .All(k => !string.IsNullOrWhiteSpace(_configuration[$"Storage:S3:{k}"])),
+                S3Configured = S3FileStorage.IsConfigured(_configuration),
                 LocalPath = local.RootPath,
                 LocalFileCount = files.Count,
                 LocalBytes = files.Sum(p => System.IO.File.Exists(p) ? new FileInfo(p!).Length : 0),
                 LocalFreeBytes = local.FreeBytes(),
                 LocalFolderMounted = local.IsOnMountedVolume(),
+                PortalFiles = portalKeys.Count,
+                PortalFilesOnServer = portalKeys.Count - missing.Count,
+                MissingOnServerSample = missing.Take(10).ToList(),
                 Sync = _sync.Current,
             });
         }

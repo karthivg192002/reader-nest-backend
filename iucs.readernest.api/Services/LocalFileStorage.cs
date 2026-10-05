@@ -48,9 +48,15 @@ namespace iucs.readernest.api.Services
         private readonly byte[] _signingKey;
         private readonly string? _configuredBaseUrl;
         private readonly IHttpContextAccessor _httpContext;
+        private readonly S3FileStorage? _fallback;
 
-        public LocalFileStorage(IWebHostEnvironment environment, IConfiguration configuration, IHttpContextAccessor httpContext)
+        /// <param name="fallback">
+        /// S3, when it's still configured: a file not found on this server is read from there, so
+        /// switching to Local can't break a file that hasn't been synced yet.
+        /// </param>
+        public LocalFileStorage(IWebHostEnvironment environment, IConfiguration configuration, IHttpContextAccessor httpContext, S3FileStorage? fallback = null)
         {
+            _fallback = fallback;
             _rootPath = Path.GetFullPath(configuration["Storage:LocalPath"] is { Length: > 0 } configured
                 ? configured
                 : Path.Combine(environment.ContentRootPath, "uploads"));
@@ -150,10 +156,17 @@ namespace iucs.readernest.api.Services
             return new FileInfo(target).Length;
         }
 
-        public Task<Stream?> OpenReadAsync(string relativePath, CancellationToken cancellationToken = default)
+        public async Task<Stream?> OpenReadAsync(string relativePath, CancellationToken cancellationToken = default)
         {
             var path = TryPathFor(relativePath);
-            return Task.FromResult<Stream?>(path is not null && File.Exists(path) ? File.OpenRead(path) : null);
+            if (path is not null && File.Exists(path))
+            {
+                return File.OpenRead(path);
+            }
+
+            // Not copied to this server yet (switched before the sync finished, or uploaded to S3
+            // after it): read it from S3 rather than telling the family the file is gone.
+            return _fallback is null ? null : await _fallback.OpenReadAsync(relativePath, cancellationToken);
         }
 
         /// <summary>The file's absolute path when it exists, for range-capable serving.</summary>
@@ -296,6 +309,11 @@ namespace iucs.readernest.api.Services
 
         public string GetReadUrl(string key, TimeSpan validFor, string? contentType)
         {
+            if (_fallback is not null && ExistingFilePath(key) is null)
+            {
+                return _fallback.GetReadUrl(key, validFor, contentType); // still only in S3 (see OpenReadAsync)
+            }
+
             var expires = DateTimeOffset.UtcNow.Add(validFor).ToUnixTimeSeconds();
             var type = contentType ?? string.Empty;
             return $"{BaseUrl()}/api/storage/local/files/{Uri.EscapeDataString(key)}?exp={expires}" +
