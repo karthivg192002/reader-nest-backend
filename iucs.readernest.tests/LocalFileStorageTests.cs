@@ -231,6 +231,48 @@ namespace iucs.readernest.tests
             Assert.StartsWith("https://api.example.test/api/storage/local/files/", withFallback.GetReadUrl(stored.RelativePath, TimeSpan.FromHours(1), null));
         }
 
+        [Fact]
+        public async Task ServedType_ComesFromTheFileExtension_NotTheUploadersClaim()
+        {
+            var stored = await _storage.StoreAsync(new MemoryStream(Encoding.UTF8.GetBytes("<script>alert(1)</script>")), "deck.pdf");
+            // The uploader's browser claimed text/html; the link is signed with that, but it must not be served as a page.
+            var url = new Uri(_storage.GetReadUrl(stored.RelativePath, TimeSpan.FromHours(1), "text/html"));
+            var q = System.Web.HttpUtility.ParseQueryString(url.Query);
+            var controller = new iucs.readernest.api.Controllers.LocalStorageController(_storage)
+            {
+                ControllerContext = new Microsoft.AspNetCore.Mvc.ControllerContext { HttpContext = new DefaultHttpContext() },
+            };
+
+            var file = Assert.IsType<Microsoft.AspNetCore.Mvc.PhysicalFileResult>(controller.GetFile(stored.RelativePath, long.Parse(q["exp"]!), q["ct"], q["sig"]));
+
+            Assert.Equal("application/pdf", file.ContentType);
+            Assert.Equal("nosniff", controller.Response.Headers.XContentTypeOptions.ToString());
+        }
+
+        [Fact]
+        public async Task LeftoverTempFiles_FromAnInterruptedSave_AreCleanedUp()
+        {
+            Directory.CreateDirectory(_root);
+            var stale = Path.Combine(_root, "abc.pdf.tmp-0123");
+            await File.WriteAllTextAsync(stale, "half");
+            File.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddDays(-2));
+            var recent = Path.Combine(_root, "def.pdf.tmp-4567");
+            await File.WriteAllTextAsync(recent, "in progress");
+
+            await _storage.StoreAsync(new MemoryStream([1]), "next.pdf");
+
+            Assert.False(File.Exists(stale));
+            Assert.True(File.Exists(recent)); // a save happening right now is left alone
+        }
+
+        [Fact]
+        public void DiskFull_IsRecognised_ForAClearMessage()
+        {
+            Assert.True(iucs.readernest.api.Middleware.ExceptionHandlingMiddleware.IsDiskFull(new IOException("No space left on device : '/app/uploads/x.mp4'")));
+            Assert.True(iucs.readernest.api.Middleware.ExceptionHandlingMiddleware.IsDiskFull(new IOException("disk full", unchecked((int)0x80070070))));
+            Assert.False(iucs.readernest.api.Middleware.ExceptionHandlingMiddleware.IsDiskFull(new IOException("The file is in use")));
+        }
+
         private sealed class TestEnvironment : IWebHostEnvironment
         {
             public string WebRootPath { get; set; } = Path.GetTempPath();

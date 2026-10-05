@@ -68,12 +68,16 @@ namespace iucs.readernest.api.Controllers
                 return NotFound();
             }
 
-            var contentType = !string.IsNullOrWhiteSpace(ct)
-                ? ct
-                : ContentTypes.TryGetContentType(key, out var guessed) ? guessed : "application/octet-stream";
+            // The type comes from the stored file's own extension (only learning-content types are
+            // ever accepted -- see LocalFileStorage.AllowedExtensions), never from `ct`: that's the
+            // MIME type the uploader's browser reported, and serving a ".pdf" inline as "text/html"
+            // would run whatever it contains as a page on the API's origin. `ct` still has to match
+            // the signature, it just can't change how the file is served.
+            var contentType = ContentTypes.TryGetContentType(key, out var byExtension) ? byExtension : "application/octet-stream";
             // Inline (plays in the browser rather than downloading), with Range support so a long
             // recording or video can be seeked without fetching it all.
             Response.Headers.ContentDisposition = "inline";
+            Response.Headers.XContentTypeOptions = "nosniff";
             return PhysicalFile(path, contentType, enableRangeProcessing: true);
         }
     }

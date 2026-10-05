@@ -125,6 +125,7 @@ namespace iucs.readernest.api.Services
             CancellationToken cancellationToken = default)
         {
             var key = NewKey(originalFileName);
+            RemoveAbandonedUploads();
             var size = await SaveAsync(key, content, cancellationToken);
             return new StoredFile { RelativePath = key, SizeBytes = size };
         }
@@ -399,13 +400,26 @@ namespace iucs.readernest.api.Services
         {
             try
             {
+                var cutoff = DateTime.UtcNow.AddDays(-1);
+
+                // Half-written temp files from a save interrupted by a crash or restart.
+                if (Directory.Exists(_rootPath))
+                {
+                    foreach (var temp in Directory.EnumerateFiles(_rootPath, "*.tmp-*"))
+                    {
+                        if (File.GetLastWriteTimeUtc(temp) < cutoff)
+                        {
+                            File.Delete(temp);
+                        }
+                    }
+                }
+
                 var parts = Path.Combine(_rootPath, PartsFolder);
                 if (!Directory.Exists(parts))
                 {
                     return;
                 }
 
-                var cutoff = DateTime.UtcNow.AddDays(-1);
                 foreach (var folder in Directory.EnumerateDirectories(parts))
                 {
                     var lastTouched = Directory.EnumerateFiles(folder)
