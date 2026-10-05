@@ -153,6 +153,18 @@ namespace iucs.readernest.tests
                 controller.GetFile(session.Key, long.Parse(r["exp"]!), "text/html", r["sig"])).StatusCode); // can't swap the content type
         }
 
+        [Fact]
+        public async Task Sync_WithoutS3Settings_ReportsWhyAndFinishes()
+        {
+            var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Storage:LocalPath"] = _root }).Build();
+            var progress = new StorageSyncProgress();
+            await StorageMigration.SyncAsync("local", Microsoft.Extensions.DependencyInjection.ServiceCollectionContainerBuilderExtensions.BuildServiceProvider(new Microsoft.Extensions.DependencyInjection.ServiceCollection()), config, progress, default);
+
+            Assert.False(progress.Running);
+            Assert.NotNull(progress.FinishedAtUtc);
+            Assert.Contains("S3 isn't configured", progress.Error);
+        }
+
         private sealed class TestEnvironment : IWebHostEnvironment
         {
             public string WebRootPath { get; set; } = Path.GetTempPath();

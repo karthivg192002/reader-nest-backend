@@ -72,7 +72,8 @@ builder.Services.AddScoped<ISmsSender, SmsSender>();
 // Storage:Provider = "Local" switches uploaded resources and class presentations to a folder on
 // disk (Storage:LocalPath -- must be a mounted host folder, see LocalFileStorage) with the same
 // signed upload/playback links; anything else (the default) keeps S3. Existing files are copied
-// between the two with `storage-migrate` (see StorageMigration).
+// between the two with Admin → Settings → File storage → Sync, or `storage-migrate` (see StorageMigration).
+builder.Services.AddSingleton<StorageSyncService>();
 if (string.Equals(builder.Configuration["Storage:Provider"], "Local", StringComparison.OrdinalIgnoreCase))
 {
     builder.Services.AddSingleton<LocalFileStorage>();
