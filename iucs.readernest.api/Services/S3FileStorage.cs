@@ -290,6 +290,30 @@ namespace iucs.readernest.api.Services
             new($"Could not {action} in object storage ({ex.StatusCode}): {ex.Message}. " +
                 "Check the Storage:S3 configuration (endpoint, credentials, bucket).");
 
+        /// <summary>Every object in the bucket with its size (for StorageMigration).</summary>
+        public async Task<List<(string Key, long Size)>> ListAllAsync(CancellationToken cancellationToken = default)
+        {
+            var all = new List<(string Key, long Size)>();
+            var request = new ListObjectsV2Request { BucketName = _bucket };
+            ListObjectsV2Response response;
+            do
+            {
+                response = await _client.ListObjectsV2Async(request, cancellationToken);
+                all.AddRange((response.S3Objects ?? []).Select(o => (o.Key, o.Size ?? 0L)));
+                request.ContinuationToken = response.NextContinuationToken;
+            }
+            while (response.IsTruncated == true);
+
+            return all;
+        }
+
+        /// <summary>Uploads a file under an exact key (the local -> S3 migration keeps keys unchanged).</summary>
+        public async Task SaveAsync(string key, Stream content, CancellationToken cancellationToken = default)
+        {
+            using var transfer = new Amazon.S3.Transfer.TransferUtility(_client);
+            await transfer.UploadAsync(content, _bucket, key, cancellationToken);
+        }
+
         public async Task<Stream?> OpenReadAsync(string relativePath, CancellationToken cancellationToken = default)
         {
             try

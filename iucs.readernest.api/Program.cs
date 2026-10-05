@@ -68,9 +68,23 @@ builder.Services.AddScoped<ISmsSender, SmsSender>();
 // an upload made locally behaves identically to one made against the real deployment instead
 // of silently depending on which environment you're in. Configured via Storage:S3:* (real
 // credentials come from user-secrets locally, environment variables in prod — never committed).
-builder.Services.AddSingleton<IFileStorage, S3FileStorage>();
-// Same instance, second role: browser-to-bucket multipart upload and presigned playback for big recordings.
-builder.Services.AddSingleton<IDirectUploadStorage>(sp => (S3FileStorage)sp.GetRequiredService<IFileStorage>());
+//
+// Storage:Provider = "Local" switches uploaded resources and class presentations to a folder on
+// disk (Storage:LocalPath -- must be a mounted host folder, see LocalFileStorage) with the same
+// signed upload/playback links; anything else (the default) keeps S3. Existing files are copied
+// between the two with `storage-migrate` (see StorageMigration).
+if (string.Equals(builder.Configuration["Storage:Provider"], "Local", StringComparison.OrdinalIgnoreCase))
+{
+    builder.Services.AddSingleton<LocalFileStorage>();
+    builder.Services.AddSingleton<IFileStorage>(sp => sp.GetRequiredService<LocalFileStorage>());
+    builder.Services.AddSingleton<IDirectUploadStorage>(sp => sp.GetRequiredService<LocalFileStorage>());
+}
+else
+{
+    builder.Services.AddSingleton<IFileStorage, S3FileStorage>();
+    // Same instance, second role: browser-to-bucket multipart upload and presigned playback for big recordings.
+    builder.Services.AddSingleton<IDirectUploadStorage>(sp => (S3FileStorage)sp.GetRequiredService<IFileStorage>());
+}
 // Parses uploaded bulk-import spreadsheets (.csv/.xlsx) for Users/Students/Departments/
 // Courses/Package Plans/Quiz Questions — stateless, so singleton is fine.
 builder.Services.AddSingleton<IBulkFileReader, BulkFileReader>();
@@ -354,6 +368,9 @@ builder.Services.AddCors(options =>
             .AllowAnyHeader()
             .WithMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
             .AllowCredentials()
+            // Local storage's part-upload endpoint answers each part with its ETag, which the
+            // browser's upload code must be able to read (S3 exposes it via the bucket's CORS).
+            .WithExposedHeaders("ETag")
             // Browsers re-sent a preflight before nearly every API call; let them reuse it.
             .SetPreflightMaxAge(TimeSpan.FromHours(2))));
 
@@ -369,6 +386,14 @@ builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.BrotliCompre
 builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
 
 var app = builder.Build();
+
+// `dotnet iucs.readernest.api.dll storage-migrate --to local|s3`: copy uploaded files between S3
+// and the local folder, then exit without starting the web server (see StorageMigration).
+if (StorageMigration.IsRequested(args))
+{
+    Environment.ExitCode = await StorageMigration.RunAsync(args, app.Services, app.Configuration);
+    return;
+}
 
 // Must run before anything that reads Connection.RemoteIpAddress (the login rate
 // limiter below): the API is served through a TLS-terminating reverse proxy in
