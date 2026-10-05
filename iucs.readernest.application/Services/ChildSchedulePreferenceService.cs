@@ -141,12 +141,16 @@ namespace iucs.readernest.application.Services
             var times = new Dictionary<string, string>();
             foreach (var day in ordered)
             {
-                if (!request.DayTimes.TryGetValue(day, out var time) || !TimeRe.IsMatch(time ?? string.Empty))
+                // One "HH:mm", or two comma-joined ("16:00,18:00", first choice first) for a group batch.
+                var slots = request.DayTimes.TryGetValue(day, out var time)
+                    ? (time ?? string.Empty).Split(',', StringSplitOptions.TrimEntries)
+                    : [];
+                if (slots.Length is < 1 or > 2 || slots.Any(s => !TimeRe.IsMatch(s)) || slots.Distinct().Count() != slots.Length)
                 {
                     throw new DomainValidationException($"Choose a preferred time for {day}.");
                 }
 
-                times[day] = time!;
+                times[day] = string.Join(',', slots);
             }
 
             return (ordered, times);

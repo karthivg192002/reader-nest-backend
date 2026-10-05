@@ -209,7 +209,10 @@ namespace iucs.readernest.api.Controllers
         {
             await _parentPortal.GetResourceForViewAsync(UserId(), id, cancellationToken);
             var resource = await resourceService.GetForDownloadAsync(id, cancellationToken); // also audits the access
-            var validFor = TimeSpan.FromMinutes(30);
+            // Long enough to watch a whole video: the player keeps fetching byte ranges with this same
+            // link (seeking, buffering) and nothing refreshes it -- at 30 minutes a long video stopped
+            // mid-way. Still view-only and tied to this one file.
+            var validFor = TimeSpan.FromHours(4);
             // A class recording filed into Resources by reference keeps the recording's own
             // https URL as its file location — nothing to presign, play it as-is.
             var isExternal = Uri.TryCreate(resource.FileUrl, UriKind.Absolute, out var external)

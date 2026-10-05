@@ -50,8 +50,16 @@ services:
       Storage__S3__AccessKey: ${STORAGE_S3_ACCESS_KEY:?set in .env}
       Storage__S3__SecretKey: ${STORAGE_S3_SECRET_KEY:?set in .env}
       Storage__S3__BucketName: ${STORAGE_S3_BUCKET_NAME:?set in .env}
+      # Or keep them on this server instead: STORAGE_PROVIDER=Local stores them in the
+      # reader_nest_uploads volume below (copy existing files first with
+      # `docker compose exec api dotnet iucs.readernest.api.dll storage-migrate --to local`).
+      Storage__Provider: ${STORAGE_PROVIDER:-S3}
+      Storage__LocalPath: /app/uploads
+    volumes:
+      - reader_nest_uploads:/app/uploads
     ports:
       - "5288:8080"
 
 volumes:
   reader_nest_pgdata:
+  reader_nest_uploads:
