@@ -270,7 +270,7 @@ namespace iucs.readernest.api.Controllers
 
             try
             {
-                return Ok(new ResourceViewUrlDto { Url = _directUploads.GetReadUrl(resource.FileUrl, TimeSpan.FromMinutes(30), resource.MimeType) });
+                return Ok(new ResourceViewUrlDto { Url = _directUploads.GetReadUrl(resource.FileUrl, TimeSpan.FromHours(4), resource.MimeType) });
             }
             catch (NotSupportedException)
             {

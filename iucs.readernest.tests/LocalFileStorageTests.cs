@@ -165,6 +165,46 @@ namespace iucs.readernest.tests
             Assert.Contains("S3 isn't configured", progress.Error);
         }
 
+        [Fact]
+        public void Sync_OnlyMovesPortalUploads_NotOtherThingsInTheBucket()
+        {
+            Assert.True(LocalFileStorage.IsPortalKey("0f8c2b9e4d1a4c6b8e2f7a9d3c5b1e0f.pdf"));
+            Assert.False(LocalFileStorage.IsPortalKey("recordings/class-123.mp4"));
+            Assert.False(LocalFileStorage.IsPortalKey("../escape.pdf"));
+            Assert.False(LocalFileStorage.IsPortalKey(".hidden"));
+        }
+
+        [Fact]
+        public async Task AbandonedUploads_AreClearedWhenANewUploadStarts()
+        {
+            var old = await _storage.StartMultipartAsync("old.mp4", null);
+            await _storage.SavePartAsync(old.UploadId, old.Key, 1, new MemoryStream(new byte[1024]), default);
+            var folder = Path.Combine(_root, ".multipart", old.UploadId);
+            foreach (var file in Directory.EnumerateFiles(folder))
+            {
+                File.SetLastWriteTimeUtc(file, DateTime.UtcNow.AddDays(-2));
+            }
+
+            var fresh = await _storage.StartMultipartAsync("new.mp4", null);
+
+            Assert.False(Directory.Exists(folder));
+            Assert.True(Directory.Exists(Path.Combine(_root, ".multipart", fresh.UploadId)));
+        }
+
+        [Fact]
+        public void SyncProgress_SnapshotIsIndependentOfTheRunningSync()
+        {
+            var live = new StorageSyncProgress { Running = true, Total = 3 };
+            live.AddFailure("a.pdf: boom", 20);
+            var snap = live.Snapshot();
+            live.AddFailure("b.pdf: boom", 20);
+            live.Copied = 2;
+
+            Assert.Single(snap.FailedFiles);
+            Assert.Equal(0, snap.Copied);
+            Assert.Equal(2, live.FailedFiles.Count);
+        }
+
         private sealed class TestEnvironment : IWebHostEnvironment
         {
             public string WebRootPath { get; set; } = Path.GetTempPath();

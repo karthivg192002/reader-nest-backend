@@ -15,8 +15,35 @@ namespace iucs.readernest.api.Services
         public DateTime? FinishedAtUtc { get; set; }
         /// <summary>A setup problem that stopped the sync before any file was tried (e.g. S3 not configured).</summary>
         public string? Error { get; set; }
+        /// <summary>Objects in the bucket that aren't portal uploads (e.g. class recordings in folders) -- left in S3.</summary>
+        public int Ignored { get; set; }
         /// <summary>The first few files that failed, with why.</summary>
         public List<string> FailedFiles { get; set; } = [];
+
+        /// <summary>
+        /// A copy safe to hand to the JSON serializer while the sync keeps running -- serializing the
+        /// live object could hit FailedFiles mid-Add ("Collection was modified") and fail the poll.
+        /// </summary>
+        public StorageSyncProgress Snapshot()
+        {
+            lock (FailedFiles)
+            {
+                var copy = (StorageSyncProgress)MemberwiseClone();
+                copy.FailedFiles = [.. FailedFiles];
+                return copy;
+            }
+        }
+
+        public void AddFailure(string line, int max)
+        {
+            lock (FailedFiles)
+            {
+                if (FailedFiles.Count < max)
+                {
+                    FailedFiles.Add(line);
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -63,7 +90,8 @@ namespace iucs.readernest.api.Services
             }
 
             Console.WriteLine($"Done: {progress.Copied} copied ({progress.CopiedBytes / (1024 * 1024)} MB), " +
-                              $"{progress.Skipped} already there, {progress.Failed} failed, of {progress.Total}.");
+                              $"{progress.Skipped} already there, {progress.Failed} failed, of {progress.Total}." +
+                              (progress.Ignored > 0 ? $" {progress.Ignored} other object(s) in the bucket (e.g. recordings) left in S3." : ""));
             return progress.Failed == 0 ? 0 : 1;
         }
 
@@ -92,8 +120,34 @@ namespace iucs.readernest.api.Services
 
                 if (to == "local")
                 {
-                    var objects = await s3.ListAllAsync(cancellationToken);
+                    if (local.IsOnMountedVolume() == false)
+                    {
+                        progress.Error = $"The storage folder ({local.RootPath}) isn't mounted from the server, so anything copied " +
+                                         "there would be lost on the next deploy. Mount a host folder at that path first " +
+                                         "(the Jenkinsfile mounts /opt/readernest/uploads). Nothing was copied.";
+                        return;
+                    }
+
+                    var all = await s3.ListAllAsync(cancellationToken);
+                    // Only the portal's own uploads; anything else in the bucket (class recordings
+                    // written there by the video server, under folders) is not ours to move.
+                    var objects = all.Where(o => LocalFileStorage.IsPortalKey(o.Key)).ToList();
+                    progress.Ignored = all.Count - objects.Count;
                     progress.Total = objects.Count;
+
+                    // Don't start what the disk can't hold: copying a bucket into a full disk would
+                    // fail midway, and a full disk takes the whole API down with it.
+                    var needed = objects
+                        .Where(o => local.ExistingFilePath(o.Key) is not { } p || new FileInfo(p).Length != o.Size)
+                        .Sum(o => o.Size);
+                    const long Margin = 1L * 1024 * 1024 * 1024; // keep 1 GB free for the app, logs and database
+                    if (local.FreeBytes() is { } free && needed + Margin > free)
+                    {
+                        progress.Error = $"Not enough disk space on this server: the files need {needed / (1024 * 1024)} MB " +
+                                         $"(plus 1 GB kept free) but only {free / (1024 * 1024)} MB is free. Nothing was copied.";
+                        return;
+                    }
+
                     foreach (var (key, size) in objects)
                     {
                         await CopyOneAsync(progress, key, async () =>
@@ -163,10 +217,7 @@ namespace iucs.readernest.api.Services
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 progress.Failed++;
-                if (progress.FailedFiles.Count < MaxFailedFilesListed)
-                {
-                    progress.FailedFiles.Add($"{key}: {ex.Message}");
-                }
+                progress.AddFailure($"{key}: {ex.Message}", MaxFailedFilesListed);
             }
         }
     }
@@ -188,7 +239,8 @@ namespace iucs.readernest.api.Services
             _configuration = configuration;
         }
 
-        public StorageSyncProgress? Current => _current;
+        /// <summary>A snapshot of the latest sync, safe to serialize while it runs.</summary>
+        public StorageSyncProgress? Current => _current?.Snapshot();
 
         /// <summary>Starts a sync; false when one is already running.</summary>
         public bool TryStart(string to)

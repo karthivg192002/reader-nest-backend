@@ -35,6 +35,14 @@ namespace iucs.readernest.api.Controllers
             public string LocalPath { get; set; } = "";
             public int LocalFileCount { get; set; }
             public long LocalBytes { get; set; }
+            /// <summary>Free space on the local storage folder's disk (null if unknown).</summary>
+            public long? LocalFreeBytes { get; set; }
+            /// <summary>
+            /// Whether the local folder is mounted from the host and so survives redeploys. False means
+            /// files kept there would be lost on the next deploy (how files were lost before S3).
+            /// Null when it can't be told (not Linux).
+            /// </summary>
+            public bool? LocalFolderMounted { get; set; }
             public StorageSyncProgress? Sync { get; set; }
         }
 
@@ -57,7 +65,9 @@ namespace iucs.readernest.api.Controllers
                     .All(k => !string.IsNullOrWhiteSpace(_configuration[$"Storage:S3:{k}"])),
                 LocalPath = local.RootPath,
                 LocalFileCount = files.Count,
-                LocalBytes = files.Sum(p => new FileInfo(p!).Length),
+                LocalBytes = files.Sum(p => System.IO.File.Exists(p) ? new FileInfo(p!).Length : 0),
+                LocalFreeBytes = local.FreeBytes(),
+                LocalFolderMounted = local.IsOnMountedVolume(),
                 Sync = _sync.Current,
             });
         }

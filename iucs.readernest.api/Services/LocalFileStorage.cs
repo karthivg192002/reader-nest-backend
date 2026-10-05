@@ -61,6 +61,58 @@ namespace iucs.readernest.api.Services
 
         public string RootPath => _rootPath;
 
+        /// <summary>
+        /// True for a key the portal itself creates (a flat "{guid}{ext}" name). Anything else in the
+        /// bucket -- e.g. class recordings under a "recordings/" prefix written by the video server --
+        /// isn't a portal upload and is left where it is by the sync.
+        /// </summary>
+        public static bool IsPortalKey(string key) =>
+            KeyPattern.IsMatch(key) && !key.Contains("..", StringComparison.Ordinal);
+
+        /// <summary>
+        /// Whether the storage folder is a mount from the host (a bind mount or Docker volume), so
+        /// files survive a redeploy. Linux only (reads /proc/self/mountinfo); null when it can't tell.
+        /// </summary>
+        public bool? IsOnMountedVolume()
+        {
+            try
+            {
+                const string mountInfo = "/proc/self/mountinfo";
+                if (!File.Exists(mountInfo))
+                {
+                    return null;
+                }
+
+                // Field 5 of each line is the mount point; the folder (or a parent of it, other than
+                // "/") must be one of them.
+                var mountPoints = File.ReadLines(mountInfo)
+                    .Select(l => l.Split(' '))
+                    .Where(f => f.Length > 4)
+                    .Select(f => f[4].Replace("\\040", " "))
+                    .Where(p => p != "/")
+                    .ToList();
+                return mountPoints.Any(p => _rootPath == p || _rootPath.StartsWith(p.TrimEnd('/') + "/", StringComparison.Ordinal));
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>Free space on the storage folder's disk, in bytes (null if unknown).</summary>
+        public long? FreeBytes()
+        {
+            try
+            {
+                Directory.CreateDirectory(_rootPath);
+                return new DriveInfo(_rootPath).AvailableFreeSpace;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         public async Task<StoredFile> StoreAsync(
             Stream content,
             string originalFileName,
@@ -134,6 +186,7 @@ namespace iucs.readernest.api.Services
         public Task<DirectUploadSession> StartMultipartAsync(string originalFileName, string? contentType, CancellationToken cancellationToken = default)
         {
             var key = NewKey(originalFileName);
+            RemoveAbandonedUploads();
             var uploadId = Guid.NewGuid().ToString("N");
             var folder = PartsFolderFor(uploadId);
             Directory.CreateDirectory(folder);
@@ -318,6 +371,43 @@ namespace iucs.readernest.api.Services
         }
 
         private string PartsFolderFor(string uploadId) => Path.Combine(_rootPath, PartsFolder, uploadId);
+
+        /// <summary>
+        /// An upload whose tab was closed midway never completes or aborts, and its parts (up to many
+        /// GB) would sit on disk forever. Part URLs live 2 hours, so a folder untouched for a day is
+        /// dead; cleared whenever a new upload starts.
+        /// </summary>
+        private void RemoveAbandonedUploads()
+        {
+            try
+            {
+                var parts = Path.Combine(_rootPath, PartsFolder);
+                if (!Directory.Exists(parts))
+                {
+                    return;
+                }
+
+                var cutoff = DateTime.UtcNow.AddDays(-1);
+                foreach (var folder in Directory.EnumerateDirectories(parts))
+                {
+                    var lastTouched = Directory.EnumerateFiles(folder)
+                        .Select(File.GetLastWriteTimeUtc)
+                        .DefaultIfEmpty(Directory.GetLastWriteTimeUtc(folder))
+                        .Max();
+                    if (lastTouched < cutoff)
+                    {
+                        Directory.Delete(folder, recursive: true);
+                    }
+                }
+            }
+            catch (IOException)
+            {
+                // best effort -- a folder in use is simply tried again next time
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
 
         private void EnsureUploadBelongsTo(string uploadId, string key)
         {
