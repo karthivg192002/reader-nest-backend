@@ -1,3 +1,8 @@
+using iucs.readernest.domain.Entities.Resources;
+using iucs.readernest.domain.Entities.Sessions;
+using iucs.readernest.domain.Repository;
+using Microsoft.EntityFrameworkCore;
+
 namespace iucs.readernest.api.Services
 {
     /// <summary>Live state of a storage sync, shown on Admin → Settings → File storage.</summary>
@@ -15,7 +20,7 @@ namespace iucs.readernest.api.Services
         public DateTime? FinishedAtUtc { get; set; }
         /// <summary>A setup problem that stopped the sync before any file was tried (e.g. S3 not configured).</summary>
         public string? Error { get; set; }
-        /// <summary>Objects in the bucket that aren't portal uploads (e.g. class recordings in folders) -- left in S3.</summary>
+        /// <summary>Objects in the bucket this site doesn't use (class recordings, the other environment's uploads in a shared bucket) -- left in S3.</summary>
         public int Ignored { get; set; }
         /// <summary>The first few files that failed, with why.</summary>
         public List<string> FailedFiles { get; set; } = [];
@@ -91,7 +96,7 @@ namespace iucs.readernest.api.Services
 
             Console.WriteLine($"Done: {progress.Copied} copied ({progress.CopiedBytes / (1024 * 1024)} MB), " +
                               $"{progress.Skipped} already there, {progress.Failed} failed, of {progress.Total}." +
-                              (progress.Ignored > 0 ? $" {progress.Ignored} other object(s) in the bucket (e.g. recordings) left in S3." : ""));
+                              (progress.Ignored > 0 ? $" {progress.Ignored} other object(s) in the bucket this site doesn't use (recordings, the other environment's uploads) left in S3." : ""));
             return progress.Failed == 0 ? 0 : 1;
         }
 
@@ -129,9 +134,12 @@ namespace iucs.readernest.api.Services
                     }
 
                     var all = await s3.ListAllAsync(cancellationToken);
-                    // Only the portal's own uploads; anything else in the bucket (class recordings
-                    // written there by the video server, under folders) is not ours to move.
-                    var objects = all.Where(o => LocalFileStorage.IsPortalKey(o.Key)).ToList();
+                    // Only files THIS site's database uses. The bucket can hold far more: class
+                    // recordings in folders written by the video server, and -- since UAT and live
+                    // share one bucket -- the other environment's uploads. Copying those would fill
+                    // this server's disk with another site's files.
+                    var used = await ReferencedKeysAsync(services, cancellationToken);
+                    var objects = all.Where(o => LocalFileStorage.IsPortalKey(o.Key) && used.Contains(o.Key)).ToList();
                     progress.Ignored = all.Count - objects.Count;
                     progress.Total = objects.Count;
 
@@ -196,6 +204,21 @@ namespace iucs.readernest.api.Services
                 progress.Running = false;
                 progress.FinishedAtUtc = DateTime.UtcNow;
             }
+        }
+
+        /// <summary>
+        /// Every stored-file key this site's database points at: resources and class presentations
+        /// (soft-deleted rows excluded). Outside links (a recording filed by reference) aren't stored files.
+        /// </summary>
+        public static async Task<HashSet<string>> ReferencedKeysAsync(IServiceProvider services, CancellationToken cancellationToken)
+        {
+            using var scope = services.CreateScope();
+            var unitOfWork = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+            var resources = await unitOfWork.Repository<Resource>().Query().Select(r => r.FileUrl).ToListAsync(cancellationToken);
+            var presentations = await unitOfWork.Repository<SessionPresentation>().Query().Select(p => p.StorageUrl).ToListAsync(cancellationToken);
+            return resources.Concat(presentations)
+                .Where(k => !string.IsNullOrWhiteSpace(k) && !k.Contains("://", StringComparison.Ordinal))
+                .ToHashSet(StringComparer.Ordinal);
         }
 
         /// <summary>Runs one file's copy; <paramref name="copy"/> returns the bytes copied, or null when it was already there.</summary>
