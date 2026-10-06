@@ -1,5 +1,4 @@
 using iucs.readernest.api.Services;
-using iucs.readernest.application.Common.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.StaticFiles;
@@ -11,8 +10,8 @@ namespace iucs.readernest.api.Controllers
     /// browser PUTs each part of a large upload here, and plays/downloads files through a signed,
     /// expiring, range-capable read URL. Anonymous on purpose -- like an S3 presigned URL, the
     /// HMAC signature in the link IS the permission (it's only ever issued to a caller who passed
-    /// the normal permission checks on ResourcesController / ParentPortalController). Answers 404
-    /// when storage isn't set to Local.
+    /// the normal permission checks on ResourcesController / ParentPortalController). Always on,
+    /// whichever store is active: files kept on this server stay reachable after switching to S3.
     /// </summary>
     [ApiController]
     [Route("api/storage/local")]
@@ -21,11 +20,11 @@ namespace iucs.readernest.api.Controllers
     {
         private static readonly FileExtensionContentTypeProvider ContentTypes = new();
 
-        private readonly LocalFileStorage? _storage;
+        private readonly LocalFileStorage _storage;
 
-        public LocalStorageController(IFileStorage storage)
+        public LocalStorageController(LocalFileStorage storage)
         {
-            _storage = storage as LocalFileStorage;
+            _storage = storage;
         }
 
         [HttpPut("parts/{uploadId}/{partNumber:int}")]
@@ -34,11 +33,6 @@ namespace iucs.readernest.api.Controllers
             string uploadId, int partNumber, [FromQuery] string key, [FromQuery] long exp, [FromQuery] string? sig,
             CancellationToken cancellationToken)
         {
-            if (_storage is null)
-            {
-                return NotFound();
-            }
-
             if (!_storage.IsValidPartSignature(uploadId, key, partNumber, exp, sig))
             {
                 return StatusCode(StatusCodes.Status403Forbidden, "This upload link has expired or is invalid.");
@@ -52,11 +46,6 @@ namespace iucs.readernest.api.Controllers
         [HttpGet("files/{key}")]
         public IActionResult GetFile(string key, [FromQuery] long exp, [FromQuery] string? ct, [FromQuery] string? sig)
         {
-            if (_storage is null)
-            {
-                return NotFound();
-            }
-
             if (!_storage.IsValidReadSignature(key, exp, ct, sig))
             {
                 return StatusCode(StatusCodes.Status403Forbidden, "This link has expired or is invalid.");

@@ -73,6 +73,12 @@ namespace iucs.readernest.application.Services
                     throw new DomainValidationException(
                         $"Setting key '{key[..Math.Min(key.Length, 32)]}…' exceeds {MaxKeyLength} characters.");
                 }
+
+                // Switching storage takes effect live and has checks of its own (StorageController).
+                if (string.Equals(key, Common.StorageSettings.ProviderKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new DomainValidationException("Change where files are stored from Settings → File storage.");
+                }
             }
 
             var overLongValue = updates.FirstOrDefault(u => u.Value is not null && u.Value.Length > MaxValueLength);

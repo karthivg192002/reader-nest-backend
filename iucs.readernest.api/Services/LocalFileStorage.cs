@@ -75,6 +75,9 @@ namespace iucs.readernest.api.Services
         public static bool IsPortalKey(string key) =>
             KeyPattern.IsMatch(key) && !key.Contains("..", StringComparison.Ordinal);
 
+        /// <summary>True for an upload id this class issued (S3's look nothing like it) -- see RoutingFileStorage.</summary>
+        public static bool IsLocalUploadId(string uploadId) => UploadIdPattern.IsMatch(uploadId);
+
         /// <summary>
         /// Whether the storage folder is a mount from the host (a bind mount or Docker volume), so
         /// files survive a redeploy. Linux only (reads /proc/self/mountinfo); null when it can't tell.

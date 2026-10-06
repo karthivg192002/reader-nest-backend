@@ -69,28 +69,29 @@ builder.Services.AddScoped<ISmsSender, SmsSender>();
 // of silently depending on which environment you're in. Configured via Storage:S3:* (real
 // credentials come from user-secrets locally, environment variables in prod — never committed).
 //
-// Storage:Provider = "Local" switches uploaded resources and class presentations to a folder on
-// disk (Storage:LocalPath -- must be a mounted host folder, see LocalFileStorage) with the same
-// signed upload/playback links; anything else (the default) keeps S3. Existing files are copied
-// between the two with Admin → Settings → File storage → Sync, or `storage-migrate` (see StorageMigration).
+// Each client picks S3 or a folder on this server's disk (Storage:LocalPath -- must be a mounted
+// host folder, see LocalFileStorage) on Admin → Settings → File storage; the choice is kept in the
+// database and applies live (StorageProviderSwitch), with Storage:Provider as the starting value.
+// Both stores stay wired up so files are found wherever they are (RoutingFileStorage); existing
+// files are copied between them with that page's Sync buttons, or `storage-migrate` (see StorageMigration).
 builder.Services.AddSingleton<StorageSyncService>();
-if (string.Equals(builder.Configuration["Storage:Provider"], "Local", StringComparison.OrdinalIgnoreCase))
+builder.Services.AddSingleton<StorageProviderSwitch>();
+var s3Storage = S3FileStorage.IsConfigured(builder.Configuration) ? new S3FileStorage(builder.Configuration) : null;
+if (s3Storage is not null)
 {
-    // With S3 still configured it doubles as the fallback for files not yet copied to this server.
-    builder.Services.AddSingleton(sp => new LocalFileStorage(
-        sp.GetRequiredService<IWebHostEnvironment>(),
-        builder.Configuration,
-        sp.GetRequiredService<IHttpContextAccessor>(),
-        S3FileStorage.IsConfigured(builder.Configuration) ? new S3FileStorage(builder.Configuration) : null));
-    builder.Services.AddSingleton<IFileStorage>(sp => sp.GetRequiredService<LocalFileStorage>());
-    builder.Services.AddSingleton<IDirectUploadStorage>(sp => sp.GetRequiredService<LocalFileStorage>());
+    builder.Services.AddSingleton(s3Storage);
 }
-else
-{
-    builder.Services.AddSingleton<IFileStorage, S3FileStorage>();
-    // Same instance, second role: browser-to-bucket multipart upload and presigned playback for big recordings.
-    builder.Services.AddSingleton<IDirectUploadStorage>(sp => (S3FileStorage)sp.GetRequiredService<IFileStorage>());
-}
+
+// With S3 configured it doubles as the fallback for files not yet copied to this server.
+builder.Services.AddSingleton(sp => new LocalFileStorage(
+    sp.GetRequiredService<IWebHostEnvironment>(),
+    builder.Configuration,
+    sp.GetRequiredService<IHttpContextAccessor>(),
+    s3Storage));
+builder.Services.AddSingleton(sp => new RoutingFileStorage(
+    sp.GetRequiredService<StorageProviderSwitch>(), sp.GetRequiredService<LocalFileStorage>(), s3Storage));
+builder.Services.AddSingleton<IFileStorage>(sp => sp.GetRequiredService<RoutingFileStorage>());
+builder.Services.AddSingleton<IDirectUploadStorage>(sp => sp.GetRequiredService<RoutingFileStorage>());
 // Parses uploaded bulk-import spreadsheets (.csv/.xlsx) for Users/Students/Departments/
 // Courses/Package Plans/Quiz Questions — stateless, so singleton is fine.
 builder.Services.AddSingleton<IBulkFileReader, BulkFileReader>();
@@ -485,8 +486,12 @@ app.MapGet("/m/{slug}", async (
 
 await DatabaseInitializer.InitializeAsync(app.Services, app.Configuration);
 
-// Browser-direct (multipart) uploads need the bucket itself to allow the portal's origin.
-if (app.Services.GetService<iucs.readernest.application.Common.Interfaces.IDirectUploadStorage>() is iucs.readernest.api.Services.S3FileStorage s3Storage)
+// The S3-or-local choice saved on Admin → Settings → File storage.
+await app.Services.GetRequiredService<StorageProviderSwitch>().LoadAsync(app.Services);
+
+// Browser-direct (multipart) uploads need the bucket itself to allow the portal's origin. Done
+// whenever S3 is configured, so switching to it from the Settings page works straight away.
+if (s3Storage is not null)
 {
     _ = Task.Run(() => s3Storage.EnsureBrowserUploadCorsAsync(
         allowedOrigins, app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("BucketCors")));
