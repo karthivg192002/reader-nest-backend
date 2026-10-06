@@ -170,6 +170,35 @@ namespace iucs.readernest.tests
             Assert.True((await CreateSessionService().AcquireRecordingSlotAsync(next.Id)).Granted);
         }
 
+        [Fact]
+        public async Task IntegrationSave_PersistsAllowConcurrentRecordingOff_AcrossReload()
+        {
+            var integrations = new IntegrationService(_db.UnitOfWork, _auditLog, new FakePaymentGateway());
+            var created = await integrations.CreateAsync(new iucs.readernest.application.Dto.Integrations.SaveIntegrationRequest
+            {
+                Key = "jitsi",
+                Name = "Jitsi Meet",
+                Category = IntegrationCategory.VideoConferencing,
+                IsEnabled = true,
+                Config = new() { ["domain"] = "meet.test", ["autoRecord"] = "true", ["allowConcurrentRecording"] = "false" },
+            });
+
+            var listed = (await integrations.ListAsync()).Single(i => i.Key == "jitsi");
+            Assert.Equal("false", listed.Config["allowConcurrentRecording"]);
+
+            await integrations.UpdateAsync(created.Id, new iucs.readernest.application.Dto.Integrations.SaveIntegrationRequest
+            {
+                Key = "jitsi",
+                Name = "Jitsi Meet",
+                Category = IntegrationCategory.VideoConferencing,
+                IsEnabled = true,
+                Config = new() { ["domain"] = "meet.test", ["autoRecord"] = "true", ["allowConcurrentRecording"] = "false" },
+            });
+
+            Assert.Equal("false", (await integrations.ListAsync()).Single(i => i.Key == "jitsi").Config["allowConcurrentRecording"]);
+            Assert.False((await CreateSessionService().GetClassroomSettingsAsync()).AllowConcurrentRecording);
+        }
+
         // ---------- Google Drive link resources ----------
 
         [Theory]
