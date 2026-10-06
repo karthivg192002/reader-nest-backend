@@ -34,7 +34,12 @@ cloud account; nothing else blocks provisioning.
   keys as `""` (not absent) purely so they're discoverable, which is why a
   missing env var surfaces as a runtime exception on first request rather
   than a startup failure — there's nothing to catch it before then.
-- `Storage:Provider` (env `Storage__Provider`) — `S3` (default) or `Local`.
+- `Storage:Provider` (env `Storage__Provider`; `STORAGE_PROVIDER` in the
+  compose `.env`) — `S3` (default) or `Local`: only the **starting** value.
+  Admins switch it live on Admin → Settings → File storage; that choice is
+  saved in the database (`storage.provider` AppSetting) and wins over this
+  setting. Without S3 credentials it is always `Local`, so a `Local`-only
+  client can leave every `Storage:S3:*` value out.
   `Local` stores uploaded resources and class presentations under
   `Storage:LocalPath` (env `Storage__LocalPath`, `/app/uploads` in the
   deploy configs) via `LocalFileStorage`, with the same signed multipart

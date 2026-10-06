@@ -28,9 +28,11 @@ namespace iucs.readernest.api.Controllers
         }
 
         [HttpGet("dashboard")]
-        public async Task<ActionResult<ClassSessionLogDashboardDto>> Dashboard(CancellationToken cancellationToken)
+        public async Task<ActionResult<ClassSessionLogDashboardDto>> Dashboard(
+            [FromQuery] string? search,
+            CancellationToken cancellationToken)
         {
-            return Ok(await _classSessionLogService.GetDashboardAsync(cancellationToken));
+            return Ok(await _classSessionLogService.GetDashboardAsync(search, cancellationToken));
         }
 
         [HttpGet]
@@ -41,12 +43,13 @@ namespace iucs.readernest.api.Controllers
             [FromQuery] Guid? teacherProfileId,
             [FromQuery] ClassSessionEventType? eventType,
             [FromQuery] bool? expectedOnly,
+            [FromQuery] string? search,
             [FromQuery] int page = 1,
             [FromQuery] int pageSize = 25,
             CancellationToken cancellationToken = default)
         {
             return Ok(await _classSessionLogService.ListEventLogsAsync(
-                AsUtc(fromUtc), AsUtc(toUtc), sessionId, teacherProfileId, eventType, expectedOnly, page, pageSize, cancellationToken));
+                AsUtc(fromUtc), AsUtc(toUtc), sessionId, teacherProfileId, eventType, expectedOnly, search, page, pageSize, cancellationToken));
         }
 
         [HttpGet("session/{sessionId:guid}")]

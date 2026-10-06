@@ -39,9 +39,9 @@ namespace iucs.readernest.application.Services
             var clampedLines = Math.Clamp(tailLines, 10, 1000);
             var logsCommand = $"docker logs --tail {clampedLines} --timestamps {containerName} 2>&1 | grep -iE 'error|exception|fatal|fail' | tail -n 150";
 
-            // The burst-worker's only route from this server is through main's WireGuard tunnel
-            // (10.10.10.3) -- main itself already has a key-based hop to it (set up for its own
-            // idle-check in burst-scale-down.sh), so we reuse that instead of standing up a
+            // A server whose only route from here is through another one (SshProxyHost, e.g. over
+            // main's WireGuard tunnel): the jump host already has a key-based hop to it, so we
+            // reuse that instead of standing up a
             // second, separate credential path. Connect to the jump host and run a nested ssh
             // rather than connecting to server.SshHost directly.
             var usingProxy = !string.IsNullOrWhiteSpace(server.SshProxyHost);
@@ -79,6 +79,49 @@ namespace iucs.readernest.application.Services
                     Server = serverName,
                     Container = containerName,
                     Lines = lines,
+                    FetchedAtUtc = DateTime.UtcNow,
+                };
+            }
+            finally
+            {
+                if (client.IsConnected)
+                {
+                    client.Disconnect();
+                }
+            }
+        }
+
+        // Same shape rn-job itself enforces for TASK; anything else could escape the path or the shell.
+        private static readonly System.Text.RegularExpressions.Regex TaskNamePattern = new("^[a-z0-9-]{1,64}$");
+
+        public async Task<ServerLogsDto> GetScheduledTaskLogAsync(string serverName, string task, int tailLines, CancellationToken cancellationToken = default)
+        {
+            var server = _options.Servers.FirstOrDefault(s => s.Name == serverName)
+                ?? throw new ArgumentException($"Unknown server '{serverName}'.", nameof(serverName));
+            if (task is null || !TaskNamePattern.IsMatch(task))
+            {
+                throw new ArgumentException("Task name must be lowercase letters, digits and dashes.", nameof(task));
+            }
+            if (string.IsNullOrWhiteSpace(server.SshHost) || string.IsNullOrWhiteSpace(server.SshPassword))
+            {
+                throw new InvalidOperationException($"SSH is not configured for '{serverName}'.");
+            }
+
+            var clampedLines = Math.Clamp(tailLines, 20, 2000);
+            var command = $"tail -n {clampedLines} /opt/rn-monitoring/job-logs/{task}.log 2>/dev/null || echo 'No log yet for {task} on this server.'";
+
+            using var client = new SshClient(server.SshHost, server.SshPort, server.SshUsername, server.SshPassword);
+            await Task.Run(client.Connect, cancellationToken);
+            try
+            {
+                var cmd = client.CreateCommand(command);
+                cmd.CommandTimeout = TimeSpan.FromSeconds(15);
+                var result = await Task.Run(cmd.Execute, cancellationToken);
+                return new ServerLogsDto
+                {
+                    Server = serverName,
+                    Container = task,
+                    Lines = result.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToList(),
                     FetchedAtUtc = DateTime.UtcNow,
                 };
             }

@@ -312,6 +312,24 @@ namespace iucs.readernest.api.Services
             return all;
         }
 
+        /// <summary>Whether the object is in the bucket; null when S3 can't be reached to tell.</summary>
+        public async Task<bool?> ExistsAsync(string key, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                await _client.GetObjectMetadataAsync(_bucket, key, cancellationToken);
+                return true;
+            }
+            catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                return false;
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                return null; // service error, timeout or no network
+            }
+        }
+
         /// <summary>Uploads a file under an exact key (the local -> S3 migration keeps keys unchanged).</summary>
         public async Task SaveAsync(string key, Stream content, CancellationToken cancellationToken = default)
         {
