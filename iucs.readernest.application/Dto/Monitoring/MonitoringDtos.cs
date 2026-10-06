@@ -312,6 +312,24 @@ namespace iucs.readernest.application.Dto.Monitoring
     }
 
     /// <summary>Error-filtered `docker logs` tail for one container on one monitored server (see IServerLogService).</summary>
+    /// <summary>
+    /// One cron task on one monitored server, as reported by /opt/rn-monitoring/rn-job (every
+    /// scheduled task runs through it). Status: "ok", "failed" (last exit code non-zero) or "late"
+    /// (hasn't run for more than twice its interval plus 5 minutes -- the cron line is probably gone).
+    /// </summary>
+    public class ScheduledTaskDto
+    {
+        public string Server { get; set; } = string.Empty;
+        public string Task { get; set; } = string.Empty;
+        public string Status { get; set; } = string.Empty;
+        public DateTime LastRunUtc { get; set; }
+        /// <summary>Null if it has never succeeded since rn-job started tracking it.</summary>
+        public DateTime? LastSuccessUtc { get; set; }
+        public int LastExitCode { get; set; }
+        public double DurationSeconds { get; set; }
+        public double ExpectedIntervalSeconds { get; set; }
+    }
+
     public class ServerLogsDto
     {
         public string Server { get; set; } = string.Empty;
@@ -394,6 +412,8 @@ namespace iucs.readernest.application.Dto.Monitoring
         public int ActiveClassCount { get; set; }
         public List<AlertDto> ActiveAlerts { get; set; } = new();
         public RecordingSummaryDto TodayRecordings { get; set; } = new();
+        /// <summary>Every cron task on every monitored server, grouped by server then task name. Empty if Prometheus couldn't be read.</summary>
+        public List<ScheduledTaskDto> ScheduledTasks { get; set; } = new();
         /// <summary>Null if main could not be reached -- unknown, not "healthy".</summary>
         public RecordingPipelineDto? RecordingPipeline { get; set; }
         /// <summary>Recent per-participant audio/video degradation incidents, newest first. Empty if none in the lookback window or main was unreachable.</summary>

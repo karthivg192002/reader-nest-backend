@@ -12,5 +12,12 @@ namespace iucs.readernest.application.Services
         /// and <see cref="InvalidOperationException"/> if SSH isn't configured for it.
         /// </summary>
         Task<ServerLogsDto> GetContainerErrorLogsAsync(string serverName, string containerName, int tailLines, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Last lines of one cron task's rn-job log (/opt/rn-monitoring/job-logs/TASK.log) on the
+        /// named server, unfiltered (successful runs included). Throws <see cref="ArgumentException"/>
+        /// for an unknown server or a task name that isn't plain a-z0-9- (it ends up in a shell command).
+        /// </summary>
+        Task<ServerLogsDto> GetScheduledTaskLogAsync(string serverName, string task, int tailLines, CancellationToken cancellationToken = default);
     }
 }

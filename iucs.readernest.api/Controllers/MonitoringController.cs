@@ -90,6 +90,21 @@ namespace iucs.readernest.api.Controllers
             }
         }
 
+        /// <summary>Recent log of one scheduled (cron) task on one server, as written by rn-job. 400s for an unknown server, a bad task name, or no SSH configured.</summary>
+        [HttpGet("servers/task-log")]
+        [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.View)]
+        public async Task<ActionResult<ServerLogsDto>> GetScheduledTaskLog([FromQuery] string serverName, [FromQuery] string task, [FromQuery] int lines, CancellationToken cancellationToken)
+        {
+            try
+            {
+                return Ok(await _serverLogService.GetScheduledTaskLogAsync(serverName, task, lines <= 0 ? 300 : lines, cancellationToken));
+            }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+        }
+
         /// <summary>
         /// Tells every browser currently connected to a live class to show a dismissible
         /// "an update is available" prompt, so a deploy actually reaches people already
