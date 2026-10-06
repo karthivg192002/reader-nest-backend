@@ -13,6 +13,10 @@ namespace iucs.readernest.application.Services
         // How far ahead "next classes" looks and how many it shows on the dashboard.
         private const int NextClassesCount = 10;
 
+        // How long past its scheduled end a class can keep running ("Continue Class") and still
+        // count as live.
+        private static readonly TimeSpan LiveOverrunGrace = TimeSpan.FromMinutes(30);
+
         private readonly IUnitOfWork _unitOfWork;
 
         public ClassSessionLogService(IUnitOfWork unitOfWork)
@@ -20,18 +24,30 @@ namespace iucs.readernest.application.Services
             _unitOfWork = unitOfWork;
         }
 
-        public async Task<ClassSessionLogDashboardDto> GetDashboardAsync(CancellationToken cancellationToken = default)
+        public async Task<ClassSessionLogDashboardDto> GetDashboardAsync(
+            string? search = null, CancellationToken cancellationToken = default)
         {
             var now = DateTime.UtcNow;
             var todayStartUtc = now.Date;
             var weekStartUtc = now.AddDays(-7);
 
-            var live = await SessionBaseQuery()
-                .Where(s => s.Status == SessionStatus.InProgress)
+            // "Live now" means a class that is running right now, not merely one whose status
+            // is still InProgress: a class the teacher left without pressing End Class stays
+            // InProgress until the abandoned-class job completes it, and used to show here for
+            // hours. So also require the teacher to still be in the room (no LeftAtUtc) and the
+            // class to be within its scheduled slot plus a short overrun allowance.
+            var liveCutoff = now.Subtract(LiveOverrunGrace);
+            var teacherAttendance = _unitOfWork.Repository<SessionAttendance>().Query()
+                .Where(a => a.TeacherProfileId != null && a.LeftAtUtc == null);
+            var live = await ApplySearch(SessionBaseQuery(), search)
+                .Where(s => s.Status == SessionStatus.InProgress
+                    && s.ScheduledStartAtUtc <= now
+                    && s.ScheduledEndAtUtc >= liveCutoff
+                    && teacherAttendance.Any(a => a.ClassSessionId == s.Id && a.TeacherProfileId == s.TeacherProfileId))
                 .OrderByDescending(s => s.ActualStartAtUtc ?? s.ScheduledStartAtUtc)
                 .ToListAsync(cancellationToken);
 
-            var next = await SessionBaseQuery()
+            var next = await ApplySearch(SessionBaseQuery(), search)
                 .Where(s => (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward)
                     && s.ScheduledStartAtUtc >= now)
                 .OrderBy(s => s.ScheduledStartAtUtc)
@@ -72,6 +88,7 @@ namespace iucs.readernest.application.Services
             Guid? teacherProfileId,
             ClassSessionEventType? eventType,
             bool? expectedOnly,
+            string? search,
             int page,
             int pageSize,
             CancellationToken cancellationToken = default)
@@ -110,6 +127,14 @@ namespace iucs.readernest.application.Services
                 query = query.Where(e =>
                     e.TeacherProfileId == teacherProfileId.Value
                     || e.ClassSession.TeacherProfileId == teacherProfileId.Value);
+            }
+
+            var term = NormalizeSearch(search);
+            if (term is not null)
+            {
+                query = query.Where(e =>
+                    (e.ClassSession.Batch != null && e.ClassSession.Batch.Name.ToLower().Contains(term))
+                    || (e.ClassSession.TeacherProfile.User.FirstName + " " + e.ClassSession.TeacherProfile.User.LastName).ToLower().Contains(term));
             }
 
             var totalCount = await query.CountAsync(cancellationToken);
@@ -175,6 +200,26 @@ namespace iucs.readernest.application.Services
                     ScheduledStartAtUtc = e.ClassSession.ScheduledStartAtUtc,
                 })
                 .ToListAsync(cancellationToken);
+        }
+
+        private static string? NormalizeSearch(string? search)
+        {
+            var term = search?.Trim().ToLowerInvariant();
+            return string.IsNullOrEmpty(term) ? null : term;
+        }
+
+        /// <summary>Case-insensitive match on the class's batch name or its teacher's full name.</summary>
+        private static IQueryable<ClassSession> ApplySearch(IQueryable<ClassSession> query, string? search)
+        {
+            var term = NormalizeSearch(search);
+            if (term is null)
+            {
+                return query;
+            }
+
+            return query.Where(s =>
+                (s.Batch != null && s.Batch.Name.ToLower().Contains(term))
+                || (s.TeacherProfile.User.FirstName + " " + s.TeacherProfile.User.LastName).ToLower().Contains(term));
         }
 
         private IQueryable<ClassSession> SessionBaseQuery()
