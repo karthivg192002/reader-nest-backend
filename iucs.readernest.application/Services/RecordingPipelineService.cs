@@ -18,7 +18,7 @@ namespace iucs.readernest.application.Services
 
         public async Task<RecordingPipelineDto?> GetAsync(CancellationToken cancellationToken = default)
         {
-            var main = BurstWorkerSsh.FindMain(_options);
+            var main = MainServerSsh.FindMain(_options);
             if (main is null)
             {
                 return null;
@@ -27,7 +27,7 @@ namespace iucs.readernest.application.Services
             string raw;
             try
             {
-                raw = await BurstWorkerSsh.RunAsync(
+                raw = await MainServerSsh.RunAsync(
                     main,
                     "tail -n 600 " + Dir + "/finalize-recording.log 2>/dev/null; " +
                     "echo @@PENDING@@; find " + Dir + " -maxdepth 2 -name .pending-registration 2>/dev/null | wc -l; " +

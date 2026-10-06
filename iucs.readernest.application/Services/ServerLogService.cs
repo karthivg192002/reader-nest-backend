@@ -39,9 +39,9 @@ namespace iucs.readernest.application.Services
             var clampedLines = Math.Clamp(tailLines, 10, 1000);
             var logsCommand = $"docker logs --tail {clampedLines} --timestamps {containerName} 2>&1 | grep -iE 'error|exception|fatal|fail' | tail -n 150";
 
-            // The burst-worker's only route from this server is through main's WireGuard tunnel
-            // (10.10.10.3) -- main itself already has a key-based hop to it (set up for its own
-            // idle-check in burst-scale-down.sh), so we reuse that instead of standing up a
+            // A server whose only route from here is through another one (SshProxyHost, e.g. over
+            // main's WireGuard tunnel): the jump host already has a key-based hop to it, so we
+            // reuse that instead of standing up a
             // second, separate credential path. Connect to the jump host and run a nested ssh
             // rather than connecting to server.SshHost directly.
             var usingProxy = !string.IsNullOrWhiteSpace(server.SshProxyHost);

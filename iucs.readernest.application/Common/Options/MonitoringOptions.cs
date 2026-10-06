@@ -22,12 +22,6 @@ namespace iucs.readernest.application.Common.Options
         public string DatabaseName { get; set; } = string.Empty;
 
         public List<MonitoredServerOptions> Servers { get; set; } = new();
-
-        /// <summary>Path to the burst-worker create/delete event log (JSON lines) on the Jitsi/Video server -- see burst-scale-up.sh/burst-scale-down.sh.</summary>
-        public string BurstWorkerUsageLogPath { get; set; } = string.Empty;
-
-        /// <summary>Real Hetzner hourly rate (USD) for the burst worker's server type/region (cpx42, Singapore) -- used only to estimate cost from our own tracked timestamps, not billed here.</summary>
-        public double BurstWorkerHourlyRateUsd { get; set; }
     }
 
     public class MonitoredServerOptions
@@ -69,19 +63,18 @@ namespace iucs.readernest.application.Common.Options
         public string SshPassword { get; set; } = string.Empty;
 
         /// <summary>
-        /// True for a server that's expected to not exist most of the time (e.g. the Hetzner
-        /// burst-worker, created only for a scheduled capacity peak and deleted once idle again).
+        /// True for a server that's expected to not exist most of the time (e.g. an on-demand
+        /// server created only for a capacity peak and deleted once idle again).
         /// When true, "no Prometheus data" is reported as a calm standby state rather than the
-        /// alarming "server down" error used for the 3 always-on servers.
+        /// alarming "server down" error used for the always-on servers.
         /// </summary>
         public bool IsOnDemand { get; set; }
 
         /// <summary>
         /// When set, log fetching connects to this jump host first (using SshProxy* below) and
         /// runs a nested `ssh ... docker logs` from there, instead of connecting to
-        /// <see cref="SshHost"/> directly. Needed for the burst-worker, whose only route is
-        /// through main's WireGuard tunnel (10.10.10.3) — main itself is never publicly
-        /// reachable from the App/API server any other way.
+        /// <see cref="SshHost"/> directly -- for a server only reachable through another one
+        /// (e.g. over main's WireGuard tunnel), not from the App/API server itself.
         /// </summary>
         public string SshProxyHost { get; set; } = string.Empty;
 

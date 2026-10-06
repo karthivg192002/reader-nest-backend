@@ -25,7 +25,6 @@ namespace iucs.readernest.application.Services
         private readonly IPrometheusClient _prometheus;
         private readonly IUnitOfWork _unitOfWork;
         private readonly IClassroomPresenceTracker _presenceTracker;
-        private readonly IBurstWorkerUsageService _burstWorkerUsage;
         private readonly IRecordingPipelineService _recordingPipeline;
         private readonly ICallQualityIncidentService _callQualityIncidents;
         private readonly MonitoringOptions _options;
@@ -34,7 +33,6 @@ namespace iucs.readernest.application.Services
             IPrometheusClient prometheus,
             IUnitOfWork unitOfWork,
             IClassroomPresenceTracker presenceTracker,
-            IBurstWorkerUsageService burstWorkerUsage,
             IRecordingPipelineService recordingPipeline,
             ICallQualityIncidentService callQualityIncidents,
             IOptions<MonitoringOptions> options)
@@ -42,7 +40,6 @@ namespace iucs.readernest.application.Services
             _prometheus = prometheus;
             _unitOfWork = unitOfWork;
             _presenceTracker = presenceTracker;
-            _burstWorkerUsage = burstWorkerUsage;
             _recordingPipeline = recordingPipeline;
             _callQualityIncidents = callQualityIncidents;
             _options = options.Value;
@@ -56,11 +53,10 @@ namespace iucs.readernest.application.Services
             var databaseTask = CheckDatabaseAsync(cancellationToken);
             var insightsTask = GetDatabaseInsightsAsync(cancellationToken);
             var alertsTask = _prometheus.GetActiveAlertsAsync(_options.PrometheusBaseUrl, cancellationToken);
-            var burstUsageTask = _burstWorkerUsage.GetUsageSummaryAsync(cancellationToken);
             var pipelineTask = _recordingPipeline.GetAsync(cancellationToken);
             var callQualityIncidentsTask = _callQualityIncidents.GetRecentAsync(cancellationToken);
 
-            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask).Append(burstUsageTask).Append(pipelineTask).Append(callQualityIncidentsTask));
+            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask).Append(pipelineTask).Append(callQualityIncidentsTask));
             var (dbHealthy, dbLatencyMs) = await databaseTask;
             var callQualityIncidents = await callQualityIncidentsTask;
             // Sequential, not joined into the WhenAll above: this also queries via _unitOfWork,
@@ -86,7 +82,6 @@ namespace iucs.readernest.application.Services
                 DatabaseHealthy = dbHealthy,
                 DatabaseLatencyMs = dbLatencyMs,
                 DatabaseInsights = await insightsTask,
-                BurstWorkerUsage = await burstUsageTask,
                 RecordingPipeline = await pipelineTask,
                 CallQualityIncidents = callQualityIncidents,
                 CallQualityIncidentsLookSystemic = CallQualityIncidentParser.LooksSystemic(callQualityIncidents),
@@ -567,7 +562,7 @@ namespace iucs.readernest.application.Services
                     IsOnDemand = server.IsOnDemand,
                     ConfiguredServices = server.Services,
                     Error = server.IsOnDemand
-                        ? "Standby — this is on-demand burst capacity, created automatically only during a scheduled peak."
+                        ? "Standby — this is an on-demand server that only runs when it is needed."
                         : up is null
                             ? "No data — this server isn't being scraped yet (check the Prometheus target)."
                             : "node-exporter on this server is down or unreachable.",
