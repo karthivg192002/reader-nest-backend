@@ -105,6 +105,15 @@ namespace iucs.readernest.api.Controllers
             return File(stream, mimeType, $"{resource.Title}{Path.GetExtension(resource.FileUrl)}");
         }
 
+        /// <summary>Adds a Google Drive link as a resource, shared to batches/folders like an uploaded file.</summary>
+        [HttpPost("link")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)},{nameof(UserRole.AdmissionTeam)}")]
+        [HasPermission(PermissionModule.ContentAccessManagement, PermissionAction.Create)]
+        public async Task<ActionResult<ResourceDto>> AddLink(CreateLinkResourceRequest request, CancellationToken cancellationToken)
+        {
+            return Ok(await _resourceService.CreateLinkAsync(request, cancellationToken));
+        }
+
         /// <summary>Files a registered class recording into a Content and Resources folder by
         /// reference (no copy), so it can be shared to many parents/batches like any other file.</summary>
         [HttpPost("from-recording")]

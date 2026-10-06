@@ -6,6 +6,9 @@ namespace iucs.readernest.application.Services
 {
     public interface IResourceService
     {
+        /// <summary>Files a Google Drive link as a resource (no upload). Throws DomainValidationException for any other URL.</summary>
+        Task<ResourceDto> CreateLinkAsync(CreateLinkResourceRequest request, CancellationToken cancellationToken = default);
+
         Task<IReadOnlyList<ResourceDto>> ListAsync(ResourceType? type, CancellationToken cancellationToken = default);
 
         /// <summary>Resources tied to the batches (or their courses) the signed-in teacher owns.</summary>

@@ -367,6 +367,60 @@ namespace iucs.readernest.application.Services
             }
         }
 
+        public async Task<ChildDto> CreateChildAsync(CreateChildRequest request, CancellationToken cancellationToken = default)
+        {
+            var firstName = request.FirstName.Trim();
+            var lastName = request.LastName?.Trim() ?? string.Empty;
+            if (firstName.Length == 0)
+            {
+                throw new DomainValidationException("Student's first name is required.");
+            }
+            if (request.DateOfBirth > DateOnly.FromDateTime(DateTime.UtcNow))
+            {
+                throw new DomainValidationException("Date of birth cannot be in the future.");
+            }
+
+            var parentProfile = await _unitOfWork.Repository<ParentProfile>().Query()
+                .FirstOrDefaultAsync(p => p.UserId == request.ParentUserId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ParentProfile), request.ParentUserId);
+
+            // Same duplicate rule as the bulk import: one name once per parent.
+            var alreadyExists = await _unitOfWork.Repository<Child>().ExistsAsync(
+                c => c.ParentProfileId == parentProfile.Id
+                    && c.FirstName.ToLower() == firstName.ToLower()
+                    && c.LastName.ToLower() == lastName.ToLower(),
+                cancellationToken);
+            if (alreadyExists)
+            {
+                throw new ConflictException($"'{$"{firstName} {lastName}".Trim()}' already exists under this parent.");
+            }
+
+            var child = new Child
+            {
+                ParentProfileId = parentProfile.Id,
+                FirstName = firstName,
+                LastName = lastName,
+                DateOfBirth = request.DateOfBirth,
+                Gender = request.Gender,
+                AcademicLevel = string.IsNullOrWhiteSpace(request.AcademicLevel) ? null : request.AcademicLevel.Trim(),
+                IsActive = true,
+            };
+            await _unitOfWork.Repository<Child>().AddAsync(child, cancellationToken);
+            await _auditLog.StageAsync(AuditAction.Create, nameof(Child), child.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return new ChildDto
+            {
+                Id = child.Id,
+                ParentProfileId = child.ParentProfileId,
+                FirstName = child.FirstName,
+                LastName = child.LastName,
+                DateOfBirth = child.DateOfBirth,
+                AcademicLevel = child.AcademicLevel,
+                IsActive = child.IsActive,
+            };
+        }
+
         public async Task<IReadOnlyList<ChildDto>> ListChildrenForParentUserAsync(
             Guid parentUserId,
             CancellationToken cancellationToken = default)

@@ -33,6 +33,37 @@ namespace iucs.readernest.application.Dto.Resources
         public string? Description { get; set; }
 
         public DateTime CreatedAtUtc { get; set; }
+
+        /// <summary>Set only for a resource added as a Google Drive link (see ExternalLinkMime) -
+        /// the screen opens it in a new tab instead of fetching a stored file.</summary>
+        public string? ExternalUrl { get; set; }
+    }
+
+    /// <summary>Adds a Google Drive link to Content and Resources instead of uploading a file.</summary>
+    public class CreateLinkResourceRequest
+    {
+        [Required]
+        [MaxLength(200)]
+        public string Title { get; set; } = null!;
+
+        [Required]
+        public ResourceType Type { get; set; }
+
+        /// <summary>A Google Drive / Docs share link (https only).</summary>
+        [Required]
+        [MaxLength(1000)]
+        public string Url { get; set; } = null!;
+
+        public Guid? CourseId { get; set; }
+
+        public Guid? BatchId { get; set; }
+
+        public Guid? FolderId { get; set; }
+
+        public List<Guid> BatchIds { get; set; } = [];
+
+        [MaxLength(1000)]
+        public string? Description { get; set; }
     }
 
     /// <summary>Metadata accompanying the uploaded file (multipart form fields).</summary>

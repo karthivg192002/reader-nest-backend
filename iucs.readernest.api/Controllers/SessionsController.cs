@@ -271,6 +271,22 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _sessionService.GetClassroomSettingsAsync(cancellationToken));
         }
 
+        /// <summary>Claims/renews the recording slot for this class (see ClassSession.RecordingSlotHeldAtUtc).</summary>
+        [HttpPost("{id:guid}/recording-slot")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<ActionResult<RecordingSlotDto>> AcquireRecordingSlot(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.AcquireRecordingSlotAsync(id, cancellationToken));
+        }
+
+        [HttpDelete("{id:guid}/recording-slot")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<IActionResult> ReleaseRecordingSlot(Guid id, CancellationToken cancellationToken)
+        {
+            await _sessionService.ReleaseRecordingSlotAsync(id, cancellationToken);
+            return NoContent();
+        }
+
         [HttpPost]
         [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Create)]
         public async Task<ActionResult<ClassSessionDto>> Schedule(ScheduleSessionRequest request, CancellationToken cancellationToken)

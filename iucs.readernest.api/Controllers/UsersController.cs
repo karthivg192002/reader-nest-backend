@@ -80,6 +80,14 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _enrollmentService.ListAllStudentsAsync(cancellationToken));
         }
 
+        /// <summary>Creates a student directly under an existing parent (no enrollment form needed).</summary>
+        [HttpPost("students")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.Create)]
+        public async Task<ActionResult<ChildDto>> CreateStudent(CreateChildRequest request, CancellationToken cancellationToken)
+        {
+            return Ok(await _enrollmentService.CreateChildAsync(request, cancellationToken));
+        }
+
         /// <summary>Relationship Manager's special enrolment notes on a child's profile.</summary>
         [HttpPut("students/{childId:guid}/notes")]
         [HasPermission(PermissionModule.UserManagement, PermissionAction.Edit)]

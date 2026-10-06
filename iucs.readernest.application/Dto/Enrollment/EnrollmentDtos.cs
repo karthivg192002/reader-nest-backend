@@ -120,6 +120,28 @@ namespace iucs.readernest.application.Dto.Enrollment
         public decimal PaidInvoiceTotal { get; set; }
     }
 
+    /// <summary>Admin creates a student directly under an existing parent (no enrollment form).</summary>
+    public class CreateChildRequest
+    {
+        /// <summary>The parent's account id (User.Id), as listed on the Users screen.</summary>
+        [Required]
+        public Guid ParentUserId { get; set; }
+
+        [Required]
+        [MaxLength(100)]
+        public string FirstName { get; set; } = null!;
+
+        [MaxLength(100)]
+        public string? LastName { get; set; }
+
+        public DateOnly? DateOfBirth { get; set; }
+
+        public Gender? Gender { get; set; }
+
+        [MaxLength(100)]
+        public string? AcademicLevel { get; set; }
+    }
+
     public class UpdateChildNotesRequest
     {
         [MaxLength(2000)]

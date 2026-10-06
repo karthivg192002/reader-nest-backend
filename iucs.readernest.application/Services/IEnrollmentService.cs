@@ -30,6 +30,9 @@ namespace iucs.readernest.application.Services
         Task<IReadOnlyList<StudentDto>> ListAllStudentsAsync(CancellationToken cancellationToken = default);
 
         /// <summary>Relationship Manager's special enrolment notes on a child's profile.</summary>
+        /// <summary>Admin: creates a Child under the given parent. Conflict if that parent already has a child with the same name.</summary>
+        Task<ChildDto> CreateChildAsync(CreateChildRequest request, CancellationToken cancellationToken = default);
+
         Task UpdateChildNotesAsync(Guid childId, string? notes, CancellationToken cancellationToken = default);
 
         /// <summary>

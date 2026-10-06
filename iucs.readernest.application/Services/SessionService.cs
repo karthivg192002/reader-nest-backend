@@ -2295,8 +2295,75 @@ namespace iucs.readernest.application.Services
             {
                 Domain = JitsiLinkBuilder.ResolveDomain(configJson),
                 AutoRecordEnabled = ReadAutoRecordEnabled(configJson),
+                AllowConcurrentRecording = ReadConcurrentRecordingAllowed(configJson),
                 DefaultLobbyEnabled = ReadDefaultLobbyEnabled(configJson),
             };
+        }
+
+        /// <summary>A holder that hasn't renewed within this window is treated as gone (crashed tab, lost network).</summary>
+        private static readonly TimeSpan RecordingSlotLease = TimeSpan.FromMinutes(3);
+
+        public async Task<RecordingSlotDto> AcquireRecordingSlotAsync(Guid sessionId, CancellationToken cancellationToken = default)
+        {
+            var configJson = await _unitOfWork.Repository<Integration>().Query()
+                .Where(i => i.Key == "jitsi")
+                .Select(i => i.ConfigJson)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (ReadConcurrentRecordingAllowed(configJson))
+            {
+                return new RecordingSlotDto { Granted = true };
+            }
+
+            var now = DateTime.UtcNow;
+            var cutoff = now - RecordingSlotLease;
+            var terminal = TerminalStatuses.ToList();
+
+            // One atomic statement: claim only if no OTHER live session holds a fresh lease, so two
+            // classes racing for the slot can't both win. Re-claiming our own lease is a renewal.
+            var claimed = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.Id == sessionId
+                            && !_unitOfWork.Repository<ClassSession>().Query().Any(o =>
+                                o.Id != sessionId
+                                && o.RecordingSlotHeldAtUtc != null
+                                && o.RecordingSlotHeldAtUtc > cutoff
+                                && !terminal.Contains(o.Status)))
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.RecordingSlotHeldAtUtc, now), cancellationToken);
+
+            return claimed > 0
+                ? new RecordingSlotDto { Granted = true }
+                : new RecordingSlotDto { Granted = false, Reason = "Another class is being recorded right now. Recording will start automatically when it ends." };
+        }
+
+        public async Task ReleaseRecordingSlotAsync(Guid sessionId, CancellationToken cancellationToken = default)
+        {
+            await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.Id == sessionId && s.RecordingSlotHeldAtUtc != null)
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.RecordingSlotHeldAtUtc, (DateTime?)null), cancellationToken);
+        }
+
+        /// <summary>Defaults to true (today's unlimited-concurrent behaviour) until an admin turns it off.</summary>
+        private static bool ReadConcurrentRecordingAllowed(string? configJson)
+        {
+            if (string.IsNullOrWhiteSpace(configJson))
+            {
+                return true;
+            }
+
+            try
+            {
+                var config = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(configJson);
+                if (config is not null && config.TryGetValue("allowConcurrentRecording", out var value) && bool.TryParse(value, out var parsed))
+                {
+                    return parsed;
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Malformed config - keep the default.
+            }
+
+            return true;
         }
 
         /// <summary>Admin, or specifically this session's own assigned teacher — narrower than

@@ -137,7 +137,7 @@ namespace iucs.readernest.application.Services
                 Type = request.Type,
                 FileUrl = storedRelativePath,
                 MimeType = mimeType,
-                FileSizeBytes = sizeBytes,
+                FileSizeBytes = sizeBytes > 0 ? sizeBytes : null,
                 CourseId = request.CourseId,
                 BatchId = request.BatchId ?? (visibleBatchIds.Count > 0 ? visibleBatchIds[0] : null),
                 // Business rule: reading books are view-only regardless of the flag sent
@@ -155,6 +155,40 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return resource.ToDto();
+        }
+
+        /// <summary>Marks a Resource whose FileUrl is an external Google Drive link, not a stored file.</summary>
+        public const string ExternalLinkMime = "text/uri-list";
+
+        private static readonly string[] AllowedLinkHosts = ["drive.google.com", "docs.google.com", "drive.usercontent.google.com"];
+
+        public Task<ResourceDto> CreateLinkAsync(CreateLinkResourceRequest request, CancellationToken cancellationToken = default)
+        {
+            // Parents and teachers open this link straight from the portal, so only a real Google
+            // Drive/Docs share link is accepted - not an arbitrary address.
+            if (!Uri.TryCreate(request.Url?.Trim(), UriKind.Absolute, out var uri)
+                || uri.Scheme != Uri.UriSchemeHttps
+                || !AllowedLinkHosts.Contains(uri.Host, StringComparer.OrdinalIgnoreCase))
+            {
+                throw new DomainValidationException("Enter a valid Google Drive link (https://drive.google.com/... or https://docs.google.com/...).");
+            }
+
+            return CreateAsync(
+                new CreateResourceRequest
+                {
+                    Title = request.Title,
+                    Type = request.Type,
+                    CourseId = request.CourseId,
+                    BatchId = request.BatchId,
+                    FolderId = request.FolderId,
+                    BatchIds = request.BatchIds,
+                    IsDownloadable = false,
+                    Description = request.Description,
+                },
+                uri.ToString(),
+                ExternalLinkMime,
+                0,
+                cancellationToken);
         }
 
         public async Task<ResourceDto> CreateFromRecordingAsync(

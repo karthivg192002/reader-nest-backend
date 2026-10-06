@@ -196,6 +196,13 @@ namespace iucs.readernest.application.Services
         /// <summary>Non-secret Jitsi settings (domain, auto-record) for whoever is about to join a live class.</summary>
         Task<ClassroomSettingsDto> GetClassroomSettingsAsync(CancellationToken cancellationToken = default);
 
+        /// <summary>Claims (or renews) the single recording slot for this session. Always granted when
+        /// concurrent recording is allowed; otherwise refused while a different live session holds it.</summary>
+        Task<RecordingSlotDto> AcquireRecordingSlotAsync(Guid sessionId, CancellationToken cancellationToken = default);
+
+        /// <summary>Frees this session's recording slot (recording stopped or the teacher left).</summary>
+        Task ReleaseRecordingSlotAsync(Guid sessionId, CancellationToken cancellationToken = default);
+
         /// <summary>
         /// Attaches (replacing any prior one) the PDF deck the teacher wants to present live in
         /// this class. Teacher-only — the assigned teacher or Admin, same gate as

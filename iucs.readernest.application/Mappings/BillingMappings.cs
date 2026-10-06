@@ -68,6 +68,7 @@ namespace iucs.readernest.application.Mappings
                 IsDownloadable = resource.IsDownloadable,
                 Description = resource.Description,
                 CreatedAtUtc = resource.CreatedAtUtc,
+                ExternalUrl = resource.MimeType == Services.ResourceService.ExternalLinkMime ? resource.FileUrl : null,
             };
         }
     }

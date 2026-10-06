@@ -75,5 +75,12 @@ namespace iucs.readernest.domain.Entities.Sessions
         /// <see cref="RecordingMissingAlertSentAtUtc"/>: without it, an unresolved orphaned slot
         /// would re-alert admins every 10-minute cycle forever instead of once.</summary>
         public DateTime? OrphanedDemoAlertSentAtUtc { get; set; }
+
+        /// <summary>Lease timestamp for the "one recording at a time" rule (Jitsi integration config
+        /// "allowConcurrentRecording" = false). The teacher's client claims it before starting a
+        /// recording and renews it while recording; it only counts while the session is not in a
+        /// terminal status and the stamp is fresh, so a finished class or a crashed browser frees the
+        /// slot on its own without any explicit release.</summary>
+        public DateTime? RecordingSlotHeldAtUtc { get; set; }
     }
 }

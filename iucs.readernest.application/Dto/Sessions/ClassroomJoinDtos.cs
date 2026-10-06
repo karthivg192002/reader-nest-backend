@@ -73,12 +73,25 @@ namespace iucs.readernest.application.Dto.Sessions
         public DateTime ExpiresAtUtc { get; set; }
     }
 
+    /// <summary>Answer to "may this class record right now?" when concurrent recording is off.</summary>
+    public class RecordingSlotDto
+    {
+        public bool Granted { get; set; }
+
+        /// <summary>Why it was refused (another class is recording); null when granted.</summary>
+        public string? Reason { get; set; }
+    }
+
     /// <summary>Non-secret Jitsi settings the classroom screen needs before it joins.</summary>
     public class ClassroomSettingsDto
     {
         public string Domain { get; set; } = null!;
 
         public bool AutoRecordEnabled { get; set; }
+
+        /// <summary>True (default) = any number of classes may record at the same time. False = only one
+        /// class records at a time; the next one waits (see RecordingSlotDto) until the current ends.</summary>
+        public bool AllowConcurrentRecording { get; set; } = true;
 
         /// <summary>Whether a class should start with Jitsi's lobby (waiting room) already on, so a
         /// student can't land straight in an unattended room before the teacher's even joined —
