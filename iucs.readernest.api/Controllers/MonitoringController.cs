@@ -3,6 +3,7 @@ using iucs.readernest.api.Hubs;
 using iucs.readernest.application.Dto.Monitoring;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 
@@ -98,6 +99,49 @@ namespace iucs.readernest.api.Controllers
             try
             {
                 return Ok(await _serverLogService.GetScheduledTaskLogAsync(serverName, task, lines <= 0 ? 300 : lines, cancellationToken));
+            }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Database backup files on the app server, newest first. Admin-only on top of the Edit
+        /// permission: a dump holds every user's personal data, so it's gated tighter than the
+        /// rest of this page.
+        /// </summary>
+        [HttpGet("backups")]
+        [Authorize(Roles = nameof(UserRole.Admin))]
+        [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.Edit)]
+        public async Task<ActionResult<DatabaseBackupListDto>> ListDatabaseBackups(
+            [FromServices] IDatabaseBackupService backupService,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                return Ok(await backupService.ListAsync(cancellationToken));
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+        }
+
+        /// <summary>Downloads one backup file listed by <see cref="ListDatabaseBackups"/>; each download is recorded in the audit log.</summary>
+        [HttpGet("backups/download")]
+        [Authorize(Roles = nameof(UserRole.Admin))]
+        [HasPermission(PermissionModule.SystemMonitoring, PermissionAction.Edit)]
+        public async Task<IActionResult> DownloadDatabaseBackup(
+            [FromQuery] string? folder,
+            [FromQuery] string file,
+            [FromServices] IDatabaseBackupService backupService,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                var stream = await backupService.OpenAsync(folder ?? string.Empty, file, cancellationToken);
+                return File(stream, "application/octet-stream", file);
             }
             catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
             {

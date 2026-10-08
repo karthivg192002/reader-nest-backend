@@ -14,6 +14,7 @@ namespace iucs.readernest.application
         {
             services.AddScoped<IMonitoringService, MonitoringService>();
             services.AddScoped<IServerLogService, ServerLogService>();
+            services.AddScoped<IDatabaseBackupService, DatabaseBackupService>();
             services.AddScoped<IRecordingPipelineService, RecordingPipelineService>();
             services.AddScoped<ICallQualityIncidentService, CallQualityIncidentService>();
             services.AddScoped<IServerControlService, ServerControlService>();

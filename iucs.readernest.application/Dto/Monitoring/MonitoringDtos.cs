@@ -338,6 +338,28 @@ namespace iucs.readernest.application.Dto.Monitoring
         public DateTime FetchedAtUtc { get; set; }
     }
 
+    /// <summary>One PostgreSQL backup file on the app server (see IDatabaseBackupService).</summary>
+    public class DatabaseBackupDto
+    {
+        /// <summary>"hourly" (/var/backups/postgres/hourly), "nightly" (the daily pg_backup.sh dump) or "manual" (anything else in /var/backups/postgres).</summary>
+        public string Kind { get; set; } = string.Empty;
+        /// <summary>"" for /var/backups/postgres, "hourly" for its hourly sub-folder — passed back as-is to download.</summary>
+        public string Folder { get; set; } = string.Empty;
+        public string FileName { get; set; } = string.Empty;
+        public long SizeBytes { get; set; }
+        public DateTime CreatedAtUtc { get; set; }
+    }
+
+    public class DatabaseBackupListDto
+    {
+        public string Server { get; set; } = string.Empty;
+        /// <summary>Newest first.</summary>
+        public List<DatabaseBackupDto> Backups { get; set; } = new();
+        /// <summary>Newest hourly/nightly backup (manual copies don't count — they aren't proof the schedule is running).</summary>
+        public DateTime? NewestScheduledAtUtc { get; set; }
+        public DateTime FetchedAtUtc { get; set; }
+    }
+
     /// <summary>
     /// Today's (IST) real batch classes vs. how many actually have a registered recording --
     /// same "started, not still live, no session_recordings row" definition used to trace
