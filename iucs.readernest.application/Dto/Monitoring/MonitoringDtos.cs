@@ -113,8 +113,8 @@ namespace iucs.readernest.application.Dto.Monitoring
         public bool Reachable { get; set; }
         public string? Error { get; set; }
         /// <summary>
-        /// True for a server that's expected to not exist most of the time (e.g. an on-demand
-        /// worker). The UI should render <see cref="Reachable"/> false + this true as a
+        /// True for a server that's expected to not exist most of the time (e.g. the Hetzner
+        /// burst-worker). The UI should render <see cref="Reachable"/> false + this true as a
         /// calm "Standby" state, not the same alarming "unreachable" treatment as an always-on
         /// server that's actually down.
         /// </summary>
@@ -374,6 +374,80 @@ namespace iucs.readernest.application.Dto.Monitoring
         public int StillProcessing { get; set; }
     }
 
+    /// <summary>One create-to-delete (or still-running) lifecycle of the Hetzner burst worker.</summary>
+    public class BurstWorkerEpisodeDto
+    {
+        public long ServerId { get; set; }
+        public DateTime CreatedAtUtc { get; set; }
+        /// <summary>Null means still running right now.</summary>
+        public DateTime? DeletedAtUtc { get; set; }
+        public double DurationHours { get; set; }
+        /// <summary>At the configured Hetzner hourly rate, per minute actually run -- an estimate from our own tracked timestamps, not a real Hetzner invoice line.</summary>
+        public double EstimatedCostUsd { get; set; }
+        /// <summary>Whole hours, rounded UP (minimum 1) -- what this episode would cost if Hetzner bills every started hour in full. Unverified against a real invoice, so shown as an upper bound alongside the per-minute estimate.</summary>
+        public int BilledHours { get; set; }
+        public double MaxBilledCostUsd { get; set; }
+        /// <summary>"auto" (created by the capacity check) or "manual" (someone pressed Start now on the dashboard).</summary>
+        public string Trigger { get; set; } = "auto";
+        /// <summary>Who pressed the button, for manual starts.</summary>
+        public string? RequestedBy { get; set; }
+        /// <summary>Recordings copied off this server to main while it was running -- what the spend actually bought.</summary>
+        public int RecordingsHandled { get; set; }
+    }
+
+    /// <summary>The burst worker's state right now, read live from the cloud API (not inferred from the usage log).</summary>
+    public class BurstWorkerStatusDto
+    {
+        /// <summary>False means the cloud API couldn't be read -- the UI must show "unknown", never assume standby.</summary>
+        public bool Known { get; set; }
+        public bool Exists { get; set; }
+        public long? ServerId { get; set; }
+        public DateTime? CreatedAtUtc { get; set; }
+        /// <summary>Set while a manual "Start now" hold is active: the automatic teardown will not delete the server before this time, even if it is idle.</summary>
+        public DateTime? HoldUntilUtc { get; set; }
+    }
+
+    /// <summary>Result of pressing Start now / Stop on the dashboard -- the last lines of the scale log so the admin sees what really happened.</summary>
+    public class BurstWorkerControlResultDto
+    {
+        public string Action { get; set; } = string.Empty;
+        public List<string> LogTail { get; set; } = new();
+        public DateTime PerformedAtUtc { get; set; }
+    }
+
+    /// <summary>
+    /// How often and for how long the on-demand Hetzner burst worker has actually been used,
+    /// derived from burst-scale-up.sh/burst-scale-down.sh's own create/delete event log --
+    /// there's no billing API call involved, just our own tracked timestamps at a known
+    /// hourly rate, so treat the cost figures as an estimate, not an invoice.
+    /// </summary>
+    public class BurstWorkerUsageDto
+    {
+        public int EpisodesToday { get; set; }
+        public double HoursToday { get; set; }
+        public double EstimatedCostTodayUsd { get; set; }
+        public double MaxBilledCostTodayUsd { get; set; }
+        public int RecordingsHandledToday { get; set; }
+        /// <summary>Current calendar month, IST.</summary>
+        public int EpisodesThisMonth { get; set; }
+        public double HoursThisMonth { get; set; }
+        public double EstimatedCostThisMonthUsd { get; set; }
+        public double MaxBilledCostThisMonthUsd { get; set; }
+        public int RecordingsHandledThisMonth { get; set; }
+        public int EpisodesAllTime { get; set; }
+        public double HoursAllTime { get; set; }
+        public double EstimatedCostAllTimeUsd { get; set; }
+        public double MaxBilledCostAllTimeUsd { get; set; }
+        /// <summary>The configured Hetzner hourly rate the cost figures use.</summary>
+        public double HourlyRateUsd { get; set; }
+        public bool CurrentlyActive { get; set; }
+        public BurstWorkerStatusDto Status { get; set; } = new();
+        /// <summary>The most recent scale-up / scale-down / copy / registration log lines, oldest first -- why it started, why it hasn't stopped, what it rescued.</summary>
+        public List<string> RecentActivity { get; set; } = new();
+        /// <summary>Most recent first, capped to a reasonable number for the dashboard -- not the full history.</summary>
+        public List<BurstWorkerEpisodeDto> RecentEpisodes { get; set; } = new();
+    }
+
     /// <summary>A recording that finished today but was deliberately not attached to any class (finalize hook got HTTP 204: personal/demo/ad-hoc room with no ClassSession).</summary>
     public class UnattachedRecordingDto
     {
@@ -436,6 +510,8 @@ namespace iucs.readernest.application.Dto.Monitoring
         public RecordingSummaryDto TodayRecordings { get; set; } = new();
         /// <summary>Every cron task on every monitored server, grouped by server then task name. Empty if Prometheus couldn't be read.</summary>
         public List<ScheduledTaskDto> ScheduledTasks { get; set; } = new();
+        /// <summary>Null if the usage log couldn't be fetched (e.g. main unreachable) -- absent, not zeroed out, so the UI doesn't show a false "never used."</summary>
+        public BurstWorkerUsageDto? BurstWorkerUsage { get; set; }
         /// <summary>Null if main could not be reached -- unknown, not "healthy".</summary>
         public RecordingPipelineDto? RecordingPipeline { get; set; }
         /// <summary>Recent per-participant audio/video degradation incidents, newest first. Empty if none in the lookback window or main was unreachable.</summary>

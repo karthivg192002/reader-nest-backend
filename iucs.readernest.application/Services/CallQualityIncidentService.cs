@@ -17,7 +17,7 @@ namespace iucs.readernest.application.Services
 
         public async Task<List<CallQualityIncidentDto>> GetRecentAsync(CancellationToken cancellationToken = default)
         {
-            var main = MainServerSsh.FindMain(_options);
+            var main = BurstWorkerSsh.FindMain(_options);
             if (main is null)
             {
                 return new List<CallQualityIncidentDto>();
@@ -26,7 +26,7 @@ namespace iucs.readernest.application.Services
             string raw;
             try
             {
-                raw = await MainServerSsh.RunAsync(
+                raw = await BurstWorkerSsh.RunAsync(
                     main,
                     $"for c in {string.Join(' ', JvbContainers)}; do docker logs $c --since 24h 2>&1; done | grep 'SendSideBandwidthEstimation.maybeLogLowBitrateWarning'",
                     TimeSpan.FromSeconds(20),
