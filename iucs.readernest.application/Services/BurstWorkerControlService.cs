@@ -44,11 +44,12 @@ namespace iucs.readernest.application.Services
         {
             var main = RequireMain();
 
-            // Removing the hold first is what lets the normal, safe teardown run; the teardown itself
-            // still refuses unless every recorder is idle and every recording is fully on main.
+            // --manual skips the automatic path's 45-minute minimum lifetime and any start hold -- without
+            // it Stop silently "skipped" for the first 45 minutes (8 Oct 2026). The teardown itself still
+            // refuses unless every recorder is idle and every recording is fully on main.
             var output = await BurstWorkerSsh.RunAsync(
                 main,
-                $"rm -f {BurstWorkerSsh.ScriptsDir}/burst-hold-until; bash {BurstWorkerSsh.ScriptsDir}/burst-scale-down.sh; " +
+                $"rm -f {BurstWorkerSsh.ScriptsDir}/burst-hold-until; bash {BurstWorkerSsh.ScriptsDir}/burst-scale-down.sh --manual; " +
                 $"tail -n 6 {BurstWorkerSsh.ScaleLog}",
                 TimeSpan.FromMinutes(4),
                 cancellationToken);
