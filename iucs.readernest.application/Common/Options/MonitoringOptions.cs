@@ -21,6 +21,9 @@ namespace iucs.readernest.application.Common.Options
         /// <summary>Postgres datname to scope the Database Insights panel to (postgres-exporter also sees the UAT and system databases sharing this instance).</summary>
         public string DatabaseName { get; set; } = string.Empty;
 
+        /// <summary><see cref="MonitoredServerOptions.Name"/> of the server holding /var/backups/postgres (see IDatabaseBackupService).</summary>
+        public string BackupServerName { get; set; } = "App / API";
+
         public List<MonitoredServerOptions> Servers { get; set; } = new();
     }
 

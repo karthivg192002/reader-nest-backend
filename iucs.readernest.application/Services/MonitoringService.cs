@@ -74,6 +74,8 @@ namespace iucs.readernest.application.Services
                     .OfType<string>()
                     .ToList(),
                 cancellationToken);
+            // Also sequential for the same shared-DbContext reason as above.
+            var dataHealthAlerts = await GetDataHealthAlertsAsync(cancellationToken);
 
             return new MonitoringSummaryDto
             {
@@ -103,6 +105,7 @@ namespace iucs.readernest.application.Services
                             ? roomLabels.GetValueOrDefault(room, room)
                             : null,
                     })
+                    .Concat(dataHealthAlerts)
                     .OrderByDescending(a => a.Severity == "critical")
                     .ThenBy(a => a.ActiveSince)
                     .ToList(),
@@ -110,6 +113,36 @@ namespace iucs.readernest.application.Services
                 ScheduledTasks = await scheduledTasksTask,
                 GeneratedAtUtc = DateTime.UtcNow,
             };
+        }
+
+        /// <summary>
+        /// Database-side checks (see <see cref="DataHealthAlerts"/>). Never throws: a failed query
+        /// just means no data-health alerts this refresh, rather than taking down the whole summary.
+        /// </summary>
+        private async Task<List<AlertDto>> GetDataHealthAlertsAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                var now = DateTime.UtcNow;
+                var stuckBefore = now.Subtract(DataHealthAlerts.StuckAfter);
+                var stuck = _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.Status == SessionStatus.InProgress && s.ScheduledEndAtUtc < stuckBefore);
+                var stuckCount = await stuck.CountAsync(cancellationToken);
+                var oldestStuckEnd = stuckCount == 0
+                    ? (DateTime?)null
+                    : await stuck.MinAsync(s => s.ScheduledEndAtUtc, cancellationToken);
+
+                var noShowSince = now.Subtract(DataHealthAlerts.NoShowWindow);
+                var recentNoShows = await _unitOfWork.Repository<ClassSession>().Query()
+                    .CountAsync(s => (s.Status == SessionStatus.TeacherNoShow || s.Status == SessionStatus.StudentNoShow)
+                                     && s.UpdatedAtUtc >= noShowSince, cancellationToken);
+
+                return DataHealthAlerts.Build(stuckCount, oldestStuckEnd, recentNoShows, now);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return new List<AlertDto>();
+            }
         }
 
         /// <summary>
