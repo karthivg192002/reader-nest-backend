@@ -249,6 +249,31 @@ builder.Services
                     return;
                 }
 
+                // A "view as parent" token also stands for the staff member looking: if they've
+                // since been deactivated or lost User Management edit (or the account is no
+                // longer a parent), the session ends on its very next request -- same live
+                // re-check as above, applied to the person actually behind it.
+                var viewAsActorClaim = context.Principal?.FindFirstValue(iucs.readernest.application.Common.ViewAsParent.ActorClaimType);
+                if (viewAsActorClaim is not null)
+                {
+                    if (!Guid.TryParse(viewAsActorClaim, out var actorId) || access.Role != UserRole.Parent)
+                    {
+                        context.Fail("This view-as session is no longer valid.");
+                        return;
+                    }
+
+                    var actor = await authService.GetCurrentAccessAsync(actorId, context.HttpContext.RequestAborted);
+                    var actorAllowed = actor is not null
+                        && actor.Status == UserStatus.Active
+                        && (actor.Role == UserRole.Admin
+                            || actor.Permissions.Contains(iucs.readernest.application.Common.ViewAsParent.RequiredPermission));
+                    if (!actorAllowed)
+                    {
+                        context.Fail("You no longer have access to view this parent's account.");
+                        return;
+                    }
+                }
+
                 if (context.Principal!.Identity is ClaimsIdentity identity)
                 {
                     // The role claim drives [Authorize(Roles = ...)] checks; Admin already gets
@@ -450,6 +475,8 @@ else
 app.UseCors();
 
 app.UseAuthentication();
+// "View as parent" sessions are look-only: refuse their writes/joins before authorization runs.
+app.UseMiddleware<ViewAsReadOnlyMiddleware>();
 app.UseAuthorization();
 app.UseRateLimiter();
 

@@ -30,7 +30,8 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.Repository<AuditLog>().AddAsync(
                 new AuditLog
                 {
-                    ActorUserId = _currentUser.UserId,
+                    // In a "view as parent" session, the staff member looking -- not the parent.
+                    ActorUserId = _currentUser.ViewAsActorUserId ?? _currentUser.UserId,
                     Action = action,
                     EntityName = entityName,
                     EntityId = entityId,

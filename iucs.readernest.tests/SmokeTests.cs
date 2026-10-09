@@ -9081,6 +9081,77 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task ViewAsParent_IssuesAViewAsTokenForTheParent_WithoutTouchingTheirPin_AndIsAudited()
+        {
+            var rm = await _db.SeedUserAsync($"rm-{Guid.NewGuid():N}@test.com", "rm-pin", UserRole.SubAdmin);
+            var parent = await _db.SeedUserAsync($"viewas-{Guid.NewGuid():N}@test.com", "chosen-by-parent", UserRole.Parent);
+            var originalHash = parent.PinHash;
+            _db.CurrentUser.UserId = rm.Id;
+
+            var before = DateTime.UtcNow;
+            var response = await CreateAuthService().StartViewAsParentAsync(rm.Id, parent.Id);
+
+            Assert.Equal($"test-view-as-token:{parent.Id}:{rm.Id}", response.AccessToken);
+            Assert.Equal(parent.Id, response.User.Id);
+            Assert.Equal("/parent", response.DefaultRoute);
+            Assert.InRange(response.ExpiresAtUtc, before.AddMinutes(29), DateTime.UtcNow.AddMinutes(31)); // short, not the 8h login
+            var stored = await _db.Context.Users.AsNoTracking().FirstAsync(u => u.Id == parent.Id);
+            Assert.Equal(originalHash, stored.PinHash); // the parent's own PIN keeps working, never revealed
+            Assert.True(await _db.Context.AuditLogs.AnyAsync(a =>
+                a.ActorUserId == rm.Id && a.EntityId == parent.Id.ToString() && (a.ChangesJson ?? "").Contains("View as parent")));
+        }
+
+        [Fact]
+        public async Task ViewAsParent_RefusesNonParentAndDeactivatedAccounts()
+        {
+            var rm = await _db.SeedUserAsync($"rm-{Guid.NewGuid():N}@test.com", "rm-pin", UserRole.SubAdmin);
+            var teacher = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "pin", UserRole.Teacher);
+            var admin = await _db.SeedUserAsync($"a-{Guid.NewGuid():N}@test.com", "pin", UserRole.Admin);
+            var inactive = await _db.SeedUserAsync($"p-{Guid.NewGuid():N}@test.com", "pin", UserRole.Parent);
+            var tracked = await _db.Context.Users.FirstAsync(u => u.Id == inactive.Id);
+            tracked.Status = UserStatus.Inactive;
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateAuthService();
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.StartViewAsParentAsync(rm.Id, teacher.Id));
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.StartViewAsParentAsync(rm.Id, admin.Id));
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.StartViewAsParentAsync(rm.Id, inactive.Id));
+        }
+
+        [Fact]
+        public async Task ViewAsParent_RefreshKeepsTheViewAsTokenAndItsOriginalExpiry()
+        {
+            var rm = await _db.SeedUserAsync($"rm-{Guid.NewGuid():N}@test.com", "rm-pin", UserRole.SubAdmin);
+            var parent = await _db.SeedUserAsync($"viewas-{Guid.NewGuid():N}@test.com", "pin", UserRole.Parent);
+            var expiresAtUtc = DateTime.UtcNow.AddMinutes(12);
+
+            var response = await CreateAuthService().GetViewAsCurrentUserAsync(parent.Id, rm.Id, expiresAtUtc);
+
+            Assert.Equal($"test-view-as-token:{parent.Id}:{rm.Id}", response.AccessToken); // never a normal parent token
+            Assert.Equal(expiresAtUtc, response.ExpiresAtUtc);
+        }
+
+        [Fact]
+        public async Task ViewAsParent_AuditRowsDuringTheSessionCreditTheStaffMember()
+        {
+            var rm = await _db.SeedUserAsync($"rm-{Guid.NewGuid():N}@test.com", "rm-pin", UserRole.SubAdmin);
+            var parent = await _db.SeedUserAsync($"viewas-{Guid.NewGuid():N}@test.com", "pin", UserRole.Parent);
+            _db.CurrentUser.UserId = parent.Id; // a view-as token's subject is the parent...
+            _db.CurrentUser.ViewAsActorUserId = rm.Id; // ...but someone else is looking
+            try
+            {
+                await CreateAuthService().EndViewAsParentAsync(parent.Id);
+            }
+            finally
+            {
+                _db.CurrentUser.ViewAsActorUserId = null;
+            }
+
+            Assert.True(await _db.Context.AuditLogs.AnyAsync(a =>
+                a.ActorUserId == rm.Id && a.EntityId == parent.Id.ToString() && (a.ChangesJson ?? "").Contains("Ended")));
+        }
+
+        [Fact]
         public async Task RevealPin_FailsWhenNoSystemIssuedPinIsStored()
         {
             // A seeded/legacy account, or one whose user chose their own PIN: only a hash exists.

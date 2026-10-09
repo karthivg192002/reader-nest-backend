@@ -45,7 +45,8 @@ namespace iucs.readernest.domain.Data.Interceptors
             }
 
             var utcNow = DateTime.UtcNow;
-            var userId = _currentUser.UserId;
+            // In a "view as parent" session, credit the staff member looking, not the parent.
+            var userId = _currentUser.ViewAsActorUserId ?? _currentUser.UserId;
 
             foreach (var entry in context.ChangeTracker.Entries<IBaseEntity>())
             {

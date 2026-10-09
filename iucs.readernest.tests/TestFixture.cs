@@ -20,6 +20,8 @@ namespace iucs.readernest.tests
     public class FakeCurrentUser : ICurrentUserService
     {
         public Guid? UserId { get; set; }
+
+        public Guid? ViewAsActorUserId { get; set; }
     }
 
     public class FakeEmailSender : IEmailSender
@@ -212,6 +214,11 @@ namespace iucs.readernest.tests
         public TokenResult CreateToken(User user, IReadOnlyCollection<string> permissionClaims)
         {
             return new TokenResult { AccessToken = "test-token", ExpiresAtUtc = DateTime.UtcNow.AddHours(1) };
+        }
+
+        public TokenResult CreateViewAsToken(User parent, IReadOnlyCollection<string> permissionClaims, Guid actorUserId, DateTime expiresAtUtc)
+        {
+            return new TokenResult { AccessToken = $"test-view-as-token:{parent.Id}:{actorUserId}", ExpiresAtUtc = expiresAtUtc };
         }
 
         public TokenResult CreateRecordingObserverHubToken(Guid sessionId, DateTime expiresAtUtc)
