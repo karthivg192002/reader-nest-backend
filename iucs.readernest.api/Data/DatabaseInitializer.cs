@@ -96,9 +96,57 @@ namespace iucs.readernest.api.Data
             await SeedChatFaqsAsync(context);
             await EnsureAdditionalChatFaqsAsync(context);
             await BackfillPlainTextNotificationBodiesAsync(context);
+            await EnsureAdmissionPipelineMenusAsync(context);
             await EnsurePresetPortalModuleMenusAsync(context);
 
             await context.SaveChangesAsync();
+        }
+
+        /// <summary>
+        /// Reported live: "New Admission (no demo) option not available." That button lives on
+        /// Leads &amp; Parents, which only the Admission portal linked -- Admin had no such page at
+        /// all and the RM portal had the route but no menu item. Adds Leads &amp; Parents and Demo
+        /// Scheduling next to each portal's Enrollment Review, gated on the Admission module
+        /// (Admin passes implicitly; an RM sees them once granted Admission). Idempotent per path.
+        /// </summary>
+        public static async Task EnsureAdmissionPipelineMenusAsync(ReaderNestDbContext context)
+        {
+            foreach (var portal in new[] { "admin", "subadmin" })
+            {
+                await context.MenuItems.Where(m => m.Portal == portal).LoadAsync();
+                var existing = context.MenuItems.Local.Where(m => m.Portal == portal).ToList();
+                var anchor = existing.FirstOrDefault(m => m.Path == $"/{portal}/enrollments");
+                if (anchor is null)
+                {
+                    continue;
+                }
+
+                var sortOrder = anchor.SortOrder;
+                foreach (var (label, slug, icon) in new[] { ("Leads & Parents", "leads", "UserSearch"), ("Demo Scheduling", "demo-scheduling", "CalendarClock") })
+                {
+                    sortOrder++;
+                    var path = $"/{portal}/{slug}";
+                    if (existing.Any(m => m.Path == path))
+                    {
+                        continue;
+                    }
+
+                    var item = new MenuItem
+                    {
+                        Portal = portal,
+                        Section = anchor.Section,
+                        SectionOrder = anchor.SectionOrder,
+                        Label = label,
+                        Path = path,
+                        Icon = icon,
+                        SortOrder = sortOrder,
+                        IsActive = true,
+                        RequiredModule = PermissionModule.Admission.ToString(),
+                    };
+                    context.MenuItems.Add(item);
+                    existing.Add(item);
+                }
+            }
         }
 
         /// <summary>

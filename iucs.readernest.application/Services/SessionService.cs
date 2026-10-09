@@ -649,7 +649,7 @@ namespace iucs.readernest.application.Services
                 // PDF's "Session Summary Generated" (p.19) is an unconditional step — a teacher
                 // who completes a class without typing notes still gets a real summary, built
                 // from the same engagement data GetEngagementSummaryAsync already computes.
-                var engagement = await GetEngagementSummaryAsync(session.Id, cancellationToken);
+                var engagement = await BuildEngagementSummaryAsync(session.Id, cancellationToken);
                 session.Summary = BuildAutoSummary(engagement);
             }
 
@@ -2521,6 +2521,20 @@ namespace iucs.readernest.application.Services
             // the posting side (RecordEngagementAsync) already gates on participation.
             await EnsureSessionParticipantAsync(session, cancellationToken);
 
+            return await BuildEngagementSummaryAsync(sessionId, cancellationToken);
+        }
+
+        /// <summary>
+        /// The engagement roll-up itself, with no caller check: CompleteCoreAsync also runs from
+        /// AbandonedClassCompletionBackgroundService, where there is no signed-in user, and going
+        /// through GetEngagementSummaryAsync there threw "Not signed in." on every abandoned class
+        /// (7 Oct 2026: 76 classes stuck InProgress). Callers that serve the data to a user must
+        /// go through GetEngagementSummaryAsync.
+        /// </summary>
+        private async Task<IReadOnlyList<EngagementSummaryDto>> BuildEngagementSummaryAsync(
+            Guid sessionId,
+            CancellationToken cancellationToken)
+        {
             var events = await _unitOfWork.Repository<EngagementEvent>().Query()
                 .Where(e => e.ClassSessionId == sessionId)
                 .ToListAsync(cancellationToken);

@@ -110,11 +110,8 @@ namespace iucs.readernest.application.Services
             {
                 throw new DomainValidationException("The course has no fee set -- enter the agreed amount.");
             }
-            if (course.Price > 0 && amount > course.Price)
-            {
-                throw new DomainValidationException(
-                    $"The agreed amount can't be more than the course fee ({course.Price:0.##}). Enter the discounted amount.");
-            }
+            // No ceiling at the list price: the counsellor sometimes has to collect more than it
+            // (e.g. classes outside the 10 AM-10 PM IST window are priced differently).
             if (!await _unitOfWork.Repository<PaymentAccount>().ExistsAsync(
                     a => a.DepartmentId == course.DepartmentId && a.IsActive, cancellationToken))
             {

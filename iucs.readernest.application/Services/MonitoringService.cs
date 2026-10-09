@@ -59,8 +59,9 @@ namespace iucs.readernest.application.Services
             var burstUsageTask = _burstWorkerUsage.GetUsageSummaryAsync(cancellationToken);
             var pipelineTask = _recordingPipeline.GetAsync(cancellationToken);
             var callQualityIncidentsTask = _callQualityIncidents.GetRecentAsync(cancellationToken);
+            var scheduledTasksTask = GetScheduledTasksAsync(cancellationToken);
 
-            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask).Append(burstUsageTask).Append(pipelineTask).Append(callQualityIncidentsTask));
+            await Task.WhenAll(serverTasks.Cast<Task>().Append(databaseTask).Append(insightsTask).Append(alertsTask).Append(burstUsageTask).Append(pipelineTask).Append(callQualityIncidentsTask).Append(scheduledTasksTask));
             var (dbHealthy, dbLatencyMs) = await databaseTask;
             var callQualityIncidents = await callQualityIncidentsTask;
             // Sequential, not joined into the WhenAll above: this also queries via _unitOfWork,
@@ -77,6 +78,8 @@ namespace iucs.readernest.application.Services
                     .OfType<string>()
                     .ToList(),
                 cancellationToken);
+            // Also sequential for the same shared-DbContext reason as above.
+            var dataHealthAlerts = await GetDataHealthAlertsAsync(cancellationToken);
 
             return new MonitoringSummaryDto
             {
@@ -107,12 +110,103 @@ namespace iucs.readernest.application.Services
                             ? roomLabels.GetValueOrDefault(room, room)
                             : null,
                     })
+                    .Concat(dataHealthAlerts)
                     .OrderByDescending(a => a.Severity == "critical")
                     .ThenBy(a => a.ActiveSince)
                     .ToList(),
                 TodayRecordings = todayRecordings,
+                ScheduledTasks = await scheduledTasksTask,
                 GeneratedAtUtc = DateTime.UtcNow,
             };
+        }
+
+        /// <summary>
+        /// Database-side checks (see <see cref="DataHealthAlerts"/>). Never throws: a failed query
+        /// just means no data-health alerts this refresh, rather than taking down the whole summary.
+        /// </summary>
+        private async Task<List<AlertDto>> GetDataHealthAlertsAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                var now = DateTime.UtcNow;
+                var stuckBefore = now.Subtract(DataHealthAlerts.StuckAfter);
+                var stuck = _unitOfWork.Repository<ClassSession>().Query()
+                    .Where(s => s.Status == SessionStatus.InProgress && s.ScheduledEndAtUtc < stuckBefore);
+                var stuckCount = await stuck.CountAsync(cancellationToken);
+                var oldestStuckEnd = stuckCount == 0
+                    ? (DateTime?)null
+                    : await stuck.MinAsync(s => s.ScheduledEndAtUtc, cancellationToken);
+
+                var noShowSince = now.Subtract(DataHealthAlerts.NoShowWindow);
+                var recentNoShows = await _unitOfWork.Repository<ClassSession>().Query()
+                    .CountAsync(s => (s.Status == SessionStatus.TeacherNoShow || s.Status == SessionStatus.StudentNoShow)
+                                     && s.UpdatedAtUtc >= noShowSince, cancellationToken);
+
+                return DataHealthAlerts.Build(stuckCount, oldestStuckEnd, recentNoShows, now);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return new List<AlertDto>();
+            }
+        }
+
+        /// <summary>
+        /// Reads the rn_job_* metrics rn-job publishes for every cron task (textfile collector on
+        /// each server) and names each row after the configured server whose Instance matches.
+        /// Never throws: an unreachable Prometheus just means an empty list, like the alerts banner.
+        /// </summary>
+        private async Task<List<ScheduledTaskDto>> GetScheduledTasksAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                var baseUrl = _options.PrometheusBaseUrl;
+                var runTask = _prometheus.QueryVectorAsync(baseUrl, "rn_job_last_run_timestamp_seconds", cancellationToken);
+                var okTask = _prometheus.QueryVectorAsync(baseUrl, "rn_job_last_success_timestamp_seconds", cancellationToken);
+                var exitTask = _prometheus.QueryVectorAsync(baseUrl, "rn_job_last_exit_code", cancellationToken);
+                var durationTask = _prometheus.QueryVectorAsync(baseUrl, "rn_job_last_duration_seconds", cancellationToken);
+                var intervalTask = _prometheus.QueryVectorAsync(baseUrl, "rn_job_expected_interval_seconds", cancellationToken);
+                await Task.WhenAll(runTask, okTask, exitTask, durationTask, intervalTask);
+
+                static string Key(PrometheusSeries s) =>
+                    (s.Labels.TryGetValue("instance", out var i) ? i : "") + "|" + (s.Labels.TryGetValue("task", out var t) ? t : "");
+                var ok = (await okTask).ToDictionary(Key, s => s.Value);
+                var exit = (await exitTask).ToDictionary(Key, s => s.Value);
+                var duration = (await durationTask).ToDictionary(Key, s => s.Value);
+                var interval = (await intervalTask).ToDictionary(Key, s => s.Value);
+                var serverByInstance = _options.Servers
+                    .Where(s => !string.IsNullOrWhiteSpace(s.Instance))
+                    .ToDictionary(s => s.Instance, s => s.Name);
+                var now = DateTime.UtcNow;
+
+                return (await runTask)
+                    .Select(run =>
+                    {
+                        var key = Key(run);
+                        var instance = run.Labels.TryGetValue("instance", out var i) ? i : "";
+                        var lastRun = DateTimeOffset.FromUnixTimeSeconds((long)run.Value).UtcDateTime;
+                        var exitCode = (int)exit.GetValueOrDefault(key);
+                        var expected = interval.GetValueOrDefault(key, 60);
+                        var lastOk = ok.GetValueOrDefault(key);
+                        return new ScheduledTaskDto
+                        {
+                            Server = serverByInstance.GetValueOrDefault(instance, instance),
+                            Task = run.Labels.TryGetValue("task", out var t) ? t : "unknown",
+                            Status = ScheduledTaskStatus.Classify(lastRun, exitCode, expected, now),
+                            LastRunUtc = lastRun,
+                            LastSuccessUtc = lastOk > 0 ? DateTimeOffset.FromUnixTimeSeconds((long)lastOk).UtcDateTime : null,
+                            LastExitCode = exitCode,
+                            DurationSeconds = duration.GetValueOrDefault(key),
+                            ExpectedIntervalSeconds = expected,
+                        };
+                    })
+                    .OrderBy(t => t.Server)
+                    .ThenBy(t => t.Task)
+                    .ToList();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return new List<ScheduledTaskDto>();
+            }
         }
 
         /// <summary>

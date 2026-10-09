@@ -312,11 +312,51 @@ namespace iucs.readernest.application.Dto.Monitoring
     }
 
     /// <summary>Error-filtered `docker logs` tail for one container on one monitored server (see IServerLogService).</summary>
+    /// <summary>
+    /// One cron task on one monitored server, as reported by /opt/rn-monitoring/rn-job (every
+    /// scheduled task runs through it). Status: "ok", "failed" (last exit code non-zero) or "late"
+    /// (hasn't run for more than twice its interval plus 5 minutes -- the cron line is probably gone).
+    /// </summary>
+    public class ScheduledTaskDto
+    {
+        public string Server { get; set; } = string.Empty;
+        public string Task { get; set; } = string.Empty;
+        public string Status { get; set; } = string.Empty;
+        public DateTime LastRunUtc { get; set; }
+        /// <summary>Null if it has never succeeded since rn-job started tracking it.</summary>
+        public DateTime? LastSuccessUtc { get; set; }
+        public int LastExitCode { get; set; }
+        public double DurationSeconds { get; set; }
+        public double ExpectedIntervalSeconds { get; set; }
+    }
+
     public class ServerLogsDto
     {
         public string Server { get; set; } = string.Empty;
         public string Container { get; set; } = string.Empty;
         public List<string> Lines { get; set; } = new();
+        public DateTime FetchedAtUtc { get; set; }
+    }
+
+    /// <summary>One PostgreSQL backup file on the app server (see IDatabaseBackupService).</summary>
+    public class DatabaseBackupDto
+    {
+        /// <summary>"hourly" (/var/backups/postgres/hourly), "nightly" (the daily pg_backup.sh dump) or "manual" (anything else in /var/backups/postgres).</summary>
+        public string Kind { get; set; } = string.Empty;
+        /// <summary>"" for /var/backups/postgres, "hourly" for its hourly sub-folder — passed back as-is to download.</summary>
+        public string Folder { get; set; } = string.Empty;
+        public string FileName { get; set; } = string.Empty;
+        public long SizeBytes { get; set; }
+        public DateTime CreatedAtUtc { get; set; }
+    }
+
+    public class DatabaseBackupListDto
+    {
+        public string Server { get; set; } = string.Empty;
+        /// <summary>Newest first.</summary>
+        public List<DatabaseBackupDto> Backups { get; set; } = new();
+        /// <summary>Newest hourly/nightly backup (manual copies don't count — they aren't proof the schedule is running).</summary>
+        public DateTime? NewestScheduledAtUtc { get; set; }
         public DateTime FetchedAtUtc { get; set; }
     }
 
@@ -468,6 +508,8 @@ namespace iucs.readernest.application.Dto.Monitoring
         public int ActiveClassCount { get; set; }
         public List<AlertDto> ActiveAlerts { get; set; } = new();
         public RecordingSummaryDto TodayRecordings { get; set; } = new();
+        /// <summary>Every cron task on every monitored server, grouped by server then task name. Empty if Prometheus couldn't be read.</summary>
+        public List<ScheduledTaskDto> ScheduledTasks { get; set; } = new();
         /// <summary>Null if the usage log couldn't be fetched (e.g. main unreachable) -- absent, not zeroed out, so the UI doesn't show a false "never used."</summary>
         public BurstWorkerUsageDto? BurstWorkerUsage { get; set; }
         /// <summary>Null if main could not be reached -- unknown, not "healthy".</summary>

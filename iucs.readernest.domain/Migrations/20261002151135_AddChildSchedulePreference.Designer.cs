@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using iucs.readernest.domain.Data;
@@ -11,9 +12,11 @@ using iucs.readernest.domain.Data;
 namespace iucs.readernest.domain.Migrations
 {
     [DbContext(typeof(ReaderNestDbContext))]
-    partial class ReaderNestDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261002151135_AddChildSchedulePreference")]
+    partial class AddChildSchedulePreference
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -4031,10 +4034,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("recording_missing_alert_sent_at_utc");
 
-                    b.Property<DateTime?>("RecordingSlotHeldAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("recording_slot_held_at_utc");
-
                     b.Property<Guid?>("RescheduledFromSessionId")
                         .HasColumnType("uuid")
                         .HasColumnName("rescheduled_from_session_id");
@@ -4792,11 +4791,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("submitted_at_utc");
 
-                    b.Property<string>("TimeZoneId")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("time_zone_id");
-
                     b.Property<DateTime?>("UpdatedAtUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_at_utc");
@@ -4903,10 +4897,6 @@ namespace iucs.readernest.domain.Migrations
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("boolean")
                         .HasColumnName("is_deleted");
-
-                    b.Property<bool>("IsEnabled")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_enabled");
 
                     b.Property<bool>("IsSystem")
                         .HasColumnType("boolean")

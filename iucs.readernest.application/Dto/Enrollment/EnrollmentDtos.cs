@@ -30,6 +30,13 @@ namespace iucs.readernest.application.Dto.Enrollment
         /// <summary>Answers keyed by field id; the schema is client-configurable so no fixed columns.</summary>
         [Required]
         public string FormDataJson { get; set; } = null!;
+
+        /// <summary>
+        /// Set when the parent is filling in details (preferred schedule, school, start date, ...)
+        /// for a child who already exists -- e.g. one an admission counselor created at
+        /// enrollment. Approving such a form never creates a second child. Null = a new child.
+        /// </summary>
+        public Guid? ChildId { get; set; }
     }
 
     public class ReviewEnrollmentFormRequest
@@ -118,6 +125,10 @@ namespace iucs.readernest.application.Dto.Enrollment
         /// value is surfaced as a warning before delete/withdraw, since removing the record
         /// does not itself refund anything; that stays a manual step in Billing &amp; Finance.</summary>
         public decimal PaidInvoiceTotal { get; set; }
+
+        /// <summary>What the parent filled in from the portal (preferred days/times, start date, school…);
+        /// null until they have, so staff can see who still owes the centre their schedule.</summary>
+        public ChildSchedulePreferenceDto? SchedulePreference { get; set; }
     }
 
     /// <summary>Admin creates a student directly under an existing parent (no enrollment form).</summary>

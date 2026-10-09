@@ -1,4 +1,5 @@
 using iucs.readernest.application.Dto.Payouts;
+using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.domain.Entities.Payouts;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Enums;
@@ -44,6 +45,13 @@ namespace iucs.readernest.application.Services
 
         /// <summary>Payout Approvals: classes awaiting a decision (pending) or already decided, newest first.</summary>
         Task<IReadOnlyList<PayoutApprovalDto>> ListApprovalsAsync(bool pending, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// The recordings of the class behind one Payout Approvals row, so the reviewer can watch it
+        /// before deciding. Gated by the Payouts permission, not by session participation -- the
+        /// reviewer (Admin / Management) is by definition not in the class.
+        /// </summary>
+        Task<IReadOnlyList<SessionRecordingDto>> ListApprovalRecordingsAsync(Guid payoutItemId, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Approve a flagged class for full payout, for a partial payout (a given amount, or

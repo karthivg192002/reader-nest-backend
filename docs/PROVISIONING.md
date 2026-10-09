@@ -25,9 +25,8 @@ cloud account; nothing else blocks provisioning.
 - `Storage:S3:Endpoint` / `Storage:S3:AccessKey` / `Storage:S3:SecretKey` /
   `Storage:S3:BucketName` (env vars `Storage__S3__*`) — S3-compatible object
   storage (Hetzner Object Storage in this project) that `S3FileStorage`
-  needs to construct its client. **Every one of these is required**; there
-  is no local-disk fallback in production (`Program.cs` registers
-  `S3FileStorage` unconditionally). If any is left unset, the container
+  needs to construct its client. **Every one of these is required while
+  `Storage:Provider` is `S3` (the default)**. If any is left unset, the container
   still starts, but every request touching `ResourcesController` or
   `ParentPortalController`'s resource download — including plain GETs, not
   just uploads — 500s at DI-construction time with an
@@ -35,6 +34,25 @@ cloud account; nothing else blocks provisioning.
   keys as `""` (not absent) purely so they're discoverable, which is why a
   missing env var surfaces as a runtime exception on first request rather
   than a startup failure — there's nothing to catch it before then.
+- `Storage:Provider` (env `Storage__Provider`; `STORAGE_PROVIDER` in the
+  compose `.env`) — `S3` (default) or `Local`: only the **starting** value.
+  Admins switch it live on Admin → Settings → File storage; that choice is
+  saved in the database (`storage.provider` AppSetting) and wins over this
+  setting. Without S3 credentials it is always `Local`, so a `Local`-only
+  client can leave every `Storage:S3:*` value out.
+  `Local` stores uploaded resources and class presentations under
+  `Storage:LocalPath` (env `Storage__LocalPath`, `/app/uploads` in the
+  deploy configs) via `LocalFileStorage`, with the same signed multipart
+  upload and seekable playback links S3 gives (served by
+  `LocalStorageController`). **`Storage:LocalPath` must be a mounted host
+  folder or volume** — the Jenkinsfile mounts `/opt/readernest/uploads`,
+  docker-compose the `reader_nest_uploads` volume; without a mount the files
+  are lost on the next redeploy. To switch, first copy the existing files
+  (keys stay the same, so the database needs no change), then change the
+  setting and redeploy:
+  `docker exec readernestbackend dotnet iucs.readernest.api.dll storage-migrate --to local`
+  (`--to s3` copies back). Re-runnable; it skips files already copied and
+  never deletes from the source.
 
 ## CI/CD hook-up
 

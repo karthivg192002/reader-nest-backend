@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using iucs.readernest.domain.Data;
@@ -11,9 +12,11 @@ using iucs.readernest.domain.Data;
 namespace iucs.readernest.domain.Migrations
 {
     [DbContext(typeof(ReaderNestDbContext))]
-    partial class ReaderNestDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261002140726_AddMissingQueryIndexes")]
+    partial class AddMissingQueryIndexes
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -2247,9 +2250,6 @@ namespace iucs.readernest.domain.Migrations
                     b.HasIndex("RecipientUserId")
                         .HasDatabaseName("ix_bulk_email_recipients_recipient_user_id");
 
-                    b.HasIndex("Status", "CreatedAtUtc")
-                        .HasDatabaseName("ix_bulk_email_recipients_status_created_at_utc");
-
                     b.ToTable("bulk_email_recipients");
                 });
 
@@ -4031,10 +4031,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("recording_missing_alert_sent_at_utc");
 
-                    b.Property<DateTime?>("RecordingSlotHeldAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("recording_slot_held_at_utc");
-
                     b.Property<Guid?>("RescheduledFromSessionId")
                         .HasColumnType("uuid")
                         .HasColumnName("rescheduled_from_session_id");
@@ -4718,107 +4714,6 @@ namespace iucs.readernest.domain.Migrations
                     b.ToTable("children");
                 });
 
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Users.ChildSchedulePreference", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
-
-                    b.Property<string>("Allergies")
-                        .HasMaxLength(1000)
-                        .HasColumnType("character varying(1000)")
-                        .HasColumnName("allergies");
-
-                    b.Property<Guid>("ChildId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("child_id");
-
-                    b.Property<Guid?>("CourseId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("course_id");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at_utc");
-
-                    b.Property<Guid?>("CreatedBy")
-                        .HasColumnType("uuid")
-                        .HasColumnName("created_by");
-
-                    b.Property<string>("DayTimesJson")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("day_times_json");
-
-                    b.Property<int>("DaysPerWeek")
-                        .HasColumnType("integer")
-                        .HasColumnName("days_per_week");
-
-                    b.Property<DateTime?>("DeletedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("deleted_at_utc");
-
-                    b.Property<bool>("IsDeleted")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_deleted");
-
-                    b.Property<string>("Notes")
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)")
-                        .HasColumnName("notes");
-
-                    b.Property<string>("PreferredDays")
-                        .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)")
-                        .HasColumnName("preferred_days");
-
-                    b.Property<DateOnly?>("PreferredStartDate")
-                        .HasColumnType("date")
-                        .HasColumnName("preferred_start_date");
-
-                    b.Property<string>("PriorExperience")
-                        .HasMaxLength(1000)
-                        .HasColumnType("character varying(1000)")
-                        .HasColumnName("prior_experience");
-
-                    b.Property<string>("SchoolName")
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)")
-                        .HasColumnName("school_name");
-
-                    b.Property<DateTime>("SubmittedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("submitted_at_utc");
-
-                    b.Property<string>("TimeZoneId")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("time_zone_id");
-
-                    b.Property<DateTime?>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at_utc");
-
-                    b.Property<Guid?>("UpdatedBy")
-                        .HasColumnType("uuid")
-                        .HasColumnName("updated_by");
-
-                    b.HasKey("Id")
-                        .HasName("pk_child_schedule_preferences");
-
-                    b.HasIndex("ChildId")
-                        .IsUnique()
-                        .HasDatabaseName("ix_child_schedule_preferences_child_id")
-                        .HasFilter("\"is_deleted\" = FALSE");
-
-                    b.HasIndex("CourseId")
-                        .HasDatabaseName("ix_child_schedule_preferences_course_id");
-
-                    b.ToTable("child_schedule_preferences");
-                });
-
             modelBuilder.Entity("iucs.readernest.domain.Entities.Users.ParentProfile", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4903,10 +4798,6 @@ namespace iucs.readernest.domain.Migrations
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("boolean")
                         .HasColumnName("is_deleted");
-
-                    b.Property<bool>("IsEnabled")
-                        .HasColumnType("boolean")
-                        .HasColumnName("is_enabled");
 
                     b.Property<bool>("IsSystem")
                         .HasColumnType("boolean")
@@ -6526,26 +6417,6 @@ namespace iucs.readernest.domain.Migrations
                         .HasConstraintName("fk_children_parent_profiles_parent_profile_id");
 
                     b.Navigation("ParentProfile");
-                });
-
-            modelBuilder.Entity("iucs.readernest.domain.Entities.Users.ChildSchedulePreference", b =>
-                {
-                    b.HasOne("iucs.readernest.domain.Entities.Users.Child", "Child")
-                        .WithMany()
-                        .HasForeignKey("ChildId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired()
-                        .HasConstraintName("fk_child_schedule_preferences_children_child_id");
-
-                    b.HasOne("iucs.readernest.domain.Entities.Academics.Course", "Course")
-                        .WithMany()
-                        .HasForeignKey("CourseId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .HasConstraintName("fk_child_schedule_preferences_courses_course_id");
-
-                    b.Navigation("Child");
-
-                    b.Navigation("Course");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Users.ParentProfile", b =>

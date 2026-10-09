@@ -15,6 +15,12 @@ namespace iucs.readernest.domain.Entities.Sessions
     [Index(nameof(ScheduledStartAtUtc))]
     [Index(nameof(Status))]
     [Index(nameof(TeacherProfileId), nameof(Status))]
+    // Teacher calendar + EnsureTeacherIsFree conflict checks filter by teacher AND a time range.
+    [Index(nameof(TeacherProfileId), nameof(ScheduledStartAtUtc))]
+    // Background workers (no-show detection, reminders) poll "status X starting in window Y".
+    [Index(nameof(Status), nameof(ScheduledStartAtUtc))]
+    // Looked up on every classroom-hub connect / Jitsi join by room name.
+    [Index(nameof(MeetingRoomId))]
     public class ClassSession : AuditEntity
     {
         public Guid? BatchId { get; set; }

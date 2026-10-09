@@ -21,6 +21,13 @@ pipeline {
         STORAGE_S3_ENDPOINT      = 'hel1.your-objectstorage.com'
         STORAGE_S3_BUCKET_NAME   = 'readernest'
 
+        // Where uploaded resources and class presentations live: 'S3' (the bucket above) or
+        // 'Local' (STORAGE_LOCAL_HOST_PATH on this server, mounted into the container). Before
+        // switching, copy the existing files across -- see StorageMigration.cs:
+        //   docker exec readernestbackend dotnet iucs.readernest.api.dll storage-migrate --to local
+        STORAGE_PROVIDER         = 'S3'
+        STORAGE_LOCAL_HOST_PATH  = '/opt/readernest/uploads'
+
         DOCKER_NETWORK     = 'reader-network'
     }
 
@@ -59,6 +66,20 @@ pipeline {
             }
         }
 
+        stage('Prepare Upload Folder') {
+            steps {
+                // The host folder local storage writes to. Always mounted (harmless while on S3) so
+                // switching STORAGE_PROVIDER never strands files inside a container that a redeploy
+                // throws away -- how files were lost before the move to S3. Owned by the container's
+                // non-root app user (uid 1654 in the .NET images), set via a throwaway container so no
+                // sudo is needed on the host.
+                sh """
+                    mkdir -p ${STORAGE_LOCAL_HOST_PATH} || true
+                    docker run --rm -u 0 -v ${STORAGE_LOCAL_HOST_PATH}:/data alpine sh -c 'chown 1654:1654 /data' || echo 'WARNING: could not set upload folder owner (only matters with STORAGE_PROVIDER=Local)'
+                """
+            }
+        }
+
         stage('Remove Old Container') {
             steps {
                 sh """
@@ -93,6 +114,9 @@ pipeline {
                           -e Storage__S3__AccessKey="${S3_ACCESS_KEY}" \
                           -e Storage__S3__SecretKey="${S3_SECRET_KEY}" \
                           -e Storage__S3__BucketName="${STORAGE_S3_BUCKET_NAME}" \
+                          -e Storage__Provider="${STORAGE_PROVIDER}" \
+                          -e Storage__LocalPath=/app/uploads \
+                          -v ${STORAGE_LOCAL_HOST_PATH}:/app/uploads \
                           ${IMAGE_NAME}:latest
                     """
                 }

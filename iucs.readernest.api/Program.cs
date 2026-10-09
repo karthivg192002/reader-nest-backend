@@ -68,9 +68,30 @@ builder.Services.AddScoped<ISmsSender, SmsSender>();
 // an upload made locally behaves identically to one made against the real deployment instead
 // of silently depending on which environment you're in. Configured via Storage:S3:* (real
 // credentials come from user-secrets locally, environment variables in prod — never committed).
-builder.Services.AddSingleton<IFileStorage, S3FileStorage>();
-// Same instance, second role: browser-to-bucket multipart upload and presigned playback for big recordings.
-builder.Services.AddSingleton<IDirectUploadStorage>(sp => (S3FileStorage)sp.GetRequiredService<IFileStorage>());
+//
+// Each client picks S3 or a folder on this server's disk (Storage:LocalPath -- must be a mounted
+// host folder, see LocalFileStorage) on Admin → Settings → File storage; the choice is kept in the
+// database and applies live (StorageProviderSwitch), with Storage:Provider as the starting value.
+// Both stores stay wired up so files are found wherever they are (RoutingFileStorage); existing
+// files are copied between them with that page's Sync buttons, or `storage-migrate` (see StorageMigration).
+builder.Services.AddSingleton<StorageSyncService>();
+builder.Services.AddSingleton<StorageProviderSwitch>();
+var s3Storage = S3FileStorage.IsConfigured(builder.Configuration) ? new S3FileStorage(builder.Configuration) : null;
+if (s3Storage is not null)
+{
+    builder.Services.AddSingleton(s3Storage);
+}
+
+// With S3 configured it doubles as the fallback for files not yet copied to this server.
+builder.Services.AddSingleton(sp => new LocalFileStorage(
+    sp.GetRequiredService<IWebHostEnvironment>(),
+    builder.Configuration,
+    sp.GetRequiredService<IHttpContextAccessor>(),
+    s3Storage));
+builder.Services.AddSingleton(sp => new RoutingFileStorage(
+    sp.GetRequiredService<StorageProviderSwitch>(), sp.GetRequiredService<LocalFileStorage>(), s3Storage));
+builder.Services.AddSingleton<IFileStorage>(sp => sp.GetRequiredService<RoutingFileStorage>());
+builder.Services.AddSingleton<IDirectUploadStorage>(sp => sp.GetRequiredService<RoutingFileStorage>());
 // Parses uploaded bulk-import spreadsheets (.csv/.xlsx) for Users/Students/Departments/
 // Courses/Package Plans/Quiz Questions — stateless, so singleton is fine.
 builder.Services.AddSingleton<IBulkFileReader, BulkFileReader>();
@@ -354,6 +375,9 @@ builder.Services.AddCors(options =>
             .AllowAnyHeader()
             .WithMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
             .AllowCredentials()
+            // Local storage's part-upload endpoint answers each part with its ETag, which the
+            // browser's upload code must be able to read (S3 exposes it via the bucket's CORS).
+            .WithExposedHeaders("ETag")
             // Browsers re-sent a preflight before nearly every API call; let them reuse it.
             .SetPreflightMaxAge(TimeSpan.FromHours(2))));
 
@@ -369,6 +393,14 @@ builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.BrotliCompre
 builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
 
 var app = builder.Build();
+
+// `dotnet iucs.readernest.api.dll storage-migrate --to local|s3`: copy uploaded files between S3
+// and the local folder, then exit without starting the web server (see StorageMigration).
+if (StorageMigration.IsRequested(args))
+{
+    Environment.ExitCode = await StorageMigration.RunAsync(args, app.Services, app.Configuration);
+    return;
+}
 
 // Must run before anything that reads Connection.RemoteIpAddress (the login rate
 // limiter below): the API is served through a TLS-terminating reverse proxy in
@@ -454,8 +486,12 @@ app.MapGet("/m/{slug}", async (
 
 await DatabaseInitializer.InitializeAsync(app.Services, app.Configuration);
 
-// Browser-direct (multipart) uploads need the bucket itself to allow the portal's origin.
-if (app.Services.GetService<iucs.readernest.application.Common.Interfaces.IDirectUploadStorage>() is iucs.readernest.api.Services.S3FileStorage s3Storage)
+// The S3-or-local choice saved on Admin → Settings → File storage.
+await app.Services.GetRequiredService<StorageProviderSwitch>().LoadAsync(app.Services);
+
+// Browser-direct (multipart) uploads need the bucket itself to allow the portal's origin. Done
+// whenever S3 is configured, so switching to it from the Settings page works straight away.
+if (s3Storage is not null)
 {
     _ = Task.Run(() => s3Storage.EnsureBrowserUploadCorsAsync(
         allowedOrigins, app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("BucketCors")));

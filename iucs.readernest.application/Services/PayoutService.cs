@@ -1,6 +1,7 @@
 using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Payouts;
+using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
 using iucs.readernest.domain.Entities.Academics;
@@ -430,6 +431,36 @@ namespace iucs.readernest.application.Services
             return pending
                 ? await ApprovalQueryAsync(i => i.RequiresReview, cancellationToken)
                 : await ApprovalQueryAsync(i => i.ReviewDecision != null, cancellationToken);
+        }
+
+        public async Task<IReadOnlyList<SessionRecordingDto>> ListApprovalRecordingsAsync(
+            Guid payoutItemId,
+            CancellationToken cancellationToken = default)
+        {
+            var sessionId = await _unitOfWork.Repository<PayoutItem>().Query()
+                .Where(i => i.Id == payoutItemId)
+                .Select(i => i.ClassSessionId)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (sessionId is null)
+            {
+                // Unknown item, or a bonus/adjustment with no class behind it: nothing to watch.
+                return [];
+            }
+
+            var recordings = await _unitOfWork.Repository<SessionRecording>().Query()
+                .Where(r => r.ClassSessionId == sessionId.Value)
+                .OrderByDescending(r => r.CreatedAtUtc)
+                .ToListAsync(cancellationToken);
+
+            return recordings.Select(r => new SessionRecordingDto
+            {
+                Id = r.Id,
+                ClassSessionId = r.ClassSessionId,
+                StorageUrl = r.StorageUrl,
+                DurationSeconds = r.DurationSeconds,
+                ExpiresAtUtc = r.ExpiresAtUtc,
+                CreatedAtUtc = r.CreatedAtUtc,
+            }).ToList();
         }
 
         public async Task<PayoutApprovalDto> DecideApprovalAsync(
