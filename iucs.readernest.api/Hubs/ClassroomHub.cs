@@ -395,6 +395,25 @@ namespace iucs.readernest.api.Hubs
             await Clients.OthersInGroup(Group(sessionId)).SendAsync("Pinned", participantId);
         }
 
+        // ---- mute everyone ----
+
+        /// <summary>
+        /// Teacher-only: asks every other client in the class to mute its own microphone. Jitsi's
+        /// own "mute everyone" only works for whoever Jitsi made the room's moderator, and on this
+        /// deployment that is whoever joined first (a signed token's moderator claim isn't
+        /// honoured), so a teacher who isn't that person could not mute the class (client report
+        /// 2026-10-09). Each student client applies it to itself and may unmute again.
+        /// </summary>
+        public async Task MuteAll(string sessionId)
+        {
+            if (!IsTeacherInRoom(sessionId))
+            {
+                return;
+            }
+
+            await Clients.OthersInGroup(Group(sessionId)).SendAsync("MuteAll");
+        }
+
         // ---- chat (interactive panel) ----
 
         public async Task SendChat(string sessionId, string text)
