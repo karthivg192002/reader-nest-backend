@@ -376,6 +376,7 @@ namespace iucs.readernest.application.Services
                 var module = PermissionModule.SupportTickets.ToString();
                 var grants = _unitOfWork.Repository<SubAdminPermission>().Query();
                 var recipients = await _unitOfWork.Repository<User>().Query()
+                    .Include(u => u.RoleDefinition)
                     .Where(u => u.Status == UserStatus.Active
                                 && (u.Role == UserRole.Admin
                                     || (u.Role == UserRole.SubAdmin
@@ -393,7 +394,11 @@ namespace iucs.readernest.application.Services
                 };
                 foreach (var recipient in recipients)
                 {
-                    var portal = recipient.Role == UserRole.Admin ? "admin" : "subadmin";
+                    // A Sub Admin's portal is their role's own landing route: the Founder Dashboard
+                    // lives at /executive, and a /subadmin link sent them to a page they can't open.
+                    var portal = recipient.Role == UserRole.Admin ? "admin"
+                        : recipient.RoleDefinition?.DefaultRoute?.Trim('/') is { Length: > 0 } route && !route.Contains('/') ? route
+                        : "subadmin";
                     var recipientTokens = new Dictionary<string, string>(tokens)
                     {
                         ["TicketUrl"] = $"{baseUrl}/{portal}/support-tickets?ticket={ticket.Id}",

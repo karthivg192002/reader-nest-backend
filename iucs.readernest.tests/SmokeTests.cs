@@ -1517,34 +1517,78 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
-        public async Task MarkNoShow_DemoSession_RelinksDemoBookingToTheCarriedForwardSession_AndResetsJoinFlags()
+        public async Task MarkNoShow_MissedDemo_IsNotBookedAgainTheFollowingWeek()
         {
-            // Regression: the carried-forward session used to be created with no DemoBooking of
-            // its own — the booking stayed pointed at the old, now-terminal session, so the
-            // rescheduled demo slot looked exactly like a fresh no-show ("Teacher set, Type
-            // Demo, no student assigned") and NoShowDetectionBackgroundService flagged it a
-            // no-show again the following week regardless of who actually showed up, repeating
-            // indefinitely (until the carry-forward cap silently froze it).
+            // Client report (2026-10-09): a Friday 7 PM demo nobody held or cancelled came back
+            // every Friday at the same time. A missed demo now stays a no-show, linked to its
+            // booking, for the counselor to reschedule or cancel.
+            var (session, booking) = await SeedDemoSessionAsync(
+                $"lead-{Guid.NewGuid():N}@test.com", startAtUtc: DateTime.UtcNow.AddHours(-2));
+
+            var result = await CreateSessionService().MarkNoShowAsync(
+                session.Id, new MarkNoShowRequest { Party = NoShowParty.Student });
+
+            Assert.Equal(session.Id, result.Id);
+            Assert.Equal(SessionStatus.StudentNoShow, result.Status);
+            Assert.False(await _db.Context.ClassSessions.AnyAsync(s => s.CarriedForwardFromSessionId == session.Id));
+            Assert.Equal(session.Id, (await _db.Context.DemoBookings.AsNoTracking().SingleAsync(b => b.Id == booking.Id)).ClassSessionId);
+        }
+
+        [Fact]
+        public async Task MissedDemo_CanBeRescheduled_AndTheNewTimeStartsWithFreshJoinFlags()
+        {
             var parentEmail = $"lead-{Guid.NewGuid():N}@test.com";
             var participantEmail = $"guardian-{Guid.NewGuid():N}@test.com";
-            var (session, booking) = await SeedDemoSessionAsync(parentEmail, participantEmail);
+            var (session, booking) = await SeedDemoSessionAsync(parentEmail, participantEmail, DateTime.UtcNow.AddHours(-2));
 
-            // The student side already joined (this is a teacher no-show) — these flags describe
-            // attendance of the OLD session and must not leak onto the new one as if the parent/
-            // guardian had already joined a class they've never even been notified is happening.
-            booking.ParentJoinedAtUtc = DateTime.UtcNow;
+            // The family waited; the teacher never came. Those flags describe the missed time and
+            // must not make the new demo look already attended.
+            booking.ParentJoinedAtUtc = DateTime.UtcNow.AddHours(-2);
             booking.Participants.Single().HasJoined = true;
             await _db.Context.SaveChangesAsync();
+            await CreateSessionService().MarkNoShowAsync(session.Id, new MarkNoShowRequest { Party = NoShowParty.Teacher });
 
-            var carried = await CreateSessionService().MarkNoShowAsync(
-                session.Id, new MarkNoShowRequest { Party = NoShowParty.Teacher });
+            var newStart = DateTime.UtcNow.AddDays(2);
+            var moved = await CreateDemoBookingService().RescheduleAsync(booking.Id, new RescheduleSessionRequest
+            {
+                ScheduledStartAtUtc = newStart,
+                ScheduledEndAtUtc = newStart.AddMinutes(30),
+            });
 
-            Assert.Equal(SessionStatus.CarriedForward, carried.Status);
-            var reloadedBooking = await _db.Context.DemoBookings.Include(b => b.Participants)
-                .FirstAsync(b => b.Id == booking.Id);
-            Assert.Equal(carried.Id, reloadedBooking.ClassSessionId);
-            Assert.Null(reloadedBooking.ParentJoinedAtUtc);
-            Assert.False(Assert.Single(reloadedBooking.Participants).HasJoined);
+            Assert.NotEqual(session.Id, moved.ClassSessionId);
+            Assert.Equal(SessionStatus.Scheduled, moved.SessionStatus);
+            Assert.Equal(SessionStatus.TeacherNoShow, (await _db.Context.ClassSessions.AsNoTracking().SingleAsync(s => s.Id == session.Id)).Status);
+            var reloaded = await _db.Context.DemoBookings.AsNoTracking().Include(b => b.Participants).SingleAsync(b => b.Id == booking.Id);
+            Assert.Null(reloaded.ParentJoinedAtUtc);
+            Assert.False(Assert.Single(reloaded.Participants).HasJoined);
+        }
+
+        [Fact]
+        public async Task CancellingAMissedDemoNobodyJoined_AlsoCancelsItsClass()
+        {
+            // Cancelling after the demo's time used to leave its class Scheduled, so the no-show
+            // job then picked it up (and, before, booked it again for the next week).
+            var (session, booking) = await SeedDemoSessionAsync(
+                $"lead-{Guid.NewGuid():N}@test.com", startAtUtc: DateTime.UtcNow.AddHours(-1));
+
+            await CreateDemoBookingService().UpdateConversionStatusAsync(
+                booking.Id, new UpdateConversionStatusRequest { ConversionStatus = ConversionStatus.NotInterested });
+
+            Assert.Equal(SessionStatus.Cancelled, (await _db.Context.ClassSessions.AsNoTracking().SingleAsync(s => s.Id == session.Id)).Status);
+        }
+
+        [Fact]
+        public async Task CancellingAPastDemoSomeoneJoined_LeavesItsClassAlone()
+        {
+            var (session, booking) = await SeedDemoSessionAsync(
+                $"lead-{Guid.NewGuid():N}@test.com", startAtUtc: DateTime.UtcNow.AddHours(-1));
+            booking.ParentJoinedAtUtc = DateTime.UtcNow.AddHours(-1);
+            await _db.Context.SaveChangesAsync();
+
+            await CreateDemoBookingService().UpdateConversionStatusAsync(
+                booking.Id, new UpdateConversionStatusRequest { ConversionStatus = ConversionStatus.NotInterested });
+
+            Assert.Equal(SessionStatus.Scheduled, (await _db.Context.ClassSessions.AsNoTracking().SingleAsync(s => s.Id == session.Id)).Status);
         }
 
         [Fact]
@@ -5026,6 +5070,33 @@ namespace iucs.readernest.tests
 
             await Assert.ThrowsAsync<DomainValidationException>(() =>
                 demoBooking.ReassignTeacherAsync(booking.Id, new ReassignTeacherRequest { TeacherProfileId = newTeacher.Id }));
+        }
+
+        [Fact]
+        public async Task Counselor_CanCancelTheirOwnDemo_AndTheTeachersSlotIsFreed()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            var counselor = await _db.SeedUserAsync($"ac-{Guid.NewGuid():N}@test.com", "x", UserRole.AdmissionTeam);
+            await _db.Context.SaveChangesAsync();
+
+            _db.CurrentUser.UserId = counselor.Id;
+            var demoService = new DemoBookingService(_db.UnitOfWork, _auditLog, _emailSender, _emailTemplates, new FakeCrmNotifier(), new FakeJitsiTokenService(), _notifications, CreateUserService(), CreateSessionService(), new ConfigurationBuilder().Build(), NullLogger<DemoBookingService>.Instance, _db.CurrentUser);
+            var booking = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Parent", ParentEmail = $"cancel-{Guid.NewGuid():N}@test.com", ParentPhone = "9000000001", ChildName = "Kid",
+                TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(1),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(1).AddMinutes(30),
+            });
+
+            var cancelled = await demoService.UpdateConversionStatusAsync(
+                booking.Id, new UpdateConversionStatusRequest { ConversionStatus = ConversionStatus.NotInterested });
+
+            Assert.Equal(ConversionStatus.NotInterested, cancelled.ConversionStatus);
+            var session = await _db.Context.ClassSessions.AsNoTracking().SingleAsync(s => s.Id == booking.ClassSessionId);
+            Assert.Equal(SessionStatus.Cancelled, session.Status);
         }
 
         [Fact]

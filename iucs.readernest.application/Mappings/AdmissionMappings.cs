@@ -30,6 +30,7 @@ namespace iucs.readernest.application.Mappings
                 ScheduledStartAtUtc = booking.ClassSession?.ScheduledStartAtUtc,
                 ScheduledEndAtUtc = booking.ClassSession?.ScheduledEndAtUtc,
                 MeetingRoomId = booking.ClassSession?.MeetingRoomId,
+                SessionStatus = booking.ClassSession?.Status,
                 TeacherProfileId = booking.ClassSession?.TeacherProfileId,
                 TeacherName = teacher?.User is { } u ? $"{u.FirstName} {u.LastName}".Trim() : null,
                 // A direct-admission lead (no demo class) earns no demo fee.
