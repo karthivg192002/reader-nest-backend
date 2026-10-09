@@ -1672,8 +1672,13 @@ namespace iucs.readernest.application.Services
             var onLeave = await _unitOfWork.Repository<LeaveRequest>().ExistsAsync(
                 l => l.TeacherProfileId == teacherProfileId
                      && l.Status == LeaveStatus.Approved
-                     && l.StartAtUtc < endUtc
-                     && l.EndAtUtc > startUtc,
+                     && (l.IsClassWise
+                         // A class-wise leave's own Start/End is just the min/max of the picked
+                         // classes, so the span between them is NOT leave — only the picked
+                         // classes' own slots are.
+                         ? l.Sessions.Any(ls => ls.ClassSession.ScheduledStartAtUtc < endUtc
+                                                && ls.ClassSession.ScheduledEndAtUtc > startUtc)
+                         : l.StartAtUtc < endUtc && l.EndAtUtc > startUtc),
                 cancellationToken);
             if (onLeave)
             {

@@ -2142,6 +2142,70 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task ListInvoices_WithoutChildId_StillShowsTheStudentName()
+        {
+            var parentUser = await _db.SeedUserAsync($"stu-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var parentProfile = new ParentProfile { UserId = parentUser.Id };
+            var phonics = new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "razorpay", GatewayAccountRef = "ph" };
+            _db.Context.AddRange(parentProfile, phonics);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.Add(new Child { ParentProfileId = parentProfile.Id, FirstName = "Karthik", LastName = "R" });
+            await _db.Context.SaveChangesAsync();
+
+            await CreateBillingService().CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = parentProfile.Id,
+                DepartmentId = WellKnownDepartments.Phonics,
+                Amount = 100,
+                DueDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)),
+            });
+
+            var listed = await CreateBillingService().ListInvoicesAsync(null, parentProfile.Id, page: 1, pageSize: 10);
+            Assert.Equal("Karthik R", Assert.Single(listed.Items).ChildName);
+        }
+
+        [Fact]
+        public async Task PayoutApproval_MergesRecordingSegments_AndCreditsThemAgainstTheShortfall()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var tracked = await _db.Context.ClassSessions.FirstAsync(s => s.Id == session.Id);
+            var start = DateTime.UtcNow.AddMinutes(-28);
+            tracked.ScheduledStartAtUtc = start;
+            tracked.ScheduledEndAtUtc = start.AddMinutes(30);
+            _db.Context.SessionAttendances.Add(new SessionAttendance
+            {
+                ClassSessionId = session.Id,
+                ParticipantType = ParticipantType.Teacher,
+                TeacherProfileId = session.TeacherProfileId,
+                Status = AttendanceStatus.Present,
+                JoinedAtUtc = start.AddMinutes(3),  // 3 min late
+                LeftAtUtc = start.AddMinutes(28),
+            });
+            // Two segments from a disconnect/rejoin: 15 + 16 min = 31 min merged.
+            _db.Context.SessionRecordings.AddRange(
+                new SessionRecording { ClassSessionId = session.Id, StorageUrl = "https://r.test/1.mp4", DurationSeconds = 900 },
+                new SessionRecording { ClassSessionId = session.Id, StorageUrl = "https://r.test/2.mp4", DurationSeconds = 960 });
+            await _db.Context.SaveChangesAsync();
+            var payouts = CreatePayoutService();
+            await payouts.SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = session.TeacherProfileId,
+                RatePerMinute = 100,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
+            });
+
+            await CreateSessionService().CompleteAsync(session.Id);
+
+            var approval = Assert.Single(await payouts.ListApprovalsAsync(pending: true));
+            Assert.Equal(2, approval.RecordingCount);
+            Assert.Equal(31, approval.RecordedMinutes);
+            Assert.Equal(3, approval.LateJoinMinutes);
+            Assert.Equal(30, approval.DeliveredMinutes); // merged recording covers the full class
+            Assert.Equal(0, approval.ShortfallMinutes);
+            Assert.Equal(3000m, approval.ProRatedAmount);
+        }
+
+        [Fact]
         public async Task ListInvoices_PagesNewestFirst_AndClampsAnOversizedPageSize()
         {
             var parentUser = await _db.SeedUserAsync($"page-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
@@ -2904,6 +2968,73 @@ namespace iucs.readernest.tests
 
             Assert.Equal(InvoiceStatus.Paid, (await _db.Context.Invoices.FindAsync(firstInvoice.Id))!.Status);
             Assert.Equal(InvoiceStatus.Cancelled, (await _db.Context.Invoices.FindAsync(secondInvoice.Id))!.Status);
+        }
+
+        [Fact]
+        public async Task ScheduleSession_ClassWiseLeave_BlocksOnlyThePickedClassesNotTheSpanBetween()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync();
+            var day = DateTime.UtcNow.Date.AddDays(10).AddHours(10);
+            var pickedA = new ClassSession { BatchId = batch.Id, TeacherProfileId = teacher.Id, ScheduledStartAtUtc = day, ScheduledEndAtUtc = day.AddMinutes(30), Status = SessionStatus.Cancelled, MeetingRoomId = "r-a" };
+            var pickedB = new ClassSession { BatchId = batch.Id, TeacherProfileId = teacher.Id, ScheduledStartAtUtc = day.AddDays(10), ScheduledEndAtUtc = day.AddDays(10).AddMinutes(30), Status = SessionStatus.Cancelled, MeetingRoomId = "r-b" };
+            var leave = new LeaveRequest
+            {
+                TeacherProfileId = teacher.Id, StartAtUtc = pickedA.ScheduledStartAtUtc, EndAtUtc = pickedB.ScheduledEndAtUtc,
+                Reason = "x", IsClassWise = true, Status = LeaveStatus.Approved,
+            };
+            leave.Sessions.Add(new LeaveRequestSession { ClassSession = pickedA });
+            leave.Sessions.Add(new LeaveRequestSession { ClassSession = pickedB });
+            _db.Context.Add(leave);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            // A slot between the two picked classes is NOT on leave.
+            var between = day.AddDays(5);
+            var ok = await CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+            {
+                BatchId = batch.Id, TeacherProfileId = teacher.Id, Type = SessionType.Regular,
+                ScheduledStartAtUtc = between, ScheduledEndAtUtc = between.AddMinutes(30),
+            });
+            Assert.NotEqual(Guid.Empty, ok.Id);
+
+            // The picked class's own slot still is.
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+                {
+                    BatchId = batch.Id, TeacherProfileId = teacher.Id, Type = SessionType.Regular,
+                    ScheduledStartAtUtc = day, ScheduledEndAtUtc = day.AddMinutes(30),
+                }));
+        }
+
+        [Fact]
+        public async Task ScheduleSession_WholeDayLeave_StillBlocksItsWindow()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var teacher = await _db.Context.TeacherProfiles.FirstAsync();
+            var day = DateTime.UtcNow.Date.AddDays(10);
+            _db.Context.Add(new LeaveRequest
+            {
+                TeacherProfileId = teacher.Id, StartAtUtc = day, EndAtUtc = day.AddDays(3),
+                Reason = "x", Status = LeaveStatus.Approved,
+            });
+            await _db.Context.SaveChangesAsync();
+            _db.Context.ChangeTracker.Clear();
+
+            var inside = day.AddDays(1).AddHours(10);
+            await Assert.ThrowsAsync<DomainValidationException>(() =>
+                CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+                {
+                    BatchId = batch.Id, TeacherProfileId = teacher.Id, Type = SessionType.Regular,
+                    ScheduledStartAtUtc = inside, ScheduledEndAtUtc = inside.AddMinutes(30),
+                }));
+            var before = day.AddDays(-2).AddHours(10);
+            var ok = await CreateSessionService().ScheduleAsync(new ScheduleSessionRequest
+            {
+                BatchId = batch.Id, TeacherProfileId = teacher.Id, Type = SessionType.Regular,
+                ScheduledStartAtUtc = before, ScheduledEndAtUtc = before.AddMinutes(30),
+            });
+            Assert.NotEqual(Guid.Empty, ok.Id);
         }
 
         [Fact]
@@ -5718,6 +5849,10 @@ namespace iucs.readernest.tests
             Assert.Equal(28, PayoutService.DeliveredMinutes(session, start.AddMinutes(-2), start.AddMinutes(28)));
             Assert.Equal(29, PayoutService.DeliveredMinutes(session, start.AddMinutes(1), start.AddMinutes(30)));
             Assert.Equal(0, PayoutService.DeliveredMinutes(session, start.AddMinutes(40), start.AddMinutes(41)));
+            // Joined 1 min late and taught on to 32 min (class ran over): a full 30, not 29.
+            Assert.Equal(30, PayoutService.DeliveredMinutes(session, start.AddMinutes(1), start.AddMinutes(32)));
+            // Joined 5 min late and left at 33: only 28 min of teaching, still short.
+            Assert.Equal(28, PayoutService.DeliveredMinutes(session, start.AddMinutes(5), start.AddMinutes(33)));
         }
 
         [Fact]
