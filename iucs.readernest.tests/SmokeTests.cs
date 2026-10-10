@@ -6557,6 +6557,63 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task UpdateFutureSchedule_ReassignsTeacherAgainstTheReplacementTimesAtomically()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var (incomingTeachersBatch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var incomingTeacherId = incomingTeachersBatch.TeacherProfileId;
+            var day7 = DateTime.UtcNow.AddDays(7);
+            var oldStart = new DateTime(day7.Year, day7.Month, day7.Day, 10, 0, 0, DateTimeKind.Utc);
+
+            var moving = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = oldStart,
+                ScheduledEndAtUtc = oldStart.AddMinutes(45),
+            };
+            // The incoming teacher is busy at the obsolete time. Saving the teacher first used to
+            // fail here even though the same dialog was moving this batch to a free 2 PM slot.
+            var busyAtOldTime = new ClassSession
+            {
+                BatchId = incomingTeachersBatch.Id,
+                TeacherProfileId = incomingTeacherId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = oldStart,
+                ScheduledEndAtUtc = oldStart.AddMinutes(45),
+            };
+            _db.Context.AddRange(moving, busyAtOldTime);
+            await _db.Context.SaveChangesAsync();
+
+            var newDay1 = (DayOfWeek)(((int)oldStart.DayOfWeek + 1) % 7);
+            var newDay2 = (DayOfWeek)(((int)oldStart.DayOfWeek + 2) % 7);
+            await CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                TeacherProfileId = incomingTeacherId,
+                Slots =
+                [
+                    new GenerateScheduleSlot { DayOfWeek = newDay1, StartTimeUtc = new TimeOnly(14, 0) },
+                    new GenerateScheduleSlot { DayOfWeek = newDay2, StartTimeUtc = new TimeOnly(14, 0) },
+                ],
+                RemainingSessionCount = 9,
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            var updatedBatch = await _db.Context.Batches.FirstAsync(b => b.Id == batch.Id);
+            Assert.Equal(incomingTeacherId, updatedBatch.TeacherProfileId);
+            Assert.Equal(SessionStatus.Cancelled,
+                (await _db.Context.ClassSessions.FirstAsync(s => s.Id == moving.Id)).Status);
+            var replacements = await _db.Context.ClassSessions
+                .Where(s => s.BatchId == batch.Id && s.Status == SessionStatus.Scheduled)
+                .ToListAsync();
+            Assert.Equal(9, replacements.Count);
+            Assert.All(replacements, s => Assert.Equal(incomingTeacherId, s.TeacherProfileId));
+            Assert.All(replacements, s => Assert.Equal(new TimeOnly(14, 0), TimeOnly.FromDateTime(s.ScheduledStartAtUtc)));
+            Assert.All(replacements, s => Assert.Contains(s.ScheduledStartAtUtc.DayOfWeek, new[] { newDay1, newDay2 }));
+        }
+
+        [Fact]
         public async Task UpdateFutureSchedule_NewPatternKeepsAnOldWeekday_DoesNotCollideWithTheJustCancelledSession()
         {
             // Reproduces a live crash: a batch already met on one weekday (say Friday). Adding

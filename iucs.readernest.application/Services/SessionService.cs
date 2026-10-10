@@ -1397,6 +1397,15 @@ namespace iucs.readernest.application.Services
             var course = await _unitOfWork.Repository<Course>().GetByIdAsync(batch.CourseId, cancellationToken)
                 ?? throw new NotFoundException(nameof(Course), batch.CourseId);
 
+            var previousTeacherProfileId = batch.TeacherProfileId;
+            var targetTeacherProfileId = request.TeacherProfileId ?? previousTeacherProfileId;
+            var teacherChanged = targetTeacherProfileId != previousTeacherProfileId;
+            if (teacherChanged)
+            {
+                _ = await _unitOfWork.Repository<TeacherProfile>().GetByIdAsync(targetTeacherProfileId, cancellationToken)
+                    ?? throw new NotFoundException(nameof(TeacherProfile), targetTeacherProfileId);
+            }
+
             var slotDays = request.Slots.Select(s => s.DayOfWeek).ToList();
             if (slotDays.Count != slotDays.Distinct().Count())
             {
@@ -1433,7 +1442,7 @@ namespace iucs.readernest.application.Services
                 var windowStart = newStartBySessionId.Values.Min();
                 var windowEnd = newStartBySessionId.Values.Max().AddMinutes(durationMinutes);
                 var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
-                    .Where(s => s.TeacherProfileId == batch.TeacherProfileId
+                    .Where(s => s.TeacherProfileId == targetTeacherProfileId
                         && s.BatchId != batchId
                         && (s.Status == SessionStatus.Scheduled
                             || s.Status == SessionStatus.InProgress
@@ -1461,6 +1470,7 @@ namespace iucs.readernest.application.Services
                     var newStart = newStartBySessionId[session.Id];
                     session.ScheduledStartAtUtc = newStart;
                     session.ScheduledEndAtUtc = newStart.AddMinutes(durationMinutes);
+                    session.TeacherProfileId = targetTeacherProfileId;
                 }
 
                 await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
@@ -1487,7 +1497,7 @@ namespace iucs.readernest.application.Services
                 var windowStart = newStarts.Min();
                 var windowEnd = newStarts.Max().AddMinutes(durationMinutes);
                 var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
-                    .Where(s => s.TeacherProfileId == batch.TeacherProfileId
+                    .Where(s => s.TeacherProfileId == targetTeacherProfileId
                         && s.BatchId != batchId
                         && (s.Status == SessionStatus.Scheduled
                             || s.Status == SessionStatus.InProgress
@@ -1523,7 +1533,7 @@ namespace iucs.readernest.application.Services
                         new ClassSession
                         {
                             BatchId = batch.Id,
-                            TeacherProfileId = batch.TeacherProfileId,
+                            TeacherProfileId = targetTeacherProfileId,
                             ScheduledStartAtUtc = startUtc,
                             ScheduledEndAtUtc = startUtc.AddMinutes(durationMinutes),
                             MeetingRoomId = $"trn-{Guid.NewGuid():N}",
@@ -1535,6 +1545,16 @@ namespace iucs.readernest.application.Services
 
                 await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
                     changesJson: $"{{\"batchId\":\"{batch.Id}\",\"scheduleRegenerated\":true,\"cancelledCount\":{remainingSessions.Count},\"newCount\":{newStarts.Count}}}",
+                    cancellationToken: cancellationToken);
+            }
+
+            // The Manage dialog edits these together. Persist them together so validation uses
+            // the selected teacher at the replacement times instead of the batch's obsolete plan.
+            batch.TeacherProfileId = targetTeacherProfileId;
+            if (teacherChanged)
+            {
+                await _auditLog.StageAsync(AuditAction.Update, nameof(Batch), batch.Id.ToString(),
+                    changesJson: $"{{\"teacherReassignedWithSchedule\":true,\"from\":\"{previousTeacherProfileId}\",\"to\":\"{targetTeacherProfileId}\"}}",
                     cancellationToken: cancellationToken);
             }
 
