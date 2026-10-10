@@ -498,6 +498,25 @@ namespace iucs.readernest.api.Controllers
             return Ok(new RevealedPinDto { Pin = pin });
         }
 
+        /// <summary>
+        /// "View as parent": opens this parent's portal read-only, for 30 minutes, so a
+        /// Relationship Manager can see what the parent sees without knowing their PIN. Same
+        /// grant as Reset PIN (which already lets the caller take over the account outright);
+        /// this is the narrower, audited alternative. Parent accounts only.
+        /// </summary>
+        [HttpPost("{id:guid}/view-as")]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.Edit)]
+        public async Task<ActionResult<application.Dto.Auth.LoginResponse>> ViewAsParent(
+            Guid id,
+            [FromServices] IAuthService authService,
+            CancellationToken cancellationToken)
+        {
+            var actorId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value);
+            var response = await authService.StartViewAsParentAsync(actorId, id, cancellationToken);
+            Response.Headers.CacheControl = "no-store";
+            return Ok(response);
+        }
+
         /// <summary>Which credential-delivery channels are enabled (Settings → Integrations), so the UI shows only usable Send buttons.</summary>
         [HttpGet("credential-channels")]
         [HasPermission(PermissionModule.UserManagement, PermissionAction.View)]

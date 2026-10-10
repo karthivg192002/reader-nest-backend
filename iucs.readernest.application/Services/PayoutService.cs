@@ -362,6 +362,17 @@ namespace iucs.readernest.application.Services
         public static int DeliveredMinutes(ClassSession session, DateTime joinedAtUtc, DateTime leftAtUtc)
         {
             var end = leftAtUtc < session.ScheduledEndAtUtc ? leftAtUtc : session.ScheduledEndAtUtc;
+            // A teacher who joined AFTER the scheduled start but kept teaching past the scheduled
+            // end (the class ran over to make up for the late start, e.g. in 7:31 → out 8:02 for a
+            // 7:30–8:00 slot) delivered a full class; clipping at the scheduled end counted that as
+            // 29 min short. The credit is capped at the scheduled duration so it can never exceed it.
+            if (joinedAtUtc > session.ScheduledStartAtUtc && joinedAtUtc < session.ScheduledEndAtUtc
+                && leftAtUtc > session.ScheduledEndAtUtc)
+            {
+                var scheduledSpan = session.ScheduledEndAtUtc - session.ScheduledStartAtUtc;
+                var extendedEnd = joinedAtUtc + scheduledSpan;
+                end = leftAtUtc < extendedEnd ? leftAtUtc : extendedEnd;
+            }
             var start = joinedAtUtc < session.ScheduledStartAtUtc && session.ScheduledStartAtUtc < leftAtUtc
                 ? session.ScheduledStartAtUtc
                 : joinedAtUtc;
@@ -486,11 +497,25 @@ namespace iucs.readernest.application.Services
             }
 
             var fullAmount = item.AmountBeforeReview ?? item.Amount;
+            // Same effective delivered figure the approvals list shows (merged recordings count).
+            var effectiveDelivered = item.DeliveredMinutes;
+            if (item.ClassSessionId is { } decidedSessionId && item.ScheduledMinutes is { } decidedSched)
+            {
+                var recordedSeconds = await _unitOfWork.Repository<SessionRecording>().Query()
+                    .Where(r => r.ClassSessionId == decidedSessionId)
+                    .SumAsync(r => r.DurationSeconds ?? 0, cancellationToken);
+                var recordedMinutes = (int)Math.Ceiling(recordedSeconds / 60.0 - 0.0001);
+                if (recordedMinutes > 0)
+                {
+                    effectiveDelivered = Math.Max(effectiveDelivered ?? 0, Math.Min(decidedSched, recordedMinutes));
+                }
+            }
+
             var newAmount = request.Decision switch
             {
                 PayoutReviewDecision.ApprovedFull => fullAmount,
                 PayoutReviewDecision.Rejected => 0m,
-                _ => request.Amount ?? ProRate(fullAmount, item.ScheduledMinutes, item.DeliveredMinutes),
+                _ => request.Amount ?? ProRate(fullAmount, item.ScheduledMinutes, effectiveDelivered),
             };
             // A class priced at 0 (no rate / batch payout configured when it was completed) has no
             // "full amount" to cap a correction against, so the reviewer can enter what it is worth;
@@ -563,10 +588,53 @@ namespace iucs.readernest.application.Services
                 .Select(u => new { u.Id, Name = u.FirstName + " " + u.LastName })
                 .ToDictionaryAsync(u => u.Id, u => u.Name.Trim(), cancellationToken);
 
+            // Merged recording view: a disconnect/rejoin makes the platform register a separate
+            // recording each time, so the class's real recorded length is the SUM of its segments.
+            var recordingRows = await _unitOfWork.Repository<SessionRecording>().Query()
+                .Where(r => sessionIds.Contains(r.ClassSessionId))
+                .Select(r => new { r.ClassSessionId, r.DurationSeconds })
+                .ToListAsync(cancellationToken);
+            var recordingsBySession = recordingRows
+                .GroupBy(r => r.ClassSessionId)
+                .ToDictionary(g => g.Key, g => (Count: g.Count(), Seconds: g.Sum(r => r.DurationSeconds ?? 0)));
+            var teacherAttendance = await _unitOfWork.Repository<SessionAttendance>().Query()
+                .Where(a => sessionIds.Contains(a.ClassSessionId) && a.TeacherProfileId != null)
+                .Select(a => new { a.ClassSessionId, a.TeacherProfileId, a.JoinedAtUtc, a.LeftAtUtc })
+                .ToListAsync(cancellationToken);
+
             return items.Select(i =>
             {
                 var session = i.ClassSession;
                 var fullAmount = i.AmountBeforeReview ?? i.Amount;
+                var (recordingCount, recordedSeconds) = session is not null && recordingsBySession.TryGetValue(session.Id, out var rec)
+                    ? rec
+                    : (0, 0);
+                var recordedMinutes = (int)Math.Ceiling(recordedSeconds / 60.0 - 0.0001);
+                var attendance = session is null
+                    ? null
+                    : teacherAttendance.FirstOrDefault(a => a.ClassSessionId == session.Id && a.TeacherProfileId == session.TeacherProfileId);
+
+                // The recorded time is independent evidence that the class ran: when the merged
+                // recording covers more than the attendance-based figure, the teacher isn't short
+                // by that much (capped at the scheduled length, so it never over-credits).
+                var delivered = i.DeliveredMinutes;
+                if (i.ScheduledMinutes is { } sched && recordedMinutes > 0)
+                {
+                    delivered = Math.Max(delivered ?? 0, Math.Min(sched, recordedMinutes));
+                }
+
+                var lateJoin = session is not null && attendance?.JoinedAtUtc is { } j && j > session.ScheduledStartAtUtc
+                    ? (int)Math.Floor((j - session.ScheduledStartAtUtc).TotalMinutes) : 0;
+                var earlyEnd = session is not null && attendance?.LeftAtUtc is { } l && l < session.ScheduledEndAtUtc
+                    ? (int)Math.Floor((session.ScheduledEndAtUtc - l).TotalMinutes) : 0;
+                var shortfall = i.ScheduledMinutes is { } sm ? sm - (delivered ?? 0) : (int?)null;
+                string? shortfallReason = shortfall is not > 0 ? null
+                    : attendance?.JoinedAtUtc is null ? "No teacher attendance was captured"
+                    : lateJoin > 0 && earlyEnd > 0 ? "Joined late and left early"
+                    : lateJoin > 0 ? "Joined late"
+                    : earlyEnd > 0 ? "Left early (or disconnected without rejoining)"
+                    : "Short by timing only (no late join or early end recorded)";
+
                 string? studentNames = session?.BatchId is { } batchId
                     ? string.Join(", ", students.Where(s => s.BatchId == batchId).Select(s => s.Name.Trim()))
                     : demoChildren.FirstOrDefault(d => d.SessionId == session?.Id)?.ChildName;
@@ -584,10 +652,17 @@ namespace iucs.readernest.application.Services
                     ActualStartAtUtc = session?.ActualStartAtUtc,
                     ActualEndAtUtc = session?.ActualEndAtUtc,
                     ScheduledMinutes = i.ScheduledMinutes,
-                    DeliveredMinutes = i.DeliveredMinutes,
-                    ShortfallMinutes = i.ScheduledMinutes is { } sm ? sm - (i.DeliveredMinutes ?? 0) : null,
+                    DeliveredMinutes = delivered,
+                    ShortfallMinutes = shortfall,
+                    RecordingCount = recordingCount,
+                    RecordedMinutes = recordedMinutes,
+                    TeacherJoinedAtUtc = attendance?.JoinedAtUtc,
+                    TeacherLeftAtUtc = attendance?.LeftAtUtc,
+                    LateJoinMinutes = lateJoin,
+                    EarlyEndMinutes = earlyEnd,
+                    ShortfallReason = shortfallReason,
                     FullAmount = fullAmount,
-                    ProRatedAmount = ProRate(fullAmount, i.ScheduledMinutes, i.DeliveredMinutes),
+                    ProRatedAmount = ProRate(fullAmount, i.ScheduledMinutes, delivered),
                     Amount = i.Amount,
                     Pending = i.RequiresReview,
                     Decision = i.ReviewDecision,

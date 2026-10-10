@@ -603,15 +603,20 @@ namespace iucs.readernest.application.Services
             // NotInterested) must also release the teacher's slot. It used to leave the linked
             // session Scheduled, so the overlap check in CreateAsync kept treating the teacher as
             // booked and admissions couldn't put a corrected demo into the same slot. A demo whose
-            // start time has already passed is left alone: it may well have run, and cancelling
-            // its session would erase that from the teacher's history and payouts.
+            // start time has already passed is left alone if anyone joined it: it may well have
+            // run, and cancelling its session would erase that from the teacher's history and
+            // payouts. One nobody joined was not held -- leaving it Scheduled let the no-show job
+            // pick it up after the counselor had already cancelled it.
             if (enteringNotInterested && booking.ClassSessionId is { } sessionId)
             {
                 var session = await _unitOfWork.Repository<ClassSession>().Query()
                     .FirstOrDefaultAsync(s => s.Id == sessionId, cancellationToken);
+                var anyoneJoined = booking.ParentJoinedAtUtc is not null
+                    || await _unitOfWork.Repository<DemoParticipant>().ExistsAsync(p => p.DemoBookingId == booking.Id && p.HasJoined, cancellationToken)
+                    || await _unitOfWork.Repository<SessionAttendance>().ExistsAsync(a => a.ClassSessionId == sessionId, cancellationToken);
                 if (session is not null
                     && session.Status is SessionStatus.Scheduled or SessionStatus.CarriedForward
-                    && session.ScheduledStartAtUtc > DateTime.UtcNow)
+                    && (session.ScheduledStartAtUtc > DateTime.UtcNow || !anyoneJoined))
                 {
                     await _sessionService.CancelAsync(
                         sessionId,
@@ -1114,6 +1119,14 @@ namespace iucs.readernest.application.Services
             // own join link — would keep resolving against the old, now-Rescheduled session.
             var newSession = await _sessionService.RescheduleAsync(classSessionId, request, cancellationToken);
             booking.ClassSessionId = newSession.Id;
+            // Who joined describes the old time (e.g. a parent who waited at a demo the teacher
+            // missed), not the new one -- left set, the no-show check would treat the new demo
+            // as attended.
+            booking.ParentJoinedAtUtc = null;
+            foreach (var participant in booking.Participants)
+            {
+                participant.HasJoined = false;
+            }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(DemoBooking), booking.Id.ToString(),
                 changesJson: $"{{\"rescheduledSessionId\":\"{newSession.Id}\"}}", cancellationToken: cancellationToken);

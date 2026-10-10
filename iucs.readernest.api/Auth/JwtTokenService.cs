@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.domain.Entities.Users;
 using Microsoft.Extensions.Options;
@@ -22,8 +23,16 @@ namespace iucs.readernest.api.Auth
 
         public TokenResult CreateToken(User user, IReadOnlyCollection<string> permissionClaims)
         {
-            var expiresAtUtc = DateTime.UtcNow.AddMinutes(_options.AccessTokenMinutes);
+            return CreateUserToken(user, permissionClaims, DateTime.UtcNow.AddMinutes(_options.AccessTokenMinutes), extraClaims: []);
+        }
 
+        public TokenResult CreateViewAsToken(User parent, IReadOnlyCollection<string> permissionClaims, Guid actorUserId, DateTime expiresAtUtc)
+        {
+            return CreateUserToken(parent, permissionClaims, expiresAtUtc, [new Claim(ViewAsParent.ActorClaimType, actorUserId.ToString())]);
+        }
+
+        private TokenResult CreateUserToken(User user, IReadOnlyCollection<string> permissionClaims, DateTime expiresAtUtc, IEnumerable<Claim> extraClaims)
+        {
             var claims = new List<Claim>
             {
                 new(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
@@ -34,6 +43,7 @@ namespace iucs.readernest.api.Auth
                 new(ClaimTypes.Role, user.Role.ToString()),
             };
             claims.AddRange(permissionClaims.Select(p => new Claim(PermissionClaimType, p)));
+            claims.AddRange(extraClaims);
 
             var credentials = new SigningCredentials(
                 new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_options.SigningKey)),

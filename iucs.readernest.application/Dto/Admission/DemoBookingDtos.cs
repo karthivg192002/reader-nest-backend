@@ -182,6 +182,10 @@ namespace iucs.readernest.application.Dto.Admission
 
         public string? MeetingRoomId { get; set; }
 
+        /// <summary>The linked demo class's own status. TeacherNoShow/StudentNoShow means the demo
+        /// was missed and is waiting for the counselor to reschedule or cancel it.</summary>
+        public SessionStatus? SessionStatus { get; set; }
+
         /// <summary>Teacher conducting (or who conducted) the demo, from the linked session.</summary>
         public Guid? TeacherProfileId { get; set; }
 

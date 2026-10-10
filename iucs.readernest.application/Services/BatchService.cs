@@ -168,8 +168,10 @@ namespace iucs.readernest.application.Services
                     var onLeave = await _unitOfWork.Repository<LeaveRequest>().ExistsAsync(
                         l => l.TeacherProfileId == request.TeacherProfileId
                             && l.Status == LeaveStatus.Approved
-                            && l.StartAtUtc < moveWindowEnd
-                            && l.EndAtUtc > moveWindowStart,
+                            && (l.IsClassWise
+                                ? l.Sessions.Any(ls => ls.ClassSession.ScheduledStartAtUtc < moveWindowEnd
+                                                       && ls.ClassSession.ScheduledEndAtUtc > moveWindowStart)
+                                : l.StartAtUtc < moveWindowEnd && l.EndAtUtc > moveWindowStart),
                         cancellationToken);
                     if (onLeave)
                     {
@@ -457,8 +459,10 @@ namespace iucs.readernest.application.Services
                 var onLeave = await _unitOfWork.Repository<LeaveRequest>().ExistsAsync(
                     l => l.TeacherProfileId == newTeacherId
                         && l.Status == LeaveStatus.Approved
-                        && l.StartAtUtc < moveWindowEnd
-                        && l.EndAtUtc > moveWindowStart,
+                        && (l.IsClassWise
+                            ? l.Sessions.Any(ls => ls.ClassSession.ScheduledStartAtUtc < moveWindowEnd
+                                                   && ls.ClassSession.ScheduledEndAtUtc > moveWindowStart)
+                            : l.StartAtUtc < moveWindowEnd && l.EndAtUtc > moveWindowStart),
                     cancellationToken);
                 if (onLeave)
                 {

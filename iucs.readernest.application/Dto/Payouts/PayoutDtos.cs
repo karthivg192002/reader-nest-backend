@@ -102,6 +102,26 @@ namespace iucs.readernest.application.Dto.Payouts
 
         public int? ShortfallMinutes { get; set; }
 
+        /// <summary>Number of recording segments for the class (a disconnect/rejoin creates a new one).</summary>
+        public int RecordingCount { get; set; }
+
+        /// <summary>All recording segments of the class added together, in whole minutes (merged view).</summary>
+        public int RecordedMinutes { get; set; }
+
+        /// <summary>Teacher's first join / latest leave as captured by the platform (not the recording clock).</summary>
+        public DateTime? TeacherJoinedAtUtc { get; set; }
+
+        public DateTime? TeacherLeftAtUtc { get; set; }
+
+        /// <summary>Minutes the teacher joined after the scheduled start (0 when on time).</summary>
+        public int LateJoinMinutes { get; set; }
+
+        /// <summary>Minutes the teacher left before the scheduled end (0 when not early).</summary>
+        public int EarlyEndMinutes { get; set; }
+
+        /// <summary>Plain-language cause of the shortfall: late join, early end, recording gap, or none.</summary>
+        public string? ShortfallReason { get; set; }
+
         /// <summary>Full scheduled-duration amount as accrued.</summary>
         public decimal FullAmount { get; set; }
 

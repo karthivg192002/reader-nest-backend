@@ -1511,6 +1511,7 @@ namespace iucs.readernest.api.Data
                 ("People", "Enrollment Review", "/executive/enrollments", "ClipboardCheck", PermissionModule.Admission.ToString()),
                 ("People", "Store Inquiries", "/executive/store-inquiries", "ShoppingBag", PermissionModule.Admission.ToString()),
                 ("People", "Parent Feedback", "/executive/parent-feedback", "Star", PermissionModule.Admission.ToString()),
+                ("People", "Parent Tickets", "/executive/support-tickets", "LifeBuoy", PermissionModule.SupportTickets.ToString()),
                 ("People", "Leave Management", "/executive/leave", "CalendarOff", PermissionModule.LeaveManagement.ToString()),
                 ("People", "Staff Leave", "/executive/staff-leave", "CalendarOff", PermissionModule.UserManagement.ToString()),
                 ("People", "Teacher Availability", "/executive/availability", "CalendarRange", PermissionModule.SessionCalendarManagement.ToString()),
@@ -2762,8 +2763,8 @@ namespace iucs.readernest.api.Data
         /// <summary>
         /// Adds parent support tickets to a DB seeded before they existed: "Help &amp; Support" for
         /// parents (always visible — every family must be able to reach the team now that WhatsApp
-        /// and phone contact are being retired) and "Parent Tickets" for Admin and Relationship
-        /// Managers, gated on the SupportTickets module.
+        /// and phone contact are being retired) and "Parent Tickets" for Admin, Relationship
+        /// Managers and the Founder Dashboard, gated on the SupportTickets module.
         /// </summary>
         private static async Task EnsureSupportTicketMenusAsync(ReaderNestDbContext context)
         {
@@ -2772,6 +2773,7 @@ namespace iucs.readernest.api.Data
                 ("parent", "/parent/notifications", "Account", "Help & Support", "/parent/support", (string?)null),
                 ("admin", "/admin/parent-feedback", "People", "Parent Tickets", "/admin/support-tickets", PermissionModule.SupportTickets.ToString()),
                 ("subadmin", "/subadmin/users", "Delegated Work", "Parent Tickets", "/subadmin/support-tickets", PermissionModule.SupportTickets.ToString()),
+                ("executive", "/executive/parent-feedback", "People", "Parent Tickets", "/executive/support-tickets", PermissionModule.SupportTickets.ToString()),
             })
             {
                 if (context.MenuItems.Local.Any(m => m.Portal == portal && m.Path == path) ||

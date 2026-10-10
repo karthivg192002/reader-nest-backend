@@ -399,6 +399,8 @@ namespace iucs.readernest.application.Services
                 .Include(i => i.Course)
                 .Include(i => i.Department)
                 .Include(i => i.ParentProfile).ThenInclude(p => p.User)
+                .Include(i => i.ParentProfile).ThenInclude(p => p.Children)
+                .Include(i => i.Subscription).ThenInclude(s => s!.Child)
                 .Include(i => i.Subscription).ThenInclude(s => s!.PackagePlan).ThenInclude(p => p.Course);
 
         public async Task<PagedResult<InvoiceDto>> ListInvoicesAsync(

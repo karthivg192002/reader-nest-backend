@@ -18,6 +18,13 @@ namespace iucs.readernest.application.Common.Interfaces
         TokenResult CreateToken(User user, IReadOnlyCollection<string> permissionClaims);
 
         /// <summary>
+        /// A read-only "view as parent" token (see <see cref="Common.ViewAsParent"/>): the same
+        /// claims <see cref="CreateToken"/> issues for <paramref name="parent"/>, plus the
+        /// viewing staff member's id, expiring at <paramref name="expiresAtUtc"/>.
+        /// </summary>
+        TokenResult CreateViewAsToken(User parent, IReadOnlyCollection<string> permissionClaims, Guid actorUserId, DateTime expiresAtUtc);
+
+        /// <summary>
         /// A ClassroomHub-only token for the anonymous Jibri "recording observer" page (see
         /// docs/JITSI_ARCHITECTURE.md's recording-observer section): no real <see cref="User"/>
         /// backs it, so it carries a throwaway subject id that never resolves to a DB row.
