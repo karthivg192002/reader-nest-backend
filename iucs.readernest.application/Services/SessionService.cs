@@ -285,7 +285,12 @@ namespace iucs.readernest.application.Services
             var original = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(id, cancellationToken)
                 ?? throw new NotFoundException(nameof(ClassSession), id);
 
-            if (TerminalStatuses.Contains(original.Status))
+            // A missed demo is no longer carried forward automatically (see MarkNoShowCoreAsync),
+            // so rescheduling it is how the counselor books the new time. Its own no-show status
+            // stays as the record of what happened; only the new session is added.
+            var missedDemo = original.Type == SessionType.Demo
+                && original.Status is SessionStatus.TeacherNoShow or SessionStatus.StudentNoShow;
+            if (TerminalStatuses.Contains(original.Status) && !missedDemo)
             {
                 throw new DomainValidationException($"A session in status '{original.Status}' cannot be rescheduled.");
             }
@@ -330,7 +335,10 @@ namespace iucs.readernest.application.Services
                 newTeacherId, request.ScheduledStartAtUtc, request.ScheduledEndAtUtc,
                 cancellationToken, excludeSessionId: original.Id);
 
-            original.Status = SessionStatus.Rescheduled;
+            if (!missedDemo)
+            {
+                original.Status = SessionStatus.Rescheduled;
+            }
 
             // A Demo's room is the assigned teacher's own fixed personal room (see ScheduleAsync
             // and DemoBookingService's own reassignment path), so it has to follow a teacher swap
@@ -887,6 +895,20 @@ namespace iucs.readernest.application.Services
                 await NotifyAdminsOfTeacherNoShowAsync(session, cancellationToken);
             }
 
+            // Client requirement (2026-10-09): a missed demo is never booked again on its own.
+            // It used to carry forward to the same weekday/time a week later, so a Friday 7 PM
+            // demo nobody held (and nobody cancelled) silently reappeared every Friday. It now
+            // stays as a no-show, still linked to its booking, and the counselor decides:
+            // Reschedule (DemoBookingService.RescheduleAsync) or Cancel.
+            if (session.Type == SessionType.Demo)
+            {
+                await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
+                    changesJson: "{\"noShow\":\"" + party + "\",\"carriedForward\":false}",
+                    cancellationToken: cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                return await GetAsync(session.Id, cancellationToken);
+            }
+
             // An abandoned booking (a stale/orphaned lead, a batch nobody ever pulled off the
             // calendar) previously carried itself forward one week later, forever — confirmed
             // live: one stale demo booking auto-rescheduled itself as a fresh no-show every
@@ -937,32 +959,6 @@ namespace iucs.readernest.application.Services
                 CarryForwardCount = session.CarryForwardCount + 1,
             };
             await _unitOfWork.Repository<ClassSession>().AddAsync(carriedForward, cancellationToken);
-
-            // A demo has no batch to fall back on — its only link to a student is the
-            // DemoBooking row, and that row still points at the now-terminal original session
-            // unless it's moved here. Miss this and the carried-forward slot looks exactly like
-            // the original (Teacher set, Type Demo) but with "No students assigned": nobody was
-            // ever going to join it, so NoShowDetectionBackgroundService flags it a no-show
-            // again next cycle regardless of who actually shows up, repeating weekly until
-            // MaxAutoCarryForwards silently caps it — confirmed live as the "9 straight weeks"
-            // incident referenced above. Reset the per-occurrence join flags too: they describe
-            // whether this parent/participant joined the OLD session, which says nothing about
-            // the new one.
-            if (session.Type == SessionType.Demo)
-            {
-                var demoBooking = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
-                    .Include(b => b.Participants)
-                    .FirstOrDefaultAsync(b => b.ClassSessionId == session.Id, cancellationToken);
-                if (demoBooking is not null)
-                {
-                    demoBooking.ClassSessionId = carriedForward.Id;
-                    demoBooking.ParentJoinedAtUtc = null;
-                    foreach (var participant in demoBooking.Participants)
-                    {
-                        participant.HasJoined = false;
-                    }
-                }
-            }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(),
                 changesJson: "{\"noShow\":\"" + party + "\",\"carriedForwardTo\":\"" + carriedForward.Id + "\""
@@ -1401,6 +1397,15 @@ namespace iucs.readernest.application.Services
             var course = await _unitOfWork.Repository<Course>().GetByIdAsync(batch.CourseId, cancellationToken)
                 ?? throw new NotFoundException(nameof(Course), batch.CourseId);
 
+            var previousTeacherProfileId = batch.TeacherProfileId;
+            var targetTeacherProfileId = request.TeacherProfileId ?? previousTeacherProfileId;
+            var teacherChanged = targetTeacherProfileId != previousTeacherProfileId;
+            if (teacherChanged)
+            {
+                _ = await _unitOfWork.Repository<TeacherProfile>().GetByIdAsync(targetTeacherProfileId, cancellationToken)
+                    ?? throw new NotFoundException(nameof(TeacherProfile), targetTeacherProfileId);
+            }
+
             var slotDays = request.Slots.Select(s => s.DayOfWeek).ToList();
             if (slotDays.Count != slotDays.Distinct().Count())
             {
@@ -1437,7 +1442,7 @@ namespace iucs.readernest.application.Services
                 var windowStart = newStartBySessionId.Values.Min();
                 var windowEnd = newStartBySessionId.Values.Max().AddMinutes(durationMinutes);
                 var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
-                    .Where(s => s.TeacherProfileId == batch.TeacherProfileId
+                    .Where(s => s.TeacherProfileId == targetTeacherProfileId
                         && s.BatchId != batchId
                         && (s.Status == SessionStatus.Scheduled
                             || s.Status == SessionStatus.InProgress
@@ -1465,6 +1470,7 @@ namespace iucs.readernest.application.Services
                     var newStart = newStartBySessionId[session.Id];
                     session.ScheduledStartAtUtc = newStart;
                     session.ScheduledEndAtUtc = newStart.AddMinutes(durationMinutes);
+                    session.TeacherProfileId = targetTeacherProfileId;
                 }
 
                 await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
@@ -1491,7 +1497,7 @@ namespace iucs.readernest.application.Services
                 var windowStart = newStarts.Min();
                 var windowEnd = newStarts.Max().AddMinutes(durationMinutes);
                 var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
-                    .Where(s => s.TeacherProfileId == batch.TeacherProfileId
+                    .Where(s => s.TeacherProfileId == targetTeacherProfileId
                         && s.BatchId != batchId
                         && (s.Status == SessionStatus.Scheduled
                             || s.Status == SessionStatus.InProgress
@@ -1527,7 +1533,7 @@ namespace iucs.readernest.application.Services
                         new ClassSession
                         {
                             BatchId = batch.Id,
-                            TeacherProfileId = batch.TeacherProfileId,
+                            TeacherProfileId = targetTeacherProfileId,
                             ScheduledStartAtUtc = startUtc,
                             ScheduledEndAtUtc = startUtc.AddMinutes(durationMinutes),
                             MeetingRoomId = $"trn-{Guid.NewGuid():N}",
@@ -1539,6 +1545,16 @@ namespace iucs.readernest.application.Services
 
                 await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
                     changesJson: $"{{\"batchId\":\"{batch.Id}\",\"scheduleRegenerated\":true,\"cancelledCount\":{remainingSessions.Count},\"newCount\":{newStarts.Count}}}",
+                    cancellationToken: cancellationToken);
+            }
+
+            // The Manage dialog edits these together. Persist them together so validation uses
+            // the selected teacher at the replacement times instead of the batch's obsolete plan.
+            batch.TeacherProfileId = targetTeacherProfileId;
+            if (teacherChanged)
+            {
+                await _auditLog.StageAsync(AuditAction.Update, nameof(Batch), batch.Id.ToString(),
+                    changesJson: $"{{\"teacherReassignedWithSchedule\":true,\"from\":\"{previousTeacherProfileId}\",\"to\":\"{targetTeacherProfileId}\"}}",
                     cancellationToken: cancellationToken);
             }
 
@@ -1676,8 +1692,13 @@ namespace iucs.readernest.application.Services
             var onLeave = await _unitOfWork.Repository<LeaveRequest>().ExistsAsync(
                 l => l.TeacherProfileId == teacherProfileId
                      && l.Status == LeaveStatus.Approved
-                     && l.StartAtUtc < endUtc
-                     && l.EndAtUtc > startUtc,
+                     && (l.IsClassWise
+                         // A class-wise leave's own Start/End is just the min/max of the picked
+                         // classes, so the span between them is NOT leave — only the picked
+                         // classes' own slots are.
+                         ? l.Sessions.Any(ls => ls.ClassSession.ScheduledStartAtUtc < endUtc
+                                                && ls.ClassSession.ScheduledEndAtUtc > startUtc)
+                         : l.StartAtUtc < endUtc && l.EndAtUtc > startUtc),
                 cancellationToken);
             if (onLeave)
             {

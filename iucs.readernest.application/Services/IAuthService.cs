@@ -10,6 +10,20 @@ namespace iucs.readernest.application.Services
         Task<LoginResponse> GetCurrentUserAsync(Guid userId, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Starts a read-only "view as parent" session (see <see cref="Common.ViewAsParent"/>):
+        /// returns a short-lived token that opens the parent's portal as them. Parent accounts
+        /// only; audit-logged under <paramref name="actorUserId"/>. The caller's permission to do
+        /// this is checked by the controller.
+        /// </summary>
+        Task<LoginResponse> StartViewAsParentAsync(Guid actorUserId, Guid parentUserId, CancellationToken cancellationToken = default);
+
+        /// <summary>/auth/me for a view-as session: same read-only token, same original expiry.</summary>
+        Task<LoginResponse> GetViewAsCurrentUserAsync(Guid parentUserId, Guid actorUserId, DateTime expiresAtUtc, CancellationToken cancellationToken = default);
+
+        /// <summary>Records that the staff member closed their view-as session.</summary>
+        Task EndViewAsParentAsync(Guid parentUserId, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// The account's current role/status/permissions, read fresh from the database —
         /// deliberately not from anything baked into a JWT at login. Backs the per-request
         /// re-check in Program.cs's OnTokenValidated: a permission or role change (or a

@@ -112,6 +112,57 @@ namespace iucs.readernest.application.Services
             return BuildResponse(user, permissions, token, defaultRoute);
         }
 
+        public async Task<LoginResponse> StartViewAsParentAsync(Guid actorUserId, Guid parentUserId, CancellationToken cancellationToken = default)
+        {
+            var parent = await _unitOfWork.Repository<User>().Query()
+                .FirstOrDefaultAsync(u => u.Id == parentUserId, cancellationToken)
+                ?? throw new NotFoundException(nameof(User), parentUserId);
+
+            // Parents only: a staff, teacher or admin account is never viewable this way.
+            if (parent.Role != UserRole.Parent)
+            {
+                throw new DomainValidationException("Only parent accounts can be viewed this way.");
+            }
+            // Same rule as login: a deactivated parent couldn't sign in, so there's nothing to see.
+            if (parent.Status == UserStatus.Inactive)
+            {
+                throw new DomainValidationException("This parent's account is deactivated, so there's no portal to view.");
+            }
+
+            var permissions = await LoadPermissionClaimsAsync(parent, cancellationToken);
+            var expiresAtUtc = DateTime.UtcNow.AddMinutes(ViewAsParent.SessionMinutes);
+            var token = _tokenService.CreateViewAsToken(parent, permissions, actorUserId, expiresAtUtc);
+
+            // Recorded under the staff member's own (normal) login, naming the parent viewed.
+            await _auditLog.StageAsync(AuditAction.Access, nameof(User), parent.Id.ToString(),
+                $"{{\"note\":\"Started read-only 'View as parent' session ({ViewAsParent.SessionMinutes} min)\"}}", cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return BuildResponse(parent, permissions, token, "/parent");
+        }
+
+        public async Task<LoginResponse> GetViewAsCurrentUserAsync(Guid parentUserId, Guid actorUserId, DateTime expiresAtUtc, CancellationToken cancellationToken = default)
+        {
+            var parent = await _unitOfWork.Repository<User>().Query()
+                .FirstOrDefaultAsync(u => u.Id == parentUserId, cancellationToken)
+                ?? throw new NotFoundException(nameof(User), parentUserId);
+
+            // Unlike GetCurrentUserAsync, never hand back a normal (8-hour, writable) parent token
+            // here: re-mint the same read-only view-as token with its ORIGINAL expiry, so the
+            // portal's periodic refresh can't stretch a 30-minute session.
+            var permissions = await LoadPermissionClaimsAsync(parent, cancellationToken);
+            var token = _tokenService.CreateViewAsToken(parent, permissions, actorUserId, expiresAtUtc);
+            return BuildResponse(parent, permissions, token, "/parent");
+        }
+
+        public async Task EndViewAsParentAsync(Guid parentUserId, CancellationToken cancellationToken = default)
+        {
+            // Called with the view-as token itself, so AuditLogService credits the staff member.
+            await _auditLog.StageAsync(AuditAction.Access, nameof(User), parentUserId.ToString(),
+                "{\"note\":\"Ended 'View as parent' session\"}", cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
         public async Task<CurrentAccessSnapshot?> GetCurrentAccessAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             var user = await _unitOfWork.Repository<User>().Query()

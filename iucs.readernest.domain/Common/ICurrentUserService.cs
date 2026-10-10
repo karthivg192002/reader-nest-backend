@@ -8,5 +8,12 @@ namespace iucs.readernest.domain.Common
     public interface ICurrentUserService
     {
         Guid? UserId { get; }
+
+        /// <summary>
+        /// During a read-only "view as parent" session, the staff member actually looking
+        /// (UserId is then the parent being viewed); null otherwise. Audit rows credit this
+        /// person, so the log never shows a parent doing something a staff member did.
+        /// </summary>
+        Guid? ViewAsActorUserId => null;
     }
 }
