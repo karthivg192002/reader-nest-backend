@@ -40,7 +40,7 @@ pipeline {
         stage('Checkout') {
             steps {
                 git(
-                    branch: 'alphabet',
+                    branch: 'main',
                     url: "${GITHUB_REPO}",
                     credentialsId: 'github'
                 )
