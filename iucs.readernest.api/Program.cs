@@ -114,6 +114,7 @@ builder.Services.AddScoped<iucs.readernest.api.Services.Payments.IGatewayAdapter
 builder.Services.AddScoped<IPaymentGateway, iucs.readernest.api.Services.Payments.PaymentGatewayDispatcher>();
 // Auto billing: recurring invoice generation + overdue flagging + fee suspension
 builder.Services.AddHostedService<BillingBackgroundService>();
+builder.Services.AddHostedService<SaasLifecycleService>();
 // Session reminders, delayed-session alerts
 builder.Services.AddHostedService<SessionReminderBackgroundService>();
 builder.Services.AddHostedService<AbandonedClassCompletionBackgroundService>();
@@ -475,6 +476,7 @@ else
 app.UseCors();
 
 app.UseAuthentication();
+app.UseMiddleware<SaasEntitlementMiddleware>();
 // "View as parent" sessions are look-only: refuse their writes/joins before authorization runs.
 app.UseMiddleware<ViewAsReadOnlyMiddleware>();
 app.UseAuthorization();

@@ -15,6 +15,7 @@ using iucs.readernest.domain.Entities.Resources;
 using iucs.readernest.domain.Entities.Settings;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
+using iucs.readernest.domain.Entities.Saas;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.NameTranslation;
@@ -128,6 +129,17 @@ namespace iucs.readernest.domain.Data
         public DbSet<MenuItem> MenuItems => Set<MenuItem>();
         public DbSet<Integration> Integrations => Set<Integration>();
         public DbSet<ShortLink> ShortLinks => Set<ShortLink>();
+
+        // SaaS control plane. Tenant-owned application records remain linked through
+        // memberships while these tables hold lifecycle, billing and compliance state.
+        public DbSet<Tenant> Tenants => Set<Tenant>();
+        public DbSet<TenantMembership> TenantMemberships => Set<TenantMembership>();
+        public DbSet<TenantInvitation> TenantInvitations => Set<TenantInvitation>();
+        public DbSet<TenantSubscription> TenantSubscriptions => Set<TenantSubscription>();
+        public DbSet<SaasInvoice> SaasInvoices => Set<SaasInvoice>();
+        public DbSet<SaasWebhookEvent> SaasWebhookEvents => Set<SaasWebhookEvent>();
+        public DbSet<SaasAuditRecord> SaasAuditRecords => Set<SaasAuditRecord>();
+        public DbSet<TenantDataExport> TenantDataExports => Set<TenantDataExport>();
 
         protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
         {
