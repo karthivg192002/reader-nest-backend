@@ -181,7 +181,28 @@ namespace iucs.readernest.tests
                 Status = SessionStatus.Scheduled,
                 MeetingRoomId = "trn-within-window",
             };
-            _db.Context.AddRange(farFuture, alreadyEnded, withinWindow);
+            // Regression: the teacher dashboard showed a future Completed row with an active
+            // Start Class button. Completion recovery is based on ActualEndAtUtc, never on the
+            // future scheduled slot.
+            var futureCompleted = new ClassSession
+            {
+                TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddDays(1),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddDays(1).AddMinutes(45),
+                ActualEndAtUtc = DateTime.UtcNow.AddMinutes(-30),
+                Status = SessionStatus.Completed,
+                MeetingRoomId = "trn-future-completed",
+            };
+            var justCompleted = new ClassSession
+            {
+                TeacherProfileId = teacher.Id,
+                ScheduledStartAtUtc = DateTime.UtcNow.AddMinutes(-40),
+                ScheduledEndAtUtc = DateTime.UtcNow.AddMinutes(5),
+                ActualEndAtUtc = DateTime.UtcNow.AddMinutes(-2),
+                Status = SessionStatus.Completed,
+                MeetingRoomId = "trn-just-completed",
+            };
+            _db.Context.AddRange(farFuture, alreadyEnded, withinWindow, futureCompleted, justCompleted);
             await _db.Context.SaveChangesAsync();
 
             // Client: a teacher's own Join is open "all the time" before her class (reported live),
@@ -192,6 +213,9 @@ namespace iucs.readernest.tests
 
             var join = await service.GetJitsiJoinAsync(withinWindow.Id, teacherUser.Id);
             Assert.Equal("trn-within-window", join.Room);
+            await Assert.ThrowsAsync<DomainValidationException>(
+                () => service.GetJitsiJoinAsync(futureCompleted.Id, teacherUser.Id));
+            Assert.Equal("trn-just-completed", (await service.GetJitsiJoinAsync(justCompleted.Id, teacherUser.Id)).Room);
         }
 
         [Fact]

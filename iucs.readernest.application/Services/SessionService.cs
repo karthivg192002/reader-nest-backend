@@ -1943,6 +1943,12 @@ namespace iucs.readernest.application.Services
                 {
                     throw new DomainValidationException("This class was cancelled or moved, so it can't be joined.");
                 }
+                if (session.Status == SessionStatus.Completed
+                    && (session.ActualEndAtUtc is null || now < session.ActualEndAtUtc.Value
+                        || now > session.ActualEndAtUtc.Value + RejoinGraceAfterCompleted))
+                {
+                    throw new DomainValidationException("This class has ended. Open its record instead.");
+                }
                 if (now > session.ScheduledEndAtUtc + TeacherLateJoinGrace && session.Status != SessionStatus.InProgress)
                 {
                     throw new DomainValidationException("This class has already ended.");

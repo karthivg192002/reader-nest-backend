@@ -95,6 +95,7 @@ namespace iucs.readernest.application.Mappings
                 Status = session.Status,
                 ScheduledStartAtUtc = session.ScheduledStartAtUtc,
                 ScheduledEndAtUtc = session.ScheduledEndAtUtc,
+                ActualEndAtUtc = session.ActualEndAtUtc,
                 MeetingRoomId = session.MeetingRoomId,
                 RescheduledFromSessionId = session.RescheduledFromSessionId,
                 CancellationReason = session.CancellationReason,

@@ -22,6 +22,9 @@ namespace iucs.readernest.application.Dto.Sessions
 
         public DateTime ScheduledEndAtUtc { get; set; }
 
+        /// <summary>The real completion time, used by clients to expose only the short recovery/rejoin window.</summary>
+        public DateTime? ActualEndAtUtc { get; set; }
+
         public string? MeetingRoomId { get; set; }
 
         public Guid? RescheduledFromSessionId { get; set; }
