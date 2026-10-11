@@ -40,7 +40,7 @@ pipeline {
         stage('Checkout') {
             steps {
                 git(
-                    branch: 'main',
+                    branch: 'feature/saas-foundation',
                     url: "${GITHUB_REPO}",
                     credentialsId: 'github'
                 )
