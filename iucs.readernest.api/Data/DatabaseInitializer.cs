@@ -53,6 +53,7 @@ namespace iucs.readernest.api.Data
             await EnsureAdminActivityBankMenuAsync(context);
             await EnsureAdminServerMonitoringMenuAsync(context);
             await EnsureClassSessionLogsMenuAsync(context);
+            await EnsureSaasMenusAndSettingsAsync(context);
             await EnsureItAdminMenuAsync(context);
             await EnsureExecutiveMenuAsync(context);
             await RelabelExecutiveDashboardMenuAsync(context);
@@ -1558,6 +1559,49 @@ namespace iucs.readernest.api.Data
                     SortOrder = sortOrder,
                     RequiredModule = requiredModule,
                     IsActive = true,
+                });
+            }
+        }
+
+        private static async Task EnsureSaasMenusAndSettingsAsync(ReaderNestDbContext context)
+        {
+            foreach (var (key, value) in new[]
+            {
+                ("saas.workspaceId", Guid.NewGuid().ToString("N")),
+                ("saas.workspaceName", "Meet to Manage Academy"),
+                ("saas.workspaceSlug", "academy"),
+                ("saas.plan", "growth"),
+                ("saas.status", "trialing"),
+                ("saas.trialEndsAtUtc", DateTime.UtcNow.AddDays(14).ToString("O")),
+            })
+            {
+                if (!await context.AppSettings.AnyAsync(x => x.Key == key))
+                {
+                    context.AppSettings.Add(new AppSetting
+                    {
+                        Category = SettingCategory.General,
+                        Key = key,
+                        Value = value,
+                        IsPublic = false,
+                    });
+                }
+            }
+
+            foreach (var portal in new[] { "admin" })
+            {
+                var path = $"/{portal}/saas";
+                if (await context.MenuItems.AnyAsync(x => x.Portal == portal && x.Path == path)) continue;
+                context.MenuItems.Add(new MenuItem
+                {
+                    Portal = portal,
+                    Section = "System",
+                    SectionOrder = 90,
+                    Label = "SaaS & Usage",
+                    Path = path,
+                    Icon = "Gauge",
+                    SortOrder = 5,
+                    IsActive = true,
+                    RequiredModule = PermissionModule.Settings.ToString(),
                 });
             }
         }
