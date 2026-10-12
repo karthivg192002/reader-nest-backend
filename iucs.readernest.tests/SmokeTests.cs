@@ -411,6 +411,60 @@ namespace iucs.readernest.tests
                 () => CreateSessionService().CreateGuestLinkAsync(session.Id, strangerChild.Id));
         }
 
+        private async Task SeedPresentationAsync(Guid sessionId)
+        {
+            _db.Context.Add(new SessionPresentation { ClassSessionId = sessionId, StorageUrl = "decks/lesson.pdf", OriginalFileName = "lesson.pdf" });
+            await _db.Context.SaveChangesAsync();
+        }
+
+        [Fact]
+        public async Task GuestPresentation_ServesTheDeckOnlyForTheTokensOwnClass()
+        {
+            var (session, child) = await SeedGuestLinkFixtureAsync();
+            await SeedPresentationAsync(session.Id);
+            var service = CreateSessionService();
+
+            var meta = await service.GetGuestPresentationAsync(session.Id, session.Id, child.Id);
+            Assert.Equal("lesson.pdf", meta!.OriginalFileName);
+            var download = await service.GetGuestPresentationForDownloadAsync(session.Id, session.Id, childId: null);
+            Assert.Equal("decks/lesson.pdf", download.StorageUrl);
+
+            // A token minted for a different class must never unlock this class's deck.
+            var otherClass = Guid.NewGuid();
+            await Assert.ThrowsAsync<ForbiddenException>(() => service.GetGuestPresentationAsync(session.Id, otherClass, null));
+            await Assert.ThrowsAsync<ForbiddenException>(() => service.GetGuestPresentationForDownloadAsync(session.Id, otherClass, null));
+        }
+
+        [Fact]
+        public async Task GuestPresentation_ReturnsNullBeforeUploadAndRejectsDownload()
+        {
+            var (session, _) = await SeedGuestLinkFixtureAsync();
+            var service = CreateSessionService();
+
+            Assert.Null(await service.GetGuestPresentationAsync(session.Id, session.Id, null));
+            await Assert.ThrowsAsync<NotFoundException>(() => service.GetGuestPresentationForDownloadAsync(session.Id, session.Id, null));
+        }
+
+        [Fact]
+        public async Task GuestPresentation_IsClosedWhenTheClassEndsOrTheStudentIsNoLongerEnrolled()
+        {
+            var (session, child) = await SeedGuestLinkFixtureAsync();
+            await SeedPresentationAsync(session.Id);
+            var service = CreateSessionService();
+
+            var enrollment = await _db.Context.BatchEnrollments.SingleAsync(e => e.ChildId == child.Id);
+            enrollment.Status = EnrollmentStatus.Withdrawn;
+            await _db.Context.SaveChangesAsync();
+            await Assert.ThrowsAsync<ForbiddenException>(() => service.GetGuestPresentationAsync(session.Id, session.Id, child.Id));
+            // A generic (not student-bound) guest link is unaffected by that student's enrollment.
+            Assert.NotNull(await service.GetGuestPresentationAsync(session.Id, session.Id, null));
+
+            session.Status = SessionStatus.Completed;
+            await _db.Context.SaveChangesAsync();
+            await Assert.ThrowsAsync<ForbiddenException>(() => service.GetGuestPresentationAsync(session.Id, session.Id, null));
+            await Assert.ThrowsAsync<ForbiddenException>(() => service.GetGuestPresentationForDownloadAsync(session.Id, session.Id, null));
+        }
+
         [Fact]
         public async Task TeacherNoShow_AppliesConfiguredPenaltyPercent()
         {

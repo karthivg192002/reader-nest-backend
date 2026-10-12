@@ -2444,6 +2444,43 @@ namespace iucs.readernest.application.Services
             return presentation is null ? null : ToPresentationDto(presentation);
         }
 
+        private async Task EnsureGuestPresentationAccessAsync(Guid sessionId, Guid tokenSessionId, Guid? childId, CancellationToken cancellationToken)
+        {
+            // The controller obtains tokenSessionId only from a signature/lifetime-validated
+            // guest-classroom principal. Never resolve a different class using this token.
+            if (sessionId != tokenSessionId)
+                throw new ForbiddenException("This guest link does not authorize this class.");
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), sessionId);
+            if (TerminalStatuses.Contains(session.Status)
+                || (session.Status != SessionStatus.InProgress && DateTime.UtcNow > session.ScheduledEndAtUtc))
+                throw new ForbiddenException("This class is no longer open for guest presentation viewing.");
+            if (childId.HasValue)
+            {
+                var enrolled = session.BatchId.HasValue && await _unitOfWork.Repository<BatchEnrollment>()
+                    .ExistsAsync(e => e.BatchId == session.BatchId.Value && e.ChildId == childId.Value && e.Status == EnrollmentStatus.Active, cancellationToken);
+                if (!enrolled)
+                    throw new ForbiddenException("This student no longer has access to this class.");
+            }
+        }
+
+        public async Task<SessionPresentationDto?> GetGuestPresentationAsync(Guid sessionId, Guid tokenSessionId, Guid? childId, CancellationToken cancellationToken = default)
+        {
+            await EnsureGuestPresentationAccessAsync(sessionId, tokenSessionId, childId, cancellationToken);
+            var presentation = await _unitOfWork.Repository<SessionPresentation>().Query()
+                .FirstOrDefaultAsync(p => p.ClassSessionId == sessionId, cancellationToken);
+            return presentation is null ? null : ToPresentationDto(presentation);
+        }
+
+        public async Task<SessionPresentationDownloadDto> GetGuestPresentationForDownloadAsync(Guid sessionId, Guid tokenSessionId, Guid? childId, CancellationToken cancellationToken = default)
+        {
+            await EnsureGuestPresentationAccessAsync(sessionId, tokenSessionId, childId, cancellationToken);
+            var presentation = await _unitOfWork.Repository<SessionPresentation>().Query()
+                .FirstOrDefaultAsync(p => p.ClassSessionId == sessionId, cancellationToken)
+                ?? throw new NotFoundException(nameof(SessionPresentation), sessionId);
+            return new SessionPresentationDownloadDto { StorageUrl = presentation.StorageUrl, OriginalFileName = presentation.OriginalFileName };
+        }
+
         private static SessionPresentationDto ToPresentationDto(SessionPresentation presentation) => new()
         {
             Id = presentation.Id,

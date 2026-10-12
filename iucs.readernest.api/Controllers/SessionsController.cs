@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using iucs.readernest.api.Auth;
 using iucs.readernest.application.Common.Interfaces;
+using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Academics;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Services;
@@ -518,6 +519,11 @@ namespace iucs.readernest.api.Controllers
         [Authorize]
         public async Task<ActionResult<SessionPresentationDto?>> GetPresentation(Guid id, CancellationToken cancellationToken)
         {
+            if (User.FindFirstValue("purpose") == "guest-classroom")
+            {
+                var scope = GetGuestPresentationScope();
+                return Ok(await _sessionService.GetGuestPresentationAsync(id, scope.SessionId, scope.ChildId, cancellationToken));
+            }
             var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
             return Ok(await _sessionService.GetPresentationAsync(id, userId, cancellationToken));
         }
@@ -528,8 +534,17 @@ namespace iucs.readernest.api.Controllers
         [Authorize]
         public async Task<IActionResult> DownloadPresentation(Guid id, CancellationToken cancellationToken)
         {
-            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-            var presentation = await _sessionService.GetPresentationForDownloadAsync(id, userId, cancellationToken);
+            SessionPresentationDownloadDto presentation;
+            if (User.FindFirstValue("purpose") == "guest-classroom")
+            {
+                var scope = GetGuestPresentationScope();
+                presentation = await _sessionService.GetGuestPresentationForDownloadAsync(id, scope.SessionId, scope.ChildId, cancellationToken);
+            }
+            else
+            {
+                var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+                presentation = await _sessionService.GetPresentationForDownloadAsync(id, userId, cancellationToken);
+            }
             var stream = await _fileStorage.OpenReadAsync(presentation.StorageUrl, cancellationToken);
 
             if (stream is null)
@@ -538,6 +553,17 @@ namespace iucs.readernest.api.Controllers
             }
 
             return File(stream, "application/pdf", presentation.OriginalFileName);
+        }
+
+        private (Guid SessionId, Guid? ChildId) GetGuestPresentationScope()
+        {
+            if (!Guid.TryParse(User.FindFirstValue("sessionId"), out var sessionId))
+                throw new ForbiddenException("This guest token has no valid class scope.");
+            var childClaim = User.FindFirstValue("childId");
+            if (childClaim is null) return (sessionId, null);
+            if (!Guid.TryParse(childClaim, out var childId))
+                throw new ForbiddenException("This guest token has no valid student scope.");
+            return (sessionId, childId);
         }
 
         /// <summary>Engagement signals from the live classroom (quiz, activity, whiteboard, attention).</summary>

@@ -220,6 +220,9 @@ namespace iucs.readernest.application.Services
 
         /// <summary>Resolves the stored file for download — same participant gate as viewing metadata.</summary>
         Task<SessionPresentationDownloadDto> GetPresentationForDownloadAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default);
+        /// <summary>Read-only deck access for a validated guest-classroom JWT scoped to this live session.</summary>
+        Task<SessionPresentationDto?> GetGuestPresentationAsync(Guid sessionId, Guid tokenSessionId, Guid? childId, CancellationToken cancellationToken = default);
+        Task<SessionPresentationDownloadDto> GetGuestPresentationForDownloadAsync(Guid sessionId, Guid tokenSessionId, Guid? childId, CancellationToken cancellationToken = default);
 
         /// <summary>The session's batch roster for the "Copy Guest Link" student picker — see
         /// GuestLinkStudentDto for why this is scoped off the session's own permission rather
