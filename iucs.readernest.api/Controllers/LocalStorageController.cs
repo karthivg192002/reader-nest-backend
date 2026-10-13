@@ -67,6 +67,17 @@ namespace iucs.readernest.api.Controllers
             // recording or video can be seeked without fetching it all.
             Response.Headers.ContentDisposition = "inline";
             Response.Headers.XContentTypeOptions = "nosniff";
+            // Opened directly in a tab (the "open recording" link does exactly that), the browser
+            // shows a video in a little page of its own whose player then loads this same URL --
+            // and the API-wide "default-src 'none'" policy (Program.cs) applies to that page, so
+            // the player was blocked and the tab stayed black. Reported live as "not working" for
+            // a recording that played fine inside the portal. Media may load from here; still no
+            // scripts, frames or anything else.
+            if (contentType.StartsWith("video/", StringComparison.Ordinal) || contentType.StartsWith("audio/", StringComparison.Ordinal))
+            {
+                Response.Headers.ContentSecurityPolicy = "default-src 'none'; media-src 'self'; frame-ancestors 'none'";
+            }
+
             return PhysicalFile(path, contentType, enableRangeProcessing: true);
         }
     }
