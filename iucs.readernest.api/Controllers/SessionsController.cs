@@ -413,9 +413,20 @@ namespace iucs.readernest.api.Controllers
                 return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "A class recording must be MP4 or WebM video." });
             }
 
-            var upload = await recordingStorage.StartMultipartAsync(
-                isMp4 ? "class-recording.mp4" : "class-recording.webm", isMp4 ? "video/mp4" : "video/webm", cancellationToken);
-            return Ok(new RecordingUploadDto { Key = upload.Key, UploadId = upload.UploadId, PartSizeBytes = upload.PartSizeBytes });
+            try
+            {
+                var upload = await recordingStorage.StartMultipartAsync(
+                    isMp4 ? "class-recording.mp4" : "class-recording.webm", isMp4 ? "video/mp4" : "video/webm", cancellationToken);
+                return Ok(new RecordingUploadDto { Key = upload.Key, UploadId = upload.UploadId, PartSizeBytes = upload.PartSizeBytes });
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+            {
+                // Seen live as a bare 500 on every class: the uploads folder wasn't writable by the
+                // app's user, so no class could be recorded and nothing said why.
+                throw new ExternalServiceException(
+                    $"The server can't save recordings: its storage folder ({recordingStorage.RootPath}) isn't writable ({ex.GetType().Name}). " +
+                    "Ask whoever manages the server to mount that folder and give the app's user write access.");
+            }
         }
 
         [HttpPost("{id:guid}/recordings/upload/parts")]
