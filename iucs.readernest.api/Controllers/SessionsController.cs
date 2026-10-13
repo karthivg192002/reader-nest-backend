@@ -3,6 +3,7 @@ using iucs.readernest.api.Auth;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Academics;
+using iucs.readernest.application.Dto.Resources;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
@@ -379,6 +380,166 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             return Ok(await _sessionService.AddRecordingAsync(id, request, cancellationToken));
+        }
+
+        // ---- Browser-recorded classes: the teacher's browser records the classroom tab and sends it
+        // ---- straight to storage in parts while the class runs, so no Jibri recorder is needed.
+
+        // Keys are always server-generated as <32 hex><ext>; anything else is not one of ours.
+        private static readonly System.Text.RegularExpressions.Regex RecordingKeyPattern =
+            new(@"^[0-9a-f]{32}\.(mp4|webm)$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>Starts the multipart upload for a class the caller teaches (or any class, for an Admin).</summary>
+        [HttpPost("{id:guid}/recordings/upload")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<ActionResult<RecordingUploadDto>> StartRecordingUpload(
+            Guid id,
+            StartRecordingUploadRequest request,
+            [FromServices] IDirectUploadStorage directUploads,
+            CancellationToken cancellationToken)
+        {
+            if (!await CanRecordAsync(id, cancellationToken))
+            {
+                return Forbid();
+            }
+
+            var isMp4 = request.ContentType.StartsWith("video/mp4", StringComparison.OrdinalIgnoreCase);
+            if (!isMp4 && !request.ContentType.StartsWith("video/webm", StringComparison.OrdinalIgnoreCase))
+            {
+                return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "A class recording must be MP4 or WebM video." });
+            }
+
+            var upload = await directUploads.StartMultipartAsync(
+                isMp4 ? "class-recording.mp4" : "class-recording.webm", isMp4 ? "video/mp4" : "video/webm", cancellationToken);
+            return Ok(new RecordingUploadDto { Key = upload.Key, UploadId = upload.UploadId, PartSizeBytes = upload.PartSizeBytes });
+        }
+
+        [HttpPost("{id:guid}/recordings/upload/parts")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<ActionResult<IReadOnlyList<LargeUploadPartUrlDto>>> RecordingUploadPartUrls(
+            Guid id,
+            LargeUploadPartsRequest request,
+            [FromServices] IDirectUploadStorage directUploads,
+            CancellationToken cancellationToken)
+        {
+            if (!await CanRecordAsync(id, cancellationToken))
+            {
+                return Forbid();
+            }
+
+            if (!RecordingKeyPattern.IsMatch(request.Key) || request.PartNumbers.Any(n => n < 1 || n > 10000))
+            {
+                return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "Invalid upload reference." });
+            }
+
+            return Ok(directUploads.GetPartUrls(request.Key, request.UploadId, request.PartNumbers)
+                .Select(p => new LargeUploadPartUrlDto { PartNumber = p.PartNumber, Url = p.Url }).ToList());
+        }
+
+        /// <summary>Stitches the parts into one file and registers it like any other recording (15-day parent window).</summary>
+        [HttpPost("{id:guid}/recordings/upload/complete")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<ActionResult<SessionRecordingDto>> CompleteRecordingUpload(
+            Guid id,
+            CompleteRecordingUploadRequest request,
+            [FromServices] IDirectUploadStorage directUploads,
+            [FromServices] IConfiguration configuration,
+            CancellationToken cancellationToken)
+        {
+            if (!await CanRecordAsync(id, cancellationToken))
+            {
+                return Forbid();
+            }
+
+            if (!RecordingKeyPattern.IsMatch(request.Key))
+            {
+                return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "Invalid upload reference." });
+            }
+
+            await directUploads.CompleteMultipartAsync(
+                request.Key,
+                request.UploadId,
+                request.Parts.Select(p => new UploadedPart { PartNumber = p.PartNumber, ETag = p.ETag }).ToList(),
+                cancellationToken);
+
+            // Every recordings screen plays StorageUrl as-is, so a browser recording is registered
+            // under a stable link to PlayRecordingFile below rather than a presigned storage URL
+            // (which would stop working a few hours later).
+            var baseUrl = Request.Host.HasValue
+                ? $"{Request.Scheme}://{Request.Host}{Request.PathBase}".TrimEnd('/')
+                : configuration["Api:BaseUrl"]?.TrimEnd('/') ?? string.Empty;
+            return Ok(await _sessionService.AddRecordingAsync(
+                id,
+                new RegisterRecordingRequest { StorageUrl = baseUrl + RecordingFilePath(request.Key, configuration), DurationSeconds = request.DurationSeconds },
+                cancellationToken));
+        }
+
+        [HttpPost("{id:guid}/recordings/upload/abort")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<IActionResult> AbortRecordingUpload(
+            Guid id,
+            AbortLargeUploadRequest request,
+            [FromServices] IDirectUploadStorage directUploads,
+            CancellationToken cancellationToken)
+        {
+            if (!await CanRecordAsync(id, cancellationToken))
+            {
+                return Forbid();
+            }
+
+            if (!RecordingKeyPattern.IsMatch(request.Key))
+            {
+                return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "Invalid upload reference." });
+            }
+
+            await directUploads.AbortMultipartAsync(request.Key, request.UploadId, cancellationToken);
+            return NoContent();
+        }
+
+        /// <summary>
+        /// Plays a browser-recorded class: redirects to a short-lived storage link. Anonymous by
+        /// necessity (a video element can't send a bearer token) -- the signature in the link is the
+        /// permission, exactly like the Jibri recording URLs these sit beside, except this one also
+        /// stops working the moment the recording is deleted.
+        /// </summary>
+        [HttpGet("recordings/file/{key}")]
+        [AllowAnonymous]
+        public async Task<IActionResult> PlayRecordingFile(
+            string key,
+            [FromQuery] string? sig,
+            [FromServices] IDirectUploadStorage directUploads,
+            [FromServices] IConfiguration configuration,
+            CancellationToken cancellationToken)
+        {
+            if (!RecordingKeyPattern.IsMatch(key) || !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                    System.Text.Encoding.ASCII.GetBytes(sig ?? string.Empty),
+                    System.Text.Encoding.ASCII.GetBytes(SignRecordingKey(key, configuration))))
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, "This link is invalid.");
+            }
+
+            if (!await _sessionService.RecordingExistsByUrlSuffixAsync(RecordingFilePath(key, configuration), cancellationToken))
+            {
+                return NotFound();
+            }
+
+            // Long enough to watch a whole class: the player keeps coming back here for byte ranges anyway.
+            return Redirect(directUploads.GetReadUrl(key, TimeSpan.FromHours(4), key.EndsWith(".mp4", StringComparison.Ordinal) ? "video/mp4" : "video/webm"));
+        }
+
+        private async Task<bool> CanRecordAsync(Guid sessionId, CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return await _sessionService.IsSessionParticipantAsync(sessionId, userId, cancellationToken);
+        }
+
+        private static string RecordingFilePath(string key, IConfiguration configuration) =>
+            $"/api/sessions/recordings/file/{key}?sig={SignRecordingKey(key, configuration)}";
+
+        private static string SignRecordingKey(string key, IConfiguration configuration)
+        {
+            var signingKey = System.Text.Encoding.UTF8.GetBytes(configuration["Jwt:SigningKey"] is { Length: > 0 } configured ? configured : "local-storage-dev-key");
+            return Convert.ToHexString(System.Security.Cryptography.HMACSHA256.HashData(signingKey, System.Text.Encoding.UTF8.GetBytes("recording|" + key))).ToLowerInvariant();
         }
 
         /// <summary>

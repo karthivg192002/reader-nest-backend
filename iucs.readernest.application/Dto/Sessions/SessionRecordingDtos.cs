@@ -75,6 +75,42 @@ namespace iucs.readernest.application.Dto.Sessions
         public int? DurationSeconds { get; set; }
     }
 
+    /// <summary>Starts a browser-recorded class upload: the teacher's browser records the classroom
+    /// tab and PUTs it to storage in parts while the class runs (no Jibri involved).</summary>
+    public class StartRecordingUploadRequest
+    {
+        /// <summary>What the browser's MediaRecorder produces: "video/mp4" or "video/webm" (codec parameters allowed).</summary>
+        [Required]
+        [MaxLength(100)]
+        public string ContentType { get; set; } = null!;
+    }
+
+    public class RecordingUploadDto
+    {
+        public string Key { get; set; } = null!;
+
+        public string UploadId { get; set; } = null!;
+
+        /// <summary>The largest part storage accepts; the browser sends smaller, equal-sized ones.</summary>
+        public long PartSizeBytes { get; set; }
+    }
+
+    /// <summary>Stitches a browser-recorded class's parts together and registers it against the session.</summary>
+    public class CompleteRecordingUploadRequest
+    {
+        [Required]
+        public string Key { get; set; } = null!;
+
+        [Required]
+        public string UploadId { get; set; } = null!;
+
+        [Required]
+        [MinLength(1)]
+        public List<iucs.readernest.application.Dto.Resources.LargeUploadPartDto> Parts { get; set; } = [];
+
+        public int? DurationSeconds { get; set; }
+    }
+
     public class EngagementEntryDto
     {
         public Guid? ChildId { get; set; }

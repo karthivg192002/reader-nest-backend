@@ -196,6 +196,10 @@ namespace iucs.readernest.application.Services
         /// <summary>Non-secret Jitsi settings (domain, auto-record) for whoever is about to join a live class.</summary>
         Task<ClassroomSettingsDto> GetClassroomSettingsAsync(CancellationToken cancellationToken = default);
 
+        /// <summary>Whether a registered (not deleted) recording's StorageUrl ends with this path --
+        /// what keeps a browser-recorded file's playback link working only while its row exists.</summary>
+        Task<bool> RecordingExistsByUrlSuffixAsync(string storageUrlSuffix, CancellationToken cancellationToken = default);
+
         /// <summary>Claims (or renews) the single recording slot for this session. Always granted when
         /// concurrent recording is allowed; otherwise refused while a different live session holds it.</summary>
         Task<RecordingSlotDto> AcquireRecordingSlotAsync(Guid sessionId, CancellationToken cancellationToken = default);

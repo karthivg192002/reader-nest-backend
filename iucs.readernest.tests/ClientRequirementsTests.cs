@@ -101,6 +101,15 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task ClassroomSettings_BrowserRecording_IsOffUntilAnAdminTurnsItOn()
+        {
+            Assert.False((await CreateSessionService().GetClassroomSettingsAsync()).BrowserRecordingEnabled);
+
+            await SetJitsiConfigAsync("""{"domain":"meet.test","autoRecord":"true","browserRecording":"true"}""");
+            Assert.True((await CreateSessionService().GetClassroomSettingsAsync()).BrowserRecordingEnabled);
+        }
+
+        [Fact]
         public async Task RecordingSlot_WhenConcurrentAllowed_EveryClassIsGranted()
         {
             await SetJitsiConfigAsync("""{"allowConcurrentRecording":"true"}""");

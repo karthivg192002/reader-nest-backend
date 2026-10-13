@@ -93,6 +93,11 @@ namespace iucs.readernest.application.Dto.Sessions
         /// class records at a time; the next one waits (see RecordingSlotDto) until the current ends.</summary>
         public bool AllowConcurrentRecording { get; set; } = true;
 
+        /// <summary>False (default) = classes are recorded by Jibri on the video server. True = the
+        /// teacher's own browser records the classroom tab and uploads it in parts (see
+        /// CompleteRecordingUploadRequest), so recording needs no recorder servers at all.</summary>
+        public bool BrowserRecordingEnabled { get; set; }
+
         /// <summary>Whether a class should start with Jitsi's lobby (waiting room) already on, so a
         /// student can't land straight in an unattended room before the teacher's even joined —
         /// admin-configurable (Settings → Integrations) rather than always off, which is what a

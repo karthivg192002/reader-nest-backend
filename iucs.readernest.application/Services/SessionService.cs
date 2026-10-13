@@ -2303,8 +2303,39 @@ namespace iucs.readernest.application.Services
                 Domain = JitsiLinkBuilder.ResolveDomain(configJson),
                 AutoRecordEnabled = ReadAutoRecordEnabled(configJson),
                 AllowConcurrentRecording = ReadConcurrentRecordingAllowed(configJson),
+                BrowserRecordingEnabled = ReadBrowserRecordingEnabled(configJson),
                 DefaultLobbyEnabled = ReadDefaultLobbyEnabled(configJson),
             };
+        }
+
+        public Task<bool> RecordingExistsByUrlSuffixAsync(string storageUrlSuffix, CancellationToken cancellationToken = default)
+        {
+            return _unitOfWork.Repository<SessionRecording>().Query()
+                .AnyAsync(r => r.StorageUrl.EndsWith(storageUrlSuffix), cancellationToken);
+        }
+
+        /// <summary>Defaults to off (today's Jibri recording) until an admin turns it on.</summary>
+        private static bool ReadBrowserRecordingEnabled(string? configJson)
+        {
+            if (string.IsNullOrWhiteSpace(configJson))
+            {
+                return false;
+            }
+
+            try
+            {
+                var config = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(configJson);
+                if (config is not null && config.TryGetValue("browserRecording", out var value) && bool.TryParse(value, out var parsed))
+                {
+                    return parsed;
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Malformed config - keep the default.
+            }
+
+            return false;
         }
 
         /// <summary>A holder that hasn't renewed within this window is treated as gone (crashed tab, lost network).</summary>
