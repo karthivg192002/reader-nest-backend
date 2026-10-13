@@ -101,6 +101,99 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task BrowserRecordingPlaybackLink_WorksOnlyWhileItsRecordingExists()
+        {
+            var session = await SeedLiveSessionAsync();
+            const string path = "/api/sessions/recordings/file/0123456789abcdef0123456789abcdef.mp4?sig=ab12";
+            var recording = new SessionRecording { ClassSessionId = session.Id, StorageUrl = "https://api.test" + path };
+            _db.Context.Add(recording);
+            await _db.Context.SaveChangesAsync();
+
+            var service = CreateSessionService();
+            Assert.True(await service.RecordingExistsByUrlSuffixAsync(path));
+            Assert.False(await service.RecordingExistsByUrlSuffixAsync(path.Replace("sig=ab12", "sig=ab13")));
+
+            _db.Context.Remove(recording);
+            await _db.Context.SaveChangesAsync();
+            Assert.False(await CreateSessionService().RecordingExistsByUrlSuffixAsync(path));
+        }
+
+        [Fact]
+        public async Task RecordingCleanup_DeletesOnlyExpiredOrDeletedBrowserRecordings()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "rn-recording-cleanup-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                var storage = new iucs.readernest.api.Services.LocalFileStorage(
+                    new StorageTestEnvironment(),
+                    new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Storage:LocalPath"] = root }).Build(),
+                    new Microsoft.AspNetCore.Http.HttpContextAccessor());
+                var session = await SeedLiveSessionAsync();
+                var now = DateTime.UtcNow;
+
+                async Task<SessionRecording> AddAsync(string key, int ageDays, bool browserRecorded = true)
+                {
+                    await storage.SaveAsync(key, new MemoryStream([1, 2, 3]));
+                    var recording = new SessionRecording
+                    {
+                        ClassSessionId = session.Id,
+                        StorageUrl = browserRecorded ? $"https://api.test/api/sessions/recordings/file/{key}?sig=ab" : $"https://meet.test/recordings/{key}",
+                    };
+                    _db.Context.Add(recording);
+                    await _db.Context.SaveChangesAsync();
+                    // CreatedAtUtc is stamped on save, so age the row afterwards.
+                    await _db.Context.Set<SessionRecording>().Where(r => r.Id == recording.Id)
+                        .ExecuteUpdateAsync(s => s.SetProperty(r => r.CreatedAtUtc, now.AddDays(-ageDays)));
+                    return recording;
+                }
+
+                const string oldKey = "00000000000000000000000000000001.mp4";
+                const string recentKey = "00000000000000000000000000000002.mp4";
+                const string deletedKey = "00000000000000000000000000000003.webm";
+                const string jibriKey = "00000000000000000000000000000004.mp4";
+                await AddAsync(oldKey, ageDays: 40);
+                await AddAsync(recentKey, ageDays: 5);
+                var deleted = await AddAsync(deletedKey, ageDays: 5);
+                await AddAsync(jibriKey, ageDays: 40, browserRecorded: false);
+                _db.Context.Remove(deleted);
+                await _db.Context.SaveChangesAsync();
+
+                // No limit set: only the recording an admin deleted loses its file.
+                var kept = await iucs.readernest.api.Services.RecordingFileCleanup.RunAsync(_db.UnitOfWork, storage, 0, now);
+                Assert.Equal(new iucs.readernest.api.Services.RecordingCleanupResult(1, 0), kept);
+                Assert.Null(storage.ExistingFilePath(deletedKey));
+                Assert.NotNull(storage.ExistingFilePath(oldKey));
+
+                // 30-day limit: the 40-day-old browser recording goes, file and listing.
+                var expired = await iucs.readernest.api.Services.RecordingFileCleanup.RunAsync(_db.UnitOfWork, storage, 30, now);
+                Assert.Equal(new iucs.readernest.api.Services.RecordingCleanupResult(1, 1), expired);
+                Assert.Null(storage.ExistingFilePath(oldKey));
+                Assert.NotNull(storage.ExistingFilePath(recentKey));
+                Assert.NotNull(storage.ExistingFilePath(jibriKey)); // never one of ours to remove
+                var listed = await _db.Context.Set<SessionRecording>().AsNoTracking().Select(r => r.StorageUrl).ToListAsync();
+                Assert.Equal(2, listed.Count);
+                Assert.DoesNotContain(listed, url => url.Contains(oldKey));
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                {
+                    Directory.Delete(root, recursive: true);
+                }
+            }
+        }
+
+        private sealed class StorageTestEnvironment : Microsoft.AspNetCore.Hosting.IWebHostEnvironment
+        {
+            public string WebRootPath { get; set; } = Path.GetTempPath();
+            public Microsoft.Extensions.FileProviders.IFileProvider WebRootFileProvider { get; set; } = new Microsoft.Extensions.FileProviders.NullFileProvider();
+            public string ApplicationName { get; set; } = "tests";
+            public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = new Microsoft.Extensions.FileProviders.NullFileProvider();
+            public string ContentRootPath { get; set; } = Path.GetTempPath();
+            public string EnvironmentName { get; set; } = "Test";
+        }
+
+        [Fact]
         public async Task ClassroomSettings_BrowserRecording_IsOffUntilAnAdminTurnsItOn()
         {
             Assert.False((await CreateSessionService().GetClassroomSettingsAsync()).BrowserRecordingEnabled);

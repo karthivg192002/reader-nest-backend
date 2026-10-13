@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using iucs.readernest.api.Auth;
+using iucs.readernest.api.Services;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Academics;
@@ -384,6 +385,9 @@ namespace iucs.readernest.api.Controllers
 
         // ---- Browser-recorded classes: the teacher's browser records the classroom tab and sends it
         // ---- straight to storage in parts while the class runs, so no Jibri recorder is needed.
+        // ---- Always this server's own disk (LocalFileStorage), whichever store Admin → Settings → File
+        // ---- storage has chosen for other files: class recordings are large and short-lived, and
+        // ---- keeping them off S3 is the point of recording this way.
 
         // Keys are always server-generated as <32 hex><ext>; anything else is not one of ours.
         private static readonly System.Text.RegularExpressions.Regex RecordingKeyPattern =
@@ -395,7 +399,7 @@ namespace iucs.readernest.api.Controllers
         public async Task<ActionResult<RecordingUploadDto>> StartRecordingUpload(
             Guid id,
             StartRecordingUploadRequest request,
-            [FromServices] IDirectUploadStorage directUploads,
+            [FromServices] LocalFileStorage recordingStorage,
             CancellationToken cancellationToken)
         {
             if (!await CanRecordAsync(id, cancellationToken))
@@ -409,7 +413,7 @@ namespace iucs.readernest.api.Controllers
                 return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "A class recording must be MP4 or WebM video." });
             }
 
-            var upload = await directUploads.StartMultipartAsync(
+            var upload = await recordingStorage.StartMultipartAsync(
                 isMp4 ? "class-recording.mp4" : "class-recording.webm", isMp4 ? "video/mp4" : "video/webm", cancellationToken);
             return Ok(new RecordingUploadDto { Key = upload.Key, UploadId = upload.UploadId, PartSizeBytes = upload.PartSizeBytes });
         }
@@ -419,7 +423,7 @@ namespace iucs.readernest.api.Controllers
         public async Task<ActionResult<IReadOnlyList<LargeUploadPartUrlDto>>> RecordingUploadPartUrls(
             Guid id,
             LargeUploadPartsRequest request,
-            [FromServices] IDirectUploadStorage directUploads,
+            [FromServices] LocalFileStorage recordingStorage,
             CancellationToken cancellationToken)
         {
             if (!await CanRecordAsync(id, cancellationToken))
@@ -432,7 +436,7 @@ namespace iucs.readernest.api.Controllers
                 return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "Invalid upload reference." });
             }
 
-            return Ok(directUploads.GetPartUrls(request.Key, request.UploadId, request.PartNumbers)
+            return Ok(recordingStorage.GetPartUrls(request.Key, request.UploadId, request.PartNumbers)
                 .Select(p => new LargeUploadPartUrlDto { PartNumber = p.PartNumber, Url = p.Url }).ToList());
         }
 
@@ -442,7 +446,7 @@ namespace iucs.readernest.api.Controllers
         public async Task<ActionResult<SessionRecordingDto>> CompleteRecordingUpload(
             Guid id,
             CompleteRecordingUploadRequest request,
-            [FromServices] IDirectUploadStorage directUploads,
+            [FromServices] LocalFileStorage recordingStorage,
             [FromServices] IConfiguration configuration,
             CancellationToken cancellationToken)
         {
@@ -456,7 +460,7 @@ namespace iucs.readernest.api.Controllers
                 return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "Invalid upload reference." });
             }
 
-            await directUploads.CompleteMultipartAsync(
+            await recordingStorage.CompleteMultipartAsync(
                 request.Key,
                 request.UploadId,
                 request.Parts.Select(p => new UploadedPart { PartNumber = p.PartNumber, ETag = p.ETag }).ToList(),
@@ -479,7 +483,7 @@ namespace iucs.readernest.api.Controllers
         public async Task<IActionResult> AbortRecordingUpload(
             Guid id,
             AbortLargeUploadRequest request,
-            [FromServices] IDirectUploadStorage directUploads,
+            [FromServices] LocalFileStorage recordingStorage,
             CancellationToken cancellationToken)
         {
             if (!await CanRecordAsync(id, cancellationToken))
@@ -492,7 +496,7 @@ namespace iucs.readernest.api.Controllers
                 return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "Invalid upload reference." });
             }
 
-            await directUploads.AbortMultipartAsync(request.Key, request.UploadId, cancellationToken);
+            await recordingStorage.AbortMultipartAsync(request.Key, request.UploadId, cancellationToken);
             return NoContent();
         }
 
@@ -507,7 +511,7 @@ namespace iucs.readernest.api.Controllers
         public async Task<IActionResult> PlayRecordingFile(
             string key,
             [FromQuery] string? sig,
-            [FromServices] IDirectUploadStorage directUploads,
+            [FromServices] LocalFileStorage recordingStorage,
             [FromServices] IConfiguration configuration,
             CancellationToken cancellationToken)
         {
@@ -524,7 +528,7 @@ namespace iucs.readernest.api.Controllers
             }
 
             // Long enough to watch a whole class: the player keeps coming back here for byte ranges anyway.
-            return Redirect(directUploads.GetReadUrl(key, TimeSpan.FromHours(4), key.EndsWith(".mp4", StringComparison.Ordinal) ? "video/mp4" : "video/webm"));
+            return Redirect(recordingStorage.GetReadUrl(key, TimeSpan.FromHours(4), key.EndsWith(".mp4", StringComparison.Ordinal) ? "video/mp4" : "video/webm"));
         }
 
         private async Task<bool> CanRecordAsync(Guid sessionId, CancellationToken cancellationToken)

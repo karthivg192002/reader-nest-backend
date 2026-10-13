@@ -2304,8 +2304,37 @@ namespace iucs.readernest.application.Services
                 AutoRecordEnabled = ReadAutoRecordEnabled(configJson),
                 AllowConcurrentRecording = ReadConcurrentRecordingAllowed(configJson),
                 BrowserRecordingEnabled = ReadBrowserRecordingEnabled(configJson),
+                BrowserRecordingQuality = ReadJitsiConfigValue(configJson, "recordingQuality")?.Trim().ToLowerInvariant() switch
+                {
+                    "small" => "small",
+                    "sharp" => "sharp",
+                    _ => "standard",
+                },
+                // Capped at ten years so a mistyped number can never overflow the date arithmetic.
+                RecordingRetentionDays = int.TryParse(ReadJitsiConfigValue(configJson, "recordingRetentionDays"), out var days)
+                    ? Math.Clamp(days, 0, 3650)
+                    : 0,
                 DefaultLobbyEnabled = ReadDefaultLobbyEnabled(configJson),
             };
+        }
+
+        private static string? ReadJitsiConfigValue(string? configJson, string key)
+        {
+            if (string.IsNullOrWhiteSpace(configJson))
+            {
+                return null;
+            }
+
+            try
+            {
+                var config = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(configJson);
+                return config is not null && config.TryGetValue(key, out var value) ? value : null;
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Malformed config - keep the default.
+                return null;
+            }
         }
 
         public Task<bool> RecordingExistsByUrlSuffixAsync(string storageUrlSuffix, CancellationToken cancellationToken = default)

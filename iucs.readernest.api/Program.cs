@@ -125,6 +125,8 @@ builder.Services.AddHostedService<PaymentPlanReminderBackgroundService>();
 // Catches a completed class that never received a recording — auto-record can start
 // with no error yet still fail later in the pipeline, which nothing else catches
 builder.Services.AddHostedService<RecordingReconciliationBackgroundService>();
+// Browser-recorded classes are kept on this server's disk; removes deleted/expired ones' files
+builder.Services.AddHostedService<RecordingCleanupBackgroundService>();
 // CRM integration: lead webhooks, no-op until Integrations:CrmWebhookUrl is set
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<ICrmNotifier, WebhookCrmNotifier>();

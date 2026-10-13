@@ -98,6 +98,14 @@ namespace iucs.readernest.application.Dto.Sessions
         /// CompleteRecordingUploadRequest), so recording needs no recorder servers at all.</summary>
         public bool BrowserRecordingEnabled { get; set; }
 
+        /// <summary>How sharp (and so how large) a browser recording is: "small", "standard" or
+        /// "sharp". Admin-managed ("recordingQuality"); anything else reads as "standard".</summary>
+        public string BrowserRecordingQuality { get; set; } = "standard";
+
+        /// <summary>Admin-managed ("recordingRetentionDays"): browser recordings older than this are
+        /// deleted, file and all. 0 (default) keeps them until someone deletes them.</summary>
+        public int RecordingRetentionDays { get; set; }
+
         /// <summary>Whether a class should start with Jitsi's lobby (waiting room) already on, so a
         /// student can't land straight in an unattended room before the teacher's even joined —
         /// admin-configurable (Settings → Integrations) rather than always off, which is what a

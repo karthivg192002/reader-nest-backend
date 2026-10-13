@@ -180,6 +180,19 @@ namespace iucs.readernest.api.Services
             return path is not null && File.Exists(path) ? path : null;
         }
 
+        /// <summary>Removes a stored file from this server; false when there was none.</summary>
+        public bool Delete(string key)
+        {
+            var path = ExistingFilePath(key);
+            if (path is null)
+            {
+                return false;
+            }
+
+            File.Delete(path);
+            return true;
+        }
+
         /// <summary>Every stored file's key (for StorageMigration), skipping in-progress uploads.</summary>
         public IEnumerable<string> ListKeys()
         {
