@@ -194,6 +194,15 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task ClassroomSettings_RecordingIsRequired_UnlessAnAdminTurnsThatOff()
+        {
+            Assert.True((await CreateSessionService().GetClassroomSettingsAsync()).RecordingRequired);
+
+            await SetJitsiConfigAsync("""{"domain":"meet.test","browserRecording":"true","recordingRequired":"false"}""");
+            Assert.False((await CreateSessionService().GetClassroomSettingsAsync()).RecordingRequired);
+        }
+
+        [Fact]
         public async Task ClassroomSettings_BrowserRecording_IsOffUntilAnAdminTurnsItOn()
         {
             Assert.False((await CreateSessionService().GetClassroomSettingsAsync()).BrowserRecordingEnabled);

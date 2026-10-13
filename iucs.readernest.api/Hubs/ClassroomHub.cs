@@ -20,9 +20,13 @@ namespace iucs.readernest.api.Hubs
     {
         private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, ParticipantState>> Rooms = new();
         private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, int>> Scores = new();
-        // Keyed "{sessionId}:{connectionId}:{questionIndex}" — see AnswerQuiz for why this exists.
+        // Keyed "{sessionId}:{participant key}:{questionIndex}" — see AnswerQuiz for why this exists.
+        // By participant (ParticipantState.Key), not connection: a connection id changes on every
+        // reconnect, which let a child answer the same question again for another star after a blip.
         private static readonly ConcurrentDictionary<string, byte> AnsweredQuestions = new();
-        // Non-teacher connections SetBoardAccess has granted, per session. SendBoard enforces
+        // Participants (ParticipantState.Key) SetBoardAccess has granted, per session -- by
+        // participant, not connection, so a child whose tablet drops for a second keeps the
+        // board access the teacher gave them instead of silently losing it. SendBoard enforces
         // this server-side -- without it, SetBoardAccess was only ever a one-way "you're now
         // allowed" notification the client could act on or ignore; nothing stopped any joined
         // participant from calling SendBoard directly (visible and callable from the browser's
@@ -51,6 +55,20 @@ namespace iucs.readernest.api.Hubs
         // instead of only picking it up on the next pin change.
         private static readonly ConcurrentDictionary<string, string?> PinnedParticipant = new();
 
+        // Lasting ("Keep marks") annotations per session, replayed to whoever joins or reconnects
+        // afterwards -- see AnnotationLog. Without it a late joiner saw a clean screen while
+        // everyone else still had the teacher's writing on it.
+        private static readonly ConcurrentDictionary<string, AnnotationLog> AnnotationHistory = new();
+        // Participants (ParticipantState.Key) whose hand is up, so a reconnect doesn't lower it.
+        private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> RaisedHands = new();
+        // When each participant last gave themselves a star, keyed "{sessionId}:{participant key}"
+        // -- see AwardStar.
+        private static readonly ConcurrentDictionary<string, DateTime> LastSelfAward = new();
+        private static readonly TimeSpan SelfAwardInterval = TimeSpan.FromSeconds(3);
+
+        private const int MaxNameLength = 80;
+        private const int MaxChatLength = 500;
+
         private readonly ISessionService _sessionService;
         private readonly IGamificationService _gamificationService;
         private readonly IAcademicOpsService _academicOpsService;
@@ -71,7 +89,9 @@ namespace iucs.readernest.api.Hubs
             _eventLog = eventLog;
         }
 
-        public record ParticipantState(string Name, string Role, bool HandRaised);
+        /// <param name="Key">Who this is across reconnects: the account (or guest token) id plus the
+        /// name they joined under, since one parent account can have two children in a class.</param>
+        public record ParticipantState(string Name, string Role, bool HandRaised, string Key);
 
         private static string Group(string sessionId) => $"classroom-{sessionId}";
 
@@ -189,6 +209,12 @@ namespace iucs.readernest.api.Hubs
             }
 
             var name = isRecordingObserver ? "Recording" : (string.IsNullOrWhiteSpace(displayName) ? UserName : displayName.Trim());
+            if (name.Length > MaxNameLength)
+            {
+                name = name[..MaxNameLength];
+            }
+
+            var participantKey = $"{userId:N}|{name.ToLowerInvariant()}";
             // isGuest deliberately falls into the same "student" branch a real logged-in student
             // would -- the whole point of the Guest Link's interactive join is that it behaves
             // like an ordinary student, not a special observer-style role (IsTeacher reads
@@ -211,7 +237,8 @@ namespace iucs.readernest.api.Hubs
             // DB round-trip on every personal-room join.
             var isNewRoom = !Rooms.ContainsKey(sessionId);
             var room = Rooms.GetOrAdd(sessionId, _ => new ConcurrentDictionary<string, ParticipantState>());
-            room[Context.ConnectionId] = new ParticipantState(name, role, HandRaised: false);
+            var handStillRaised = RaisedHands.TryGetValue(sessionId, out var raisedHands) && raisedHands.ContainsKey(participantKey);
+            room[Context.ConnectionId] = new ParticipantState(name, role, HandRaised: handStillRaised, Key: participantKey);
             Context.Items["sessionId"] = sessionId;
 
             if (isNewRoom && !isPersonalRoomOwner)
@@ -244,9 +271,45 @@ namespace iucs.readernest.api.Hubs
                 {
                     snapshot = boardHistory.ToArray();
                 }
+
+                // Not every board op can be applied twice (an append re-appends), so a reconnecting
+                // client has to start from a clean board before this replay -- but only when there
+                // IS a replay. After this API restarts mid-class (a deploy) the history is gone
+                // while every client still has the board on screen; the client used to wipe its
+                // board on every reconnect, so a deploy erased the whole class's whiteboard.
+                if (snapshot.Length > 0)
+                {
+                    await Clients.Caller.SendAsync("BoardReset");
+                }
+
                 foreach (var op in snapshot)
                 {
                     await Clients.Caller.SendAsync("Board", op);
+                }
+            }
+
+            // The board access the teacher gave this participant survives a reconnect (see
+            // BoardAccessGrants) -- tell the new connection, which starts out assuming it has none.
+            if (role == "student" && BoardAccessGrants.TryGetValue(sessionId, out var boardGrants) && boardGrants.ContainsKey(participantKey))
+            {
+                await Clients.Caller.SendAsync("BoardAccess", true);
+            }
+
+            // Lasting marks over the video stage that are still on everyone else's screen.
+            if (AnnotationHistory.TryGetValue(sessionId, out var annotationLog))
+            {
+                var marks = annotationLog.Snapshot();
+                // A reconnecting client still has these marks on screen, and an append can't be
+                // applied twice -- so it starts clean, but (as with the board above) only when
+                // there is something to rebuild from.
+                if (marks.Length > 0)
+                {
+                    await Clients.Caller.SendAsync("Annotation", """{"kind":"clear"}""");
+                }
+
+                foreach (var op in marks)
+                {
+                    await Clients.Caller.SendAsync("Annotation", op);
                 }
             }
 
@@ -320,7 +383,7 @@ namespace iucs.readernest.api.Hubs
             // The teacher always has access; anyone else needs an explicit grant recorded by
             // SetBoardAccess below — this is the actual enforcement, not just a UI hint.
             var hasAccess = IsTeacherInRoom(sessionId)
-                || (BoardAccessGrants.TryGetValue(sessionId, out var grants) && grants.ContainsKey(Context.ConnectionId));
+                || (ParticipantKeyFor(sessionId) is { } key && BoardAccessGrants.TryGetValue(sessionId, out var grants) && grants.ContainsKey(key));
             if (!hasAccess)
             {
                 return;
@@ -352,6 +415,7 @@ namespace iucs.readernest.api.Hubs
                 return;
             }
 
+            AnnotationHistory.GetOrAdd(sessionId, _ => new AnnotationLog()).Record(opJson);
             await Clients.OthersInGroup(Group(sessionId)).SendAsync("Annotation", opJson);
         }
 
@@ -426,7 +490,13 @@ namespace iucs.readernest.api.Hubs
                 return;
             }
 
-            await Clients.Group(Group(sessionId)).SendAsync("Chat", UserNameFor(sessionId), text.Trim());
+            text = text.Trim();
+            if (text.Length > MaxChatLength)
+            {
+                text = text[..MaxChatLength];
+            }
+
+            await Clients.Group(Group(sessionId)).SendAsync("Chat", UserNameFor(sessionId), text);
         }
 
         // ---- quiz + leaderboard ----
@@ -471,7 +541,7 @@ namespace iucs.readernest.api.Hubs
                 return;
             }
 
-            if (!AnsweredQuestions.TryAdd($"{sessionId}:{Context.ConnectionId}:{questionIndex}", 0))
+            if (!AnsweredQuestions.TryAdd($"{sessionId}:{ParticipantKeyFor(sessionId) ?? Context.ConnectionId}:{questionIndex}", 0))
             {
                 return;
             }
@@ -501,6 +571,17 @@ namespace iucs.readernest.api.Hubs
                 return;
             }
 
+            // This credits the caller's own name and is callable straight from the browser, so it
+            // was an unlimited "give myself a star" button. A mini-game takes far longer than this
+            // to finish, so one star per few seconds costs an honest child nothing.
+            var now = DateTime.UtcNow;
+            var awardKey = $"{sessionId}:{ParticipantKeyFor(sessionId) ?? Context.ConnectionId}";
+            if (LastSelfAward.TryGetValue(awardKey, out var last) && now - last < SelfAwardInterval)
+            {
+                return;
+            }
+
+            LastSelfAward[awardKey] = now;
             AddLiveStar(sessionId, UserNameFor(sessionId));
             await SendLeaderboardAsync(sessionId);
         }
@@ -546,6 +627,16 @@ namespace iucs.readernest.api.Hubs
                 && room.TryGetValue(Context.ConnectionId, out var state))
             {
                 room[Context.ConnectionId] = state with { HandRaised = raised };
+                var hands = RaisedHands.GetOrAdd(sessionId, _ => new ConcurrentDictionary<string, byte>());
+                if (raised)
+                {
+                    hands[state.Key] = 0;
+                }
+                else
+                {
+                    hands.TryRemove(state.Key, out _);
+                }
+
                 await BroadcastRosterAsync(sessionId);
             }
         }
@@ -561,7 +652,7 @@ namespace iucs.readernest.api.Hubs
             // The target connection must be a member of THIS room too — otherwise a
             // legitimate teacher of one class could grant/revoke board access on an
             // arbitrary connection id belonging to a completely different session.
-            if (!Rooms.TryGetValue(sessionId, out var room) || !room.ContainsKey(connectionId))
+            if (!Rooms.TryGetValue(sessionId, out var room) || !room.TryGetValue(connectionId, out var target))
             {
                 return;
             }
@@ -569,14 +660,17 @@ namespace iucs.readernest.api.Hubs
             var grants = BoardAccessGrants.GetOrAdd(sessionId, _ => new ConcurrentDictionary<string, byte>());
             if (allowed)
             {
-                grants[connectionId] = 0;
+                grants[target.Key] = 0;
             }
             else
             {
-                grants.TryRemove(connectionId, out _);
+                grants.TryRemove(target.Key, out _);
             }
 
             await Clients.Client(connectionId).SendAsync("BoardAccess", allowed);
+            // The roster carries who has the board, so the teacher's list stays right after that
+            // student reconnects under a new connection id.
+            await BroadcastRosterAsync(sessionId);
         }
 
         // ---- helpers ----
@@ -588,9 +682,12 @@ namespace iucs.readernest.api.Hubs
             if (Rooms.TryGetValue(sessionId, out var room))
             {
                 room.TryRemove(Context.ConnectionId, out var removedState);
-                if (BoardAccessGrants.TryGetValue(sessionId, out var grants))
+                // A deliberate exit lowers the hand; a dropped connection keeps it up for the
+                // reconnect that follows. Board access is kept either way until the teacher
+                // takes it back (see BoardAccessGrants).
+                if (wasExplicit && removedState is not null && RaisedHands.TryGetValue(sessionId, out var hands))
                 {
-                    grants.TryRemove(Context.ConnectionId, out _);
+                    hands.TryRemove(removedState.Key, out _);
                 }
 
                 // removedState is null on the SECOND call for the same connection (an explicit
@@ -633,9 +730,16 @@ namespace iucs.readernest.api.Hubs
                     BoardHistory.TryRemove(sessionId, out _);
                     CurrentSlide.TryRemove(sessionId, out _);
                     PinnedParticipant.TryRemove(sessionId, out _);
+                    AnnotationHistory.TryRemove(sessionId, out _);
+                    RaisedHands.TryRemove(sessionId, out _);
                     foreach (var key in AnsweredQuestions.Keys.Where(k => k.StartsWith($"{sessionId}:", StringComparison.Ordinal)))
                     {
                         AnsweredQuestions.TryRemove(key, out _);
+                    }
+
+                    foreach (var key in LastSelfAward.Keys.Where(k => k.StartsWith($"{sessionId}:", StringComparison.Ordinal)))
+                    {
+                        LastSelfAward.TryRemove(key, out _);
                     }
                 }
                 else
@@ -654,6 +758,10 @@ namespace iucs.readernest.api.Hubs
             scores.AddOrUpdate(name, 1, (_, current) => current + 1);
         }
 
+        /// <summary>This connection's <see cref="ParticipantState.Key"/> in the room, or null if it isn't in it.</summary>
+        private string? ParticipantKeyFor(string sessionId) =>
+            Rooms.TryGetValue(sessionId, out var room) && room.TryGetValue(Context.ConnectionId, out var state) ? state.Key : null;
+
         private string UserNameFor(string sessionId) =>
             Rooms.TryGetValue(sessionId, out var room) && room.TryGetValue(Context.ConnectionId, out var state)
                 ? state.Name
@@ -669,9 +777,17 @@ namespace iucs.readernest.api.Hubs
             // Jibri's own "observer" connection (see JoinSession) never appears in the roster
             // real participants see -- it's a robot, not a classmate, and the frontend's roster
             // types/UI have no concept of a third role to render it correctly anyway.
+            BoardAccessGrants.TryGetValue(sessionId, out var boardGrants);
             var roster = room
                 .Where(kv => kv.Value.Role != "observer")
-                .Select(kv => new { connectionId = kv.Key, name = kv.Value.Name, role = kv.Value.Role, handRaised = kv.Value.HandRaised })
+                .Select(kv => new
+                {
+                    connectionId = kv.Key,
+                    name = kv.Value.Name,
+                    role = kv.Value.Role,
+                    handRaised = kv.Value.HandRaised,
+                    boardAccess = kv.Value.Role == "teacher" || (boardGrants is not null && boardGrants.ContainsKey(kv.Value.Key)),
+                })
                 .OrderByDescending(p => p.role == "teacher")
                 .ThenBy(p => p.name)
                 .ToList();

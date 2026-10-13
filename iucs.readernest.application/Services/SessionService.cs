@@ -2314,6 +2314,7 @@ namespace iucs.readernest.application.Services
                 RecordingRetentionDays = int.TryParse(ReadJitsiConfigValue(configJson, "recordingRetentionDays"), out var days)
                     ? Math.Clamp(days, 0, 3650)
                     : 0,
+                RecordingRequired = !string.Equals(ReadJitsiConfigValue(configJson, "recordingRequired")?.Trim(), "false", StringComparison.OrdinalIgnoreCase),
                 DefaultLobbyEnabled = ReadDefaultLobbyEnabled(configJson),
             };
         }

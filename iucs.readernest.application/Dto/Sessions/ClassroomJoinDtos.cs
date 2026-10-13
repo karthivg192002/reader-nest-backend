@@ -106,6 +106,10 @@ namespace iucs.readernest.application.Dto.Sessions
         /// deleted, file and all. 0 (default) keeps them until someone deletes them.</summary>
         public int RecordingRetentionDays { get; set; }
 
+        /// <summary>Admin-managed ("recordingRequired"), on unless turned off: with browser recording,
+        /// the teacher can't teach a class until she has started its recording.</summary>
+        public bool RecordingRequired { get; set; } = true;
+
         /// <summary>Whether a class should start with Jitsi's lobby (waiting room) already on, so a
         /// student can't land straight in an unattended room before the teacher's even joined —
         /// admin-configurable (Settings → Integrations) rather than always off, which is what a
