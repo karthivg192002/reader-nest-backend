@@ -492,6 +492,97 @@ namespace iucs.readernest.application.Services
             };
         }
 
+        public async Task<MonthlyFinanceSummaryDto> GetMonthlyFinanceSummaryAsync(int year, int month, CancellationToken cancellationToken = default)
+        {
+            if (year is < 2000 or > 2100 || month is < 1 or > 12)
+            {
+                throw new DomainValidationException("Pick a valid month.");
+            }
+
+            var zone = TimeZoneInfo.FindSystemTimeZoneById(DateTimeDisplay.DefaultTimeZoneId);
+            var localMonthStart = new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Unspecified);
+            var monthStart = TimeZoneInfo.ConvertTimeToUtc(localMonthStart, zone);
+            var monthEnd = TimeZoneInfo.ConvertTimeToUtc(localMonthStart.AddMonths(1), zone);
+
+            // A demo counts as conducted once its class completed or the lead moved past
+            // "scheduled" -- same stage set as the dashboard funnel's "Demo Completed".
+            ConversionStatus[] pastDemo =
+            [
+                ConversionStatus.DemoCompleted, ConversionStatus.FollowUpInProgress, ConversionStatus.PaymentPending,
+                ConversionStatus.PartiallyPaid, ConversionStatus.PaymentReceived, ConversionStatus.ReadyForEnrollment,
+                ConversionStatus.Enrolled,
+            ];
+            var demos = await _unitOfWork.Repository<DemoBooking>().Query()
+                .Where(b => b.ClassSession != null
+                    && b.ClassSession.ScheduledStartAtUtc >= monthStart && b.ClassSession.ScheduledStartAtUtc < monthEnd
+                    && (b.ClassSession.Status == SessionStatus.Completed || pastDemo.Contains(b.ConversionStatus)))
+                .Select(b => new { b.CreatedBy, b.ConversionStatus })
+                .ToListAsync(cancellationToken);
+            static bool Converted(ConversionStatus s) => s is ConversionStatus.Enrolled or ConversionStatus.ReadyForEnrollment;
+            static double Rate(int converted, int conducted) => conducted == 0 ? 0 : Math.Round(100.0 * converted / conducted, 1);
+
+            var totalCollected = await _unitOfWork.Repository<PaymentTransaction>().Query()
+                .Where(t => t.Status == TransactionStatus.Success && t.PaidAtUtc != null && t.PaidAtUtc >= monthStart && t.PaidAtUtc < monthEnd)
+                .SumAsync(t => (decimal?)t.Amount, cancellationToken) ?? 0m;
+
+            // Counselor rows: the admission team, plus anyone paid a percentage of their own
+            // collection. Everyone else's collections (an admin's manual invoice, say) are "Others".
+            var percentPaidUserIds = _unitOfWork.Repository<StaffCompensationSetting>().Query()
+                .Where(s => s.Basis == CompensationBasis.PercentOfMonthlyCollection)
+                .Select(s => s.UserId);
+            var counselors = await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.Role == UserRole.AdmissionTeam || percentPaidUserIds.Contains(u.Id))
+                .OrderBy(u => u.FirstName).ThenBy(u => u.LastName)
+                .Select(u => new { u.Id, u.FirstName, u.LastName, u.Status })
+                .ToListAsync(cancellationToken);
+
+            var rows = new List<CounselorMonthDto>();
+            foreach (var counselor in counselors)
+            {
+                // The very same query their salary and their own dashboard figure use, so the
+                // three can never disagree.
+                var collected = await CollectionOwnership.OwnedBy(
+                        _unitOfWork.Repository<PaymentTransaction>().Query(),
+                        _unitOfWork.Repository<DemoBooking>().Query(),
+                        counselor.Id)
+                    .Where(t => t.Status == TransactionStatus.Success && t.PaidAtUtc != null && t.PaidAtUtc >= monthStart && t.PaidAtUtc < monthEnd)
+                    .SumAsync(t => (decimal?)t.Amount, cancellationToken) ?? 0m;
+                var own = demos.Where(d => d.CreatedBy == counselor.Id).ToList();
+                var converted = own.Count(d => Converted(d.ConversionStatus));
+
+                // Someone who has left and did nothing this month is just noise in the table.
+                if (counselor.Status != UserStatus.Active && collected == 0m && own.Count == 0)
+                {
+                    continue;
+                }
+
+                rows.Add(new CounselorMonthDto
+                {
+                    UserId = counselor.Id,
+                    Name = $"{counselor.FirstName} {counselor.LastName}".Trim(),
+                    DemosConducted = own.Count,
+                    DemosConverted = converted,
+                    ConversionRatePercent = Rate(converted, own.Count),
+                    AmountCollected = collected,
+                });
+            }
+
+            var counselorCollected = rows.Sum(r => r.AmountCollected);
+            var demosConverted = demos.Count(d => Converted(d.ConversionStatus));
+            return new MonthlyFinanceSummaryDto
+            {
+                Year = year,
+                Month = month,
+                DemosConducted = demos.Count,
+                DemosConverted = demosConverted,
+                ConversionRatePercent = Rate(demosConverted, demos.Count),
+                CounselorCollected = counselorCollected,
+                OthersCollected = totalCollected - counselorCollected,
+                TotalCollected = totalCollected,
+                Counselors = rows,
+            };
+        }
+
         public async Task<string> ExportCsvAsync(string report, CancellationToken cancellationToken = default)
         {
             return report.ToLowerInvariant() switch

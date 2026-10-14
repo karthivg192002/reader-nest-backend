@@ -27,5 +27,12 @@ namespace iucs.readernest.application.Services
 
         /// <summary>Marks a frozen (past-month) payout as paid. Refused on the live current month, which has no row yet.</summary>
         Task<StaffPayoutDto> MarkPaidAsync(Guid staffPayoutId, CancellationToken cancellationToken = default);
+
+        /// <summary>Corrects a frozen month's payable amount (even after it was paid); the original
+        /// amount, the new one, who changed it and why are kept in its history.</summary>
+        Task<StaffPayoutDto> AdjustAsync(Guid staffPayoutId, AdjustStaffPayoutRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>Every correction made to a frozen payout, newest first.</summary>
+        Task<IReadOnlyList<PayoutChangeDto>> GetHistoryAsync(Guid staffPayoutId, CancellationToken cancellationToken = default);
     }
 }

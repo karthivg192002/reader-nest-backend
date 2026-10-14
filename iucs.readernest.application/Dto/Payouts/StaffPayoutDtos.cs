@@ -100,6 +100,18 @@ namespace iucs.readernest.application.Dto.Payouts
     }
 
     /// <summary>The staff member's own earnings view: the live current month plus every past month on record.</summary>
+    /// <summary>Correcting a frozen staff payout's payable amount.</summary>
+    public class AdjustStaffPayoutRequest
+    {
+        [Required]
+        [Range(0, 99_999_999)]
+        public decimal NewAmount { get; set; }
+
+        [Required]
+        [MaxLength(500)]
+        public string Reason { get; set; } = null!;
+    }
+
     public class StaffEarningsDto
     {
         public StaffPayoutDto CurrentMonth { get; set; } = null!;

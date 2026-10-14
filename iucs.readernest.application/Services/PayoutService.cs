@@ -684,13 +684,8 @@ namespace iucs.readernest.application.Services
             var payout = await _unitOfWork.Repository<Payout>().FirstOrDefaultAsync(p => p.Id == payoutId, cancellationToken)
                 ?? throw new NotFoundException(nameof(Payout), payoutId);
 
-            if (payout.Status != PayoutStatus.Pending)
-            {
-                throw new DomainValidationException(
-                    $"A payout in status '{payout.Status}' can no longer have its items adjusted.");
-            }
-
             var item = await _unitOfWork.Repository<PayoutItem>().TrackedQuery()
+                .Include(i => i.ClassSession).ThenInclude(cs => cs!.Batch)
                 .FirstOrDefaultAsync(i => i.Id == itemId && i.PayoutId == payoutId, cancellationToken)
                 ?? throw new NotFoundException(nameof(PayoutItem), itemId);
 
@@ -701,6 +696,10 @@ namespace iucs.readernest.application.Services
             }
 
             var delta = request.NewAmount - item.Amount;
+            var amountBefore = item.Amount;
+            var totalBefore = payout.TotalAmount;
+            // Kept so the statement can always show what the line was first calculated at.
+            item.AmountBeforeReview ??= item.Amount;
             var adjustmentNote = $"Adjusted from {item.Amount:0.00} to {request.NewAmount:0.00}: {reason}";
             item.Note = string.IsNullOrEmpty(item.Note) ? adjustmentNote : $"{item.Note} ({adjustmentNote})";
             // Adjusting a flagged item from the payout statement is the same decision as
@@ -718,14 +717,124 @@ namespace iucs.readernest.application.Services
             item.RequiresReview = false;
             _unitOfWork.Repository<PayoutItem>().Update(item);
 
-            payout.TotalAmount += delta;
-            _unitOfWork.Repository<Payout>().Update(payout);
+            await ApplyTotalChangeAsync(payout, delta, cancellationToken);
+            await RecordChangeAsync(payout, item.Id, DescribeItem(item), reason, amountBefore, request.NewAmount, totalBefore, cancellationToken);
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(PayoutItem), item.Id.ToString(),
-                changesJson: $"{{\"reason\":\"{reason}\",\"delta\":{delta}}}", cancellationToken: cancellationToken);
+                changesJson: System.Text.Json.JsonSerializer.Serialize(new { reason, delta }), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return (await BaseQuery().FirstAsync(p => p.Id == payoutId, cancellationToken)).ToDto();
+        }
+
+        public async Task<PayoutDto> AddItemAsync(
+            Guid payoutId,
+            AddPayoutItemRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var payout = await _unitOfWork.Repository<Payout>().FirstOrDefaultAsync(p => p.Id == payoutId, cancellationToken)
+                ?? throw new NotFoundException(nameof(Payout), payoutId);
+
+            var reason = request.Reason.Trim();
+            if (reason.Length == 0)
+            {
+                throw new DomainValidationException("A reason is required to add an addition or deduction.");
+            }
+            if (request.Amount == 0m)
+            {
+                throw new DomainValidationException("Enter an amount other than zero.");
+            }
+
+            var totalBefore = payout.TotalAmount;
+            var item = new PayoutItem
+            {
+                PayoutId = payoutId,
+                Type = request.Amount > 0m ? PayoutItemType.Bonus : PayoutItemType.Penalty,
+                Amount = request.Amount,
+                Note = reason,
+            };
+            await _unitOfWork.Repository<PayoutItem>().AddAsync(item, cancellationToken);
+
+            await ApplyTotalChangeAsync(payout, request.Amount, cancellationToken);
+            await RecordChangeAsync(
+                payout, item.Id, request.Amount > 0m ? "Addition added" : "Deduction added",
+                reason, 0m, request.Amount, totalBefore, cancellationToken);
+
+            await _auditLog.StageAsync(AuditAction.Create, nameof(PayoutItem), item.Id.ToString(),
+                changesJson: System.Text.Json.JsonSerializer.Serialize(new { reason, amount = request.Amount }), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return (await BaseQuery().FirstAsync(p => p.Id == payoutId, cancellationToken)).ToDto();
+        }
+
+        public async Task<IReadOnlyList<PayoutChangeDto>> GetHistoryAsync(Guid payoutId, CancellationToken cancellationToken = default)
+        {
+            var changes = await _unitOfWork.Repository<PayoutChange>().Query()
+                .Where(c => c.PayoutId == payoutId)
+                .OrderByDescending(c => c.CreatedAtUtc)
+                .ToListAsync(cancellationToken);
+            return await PayoutChangeMapper.ToDtosAsync(_unitOfWork, changes, cancellationToken);
+        }
+
+        /// <summary>
+        /// A still-Pending payout's total is a running sum (the same way accrual maintains it).
+        /// A finalized/paid one is re-derived from its lines with FinalizeAsync's zero floor, so a
+        /// correction can never leave it at a figure finalizing would not have produced.
+        /// </summary>
+        private async Task ApplyTotalChangeAsync(Payout payout, decimal delta, CancellationToken cancellationToken)
+        {
+            if (payout.Status == PayoutStatus.Pending)
+            {
+                payout.TotalAmount += delta;
+            }
+            else
+            {
+                // The stored lines don't include the change being saved in this same unit of work.
+                var storedSum = await _unitOfWork.Repository<PayoutItem>().Query()
+                    .Where(i => i.PayoutId == payout.Id)
+                    .SumAsync(i => (decimal?)i.Amount, cancellationToken) ?? 0m;
+                payout.TotalAmount = Math.Max(0m, storedSum + delta);
+            }
+
+            _unitOfWork.Repository<Payout>().Update(payout);
+        }
+
+        private async Task RecordChangeAsync(
+            Payout payout, Guid itemId, string description, string reason,
+            decimal amountBefore, decimal amountAfter, decimal totalBefore, CancellationToken cancellationToken)
+        {
+            await _unitOfWork.Repository<PayoutChange>().AddAsync(new PayoutChange
+            {
+                PayoutId = payout.Id,
+                PayoutItemId = itemId,
+                Description = description,
+                Reason = reason,
+                AmountBefore = amountBefore,
+                AmountAfter = amountAfter,
+                TotalBefore = totalBefore,
+                TotalAfter = payout.TotalAmount,
+            }, cancellationToken);
+        }
+
+        private static string DescribeItem(PayoutItem item)
+        {
+            var kind = item.Type switch
+            {
+                PayoutItemType.SessionEarning => "Session earning",
+                PayoutItemType.StudentNoShowWaiting => "Student no-show waiting amount",
+                PayoutItemType.TeacherNoShowDeduction => "Teacher no-show deduction",
+                PayoutItemType.Penalty => "Deduction",
+                PayoutItemType.Bonus => "Addition",
+                _ => "Adjustment",
+            };
+            if (item.ClassSession is not { } session)
+            {
+                return kind;
+            }
+
+            var when = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc, null);
+            var description = session.Batch is { } batch ? $"{kind}, {when} ({batch.Name})" : $"{kind}, {when}";
+            return description.Length > 300 ? description[..300] : description;
         }
 
         public async Task<PayoutDto> FinalizeAsync(Guid payoutId, CancellationToken cancellationToken = default)
@@ -740,6 +849,7 @@ namespace iucs.readernest.application.Services
             }
 
             var items = await _unitOfWork.Repository<PayoutItem>().Query()
+                .Include(i => i.ClassSession).ThenInclude(cs => cs!.Batch)
                 .Where(i => i.PayoutId == payoutId)
                 .ToListAsync(cancellationToken);
 
@@ -771,9 +881,7 @@ namespace iucs.readernest.application.Services
 
             // Monthly statement dispatch — the notification row records delivery state
             var teacherUser = await TeacherUserAsync(payout.TeacherProfileId, cancellationToken);
-            var period = $"{payout.PeriodYear}-{payout.PeriodMonth:D2}";
-            var lines = items
-                .Select(i => $"- {i.Type}: {i.Amount:0.00}{(string.IsNullOrEmpty(i.Note) ? "" : $" ({i.Note})")}");
+            var period = PayoutEmailBuilder.PeriodLabel(payout.PeriodYear, payout.PeriodMonth);
             await _notificationService.SendTemplatedEmailAsync(
                 teacherUser.Id,
                 teacherUser.Email,
@@ -783,8 +891,8 @@ namespace iucs.readernest.application.Services
                 {
                     ["TeacherFirstName"] = teacherUser.FirstName,
                     ["Period"] = period,
-                    ["LinesText"] = string.Join("\n", lines),
-                    ["Total"] = payout.TotalAmount.ToString("0.00"),
+                    ["BreakdownHtml"] = PayoutEmailBuilder.BuildBreakdownHtml(items, payout.TotalAmount, teacherUser.TimeZoneId),
+                    ["Total"] = PayoutEmailBuilder.Money(payout.TotalAmount),
                 },
                 cancellationToken);
 
@@ -812,15 +920,11 @@ namespace iucs.readernest.application.Services
 
             // Salary slip: emailed automatically the moment the payment is processed.
             var items = await _unitOfWork.Repository<PayoutItem>().Query()
+                .Include(i => i.ClassSession).ThenInclude(cs => cs!.Batch)
                 .Where(i => i.PayoutId == payoutId)
                 .ToListAsync(cancellationToken);
             var teacherUser = await TeacherUserAsync(payout.TeacherProfileId, cancellationToken);
-            var period = $"{payout.PeriodYear}-{payout.PeriodMonth:D2}";
-            var slipLines = items
-                .Select(i => $"  {i.Type,-26} {i.Amount,12:0.00}{(string.IsNullOrEmpty(i.Note) ? "" : $"   {i.Note}")}");
-            var slip =
-                $"Paid on: {DateTime.UtcNow:yyyy-MM-dd}\n\n" +
-                $"Earnings & adjustments\n{string.Join("\n", slipLines)}";
+            var period = PayoutEmailBuilder.PeriodLabel(payout.PeriodYear, payout.PeriodMonth);
             await _notificationService.SendTemplatedEmailAsync(
                 teacherUser.Id,
                 teacherUser.Email,
@@ -830,8 +934,9 @@ namespace iucs.readernest.application.Services
                 {
                     ["TeacherFirstName"] = teacherUser.FirstName,
                     ["Period"] = period,
-                    ["SlipBody"] = slip,
-                    ["Total"] = payout.TotalAmount.ToString("0.00"),
+                    ["PaidOn"] = DateTime.UtcNow.ToString("dd MMM yyyy", System.Globalization.CultureInfo.InvariantCulture),
+                    ["BreakdownHtml"] = PayoutEmailBuilder.BuildBreakdownHtml(items, payout.TotalAmount, teacherUser.TimeZoneId),
+                    ["Total"] = PayoutEmailBuilder.Money(payout.TotalAmount),
                 },
                 cancellationToken);
 

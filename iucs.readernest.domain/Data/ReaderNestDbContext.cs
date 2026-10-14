@@ -50,6 +50,7 @@ namespace iucs.readernest.domain.Data
         public DbSet<EnrollmentForm> EnrollmentForms => Set<EnrollmentForm>();
         public DbSet<Holiday> Holidays => Set<Holiday>();
         public DbSet<LeaveRequest> LeaveRequests => Set<LeaveRequest>();
+        public DbSet<LeaveCancellationReport> LeaveCancellationReports => Set<LeaveCancellationReport>();
         public DbSet<LeaveRequestSession> LeaveRequestSessions => Set<LeaveRequestSession>();
         public DbSet<LeaveAllowance> LeaveAllowances => Set<LeaveAllowance>();
 
@@ -57,6 +58,8 @@ namespace iucs.readernest.domain.Data
         public DbSet<ClassSession> ClassSessions => Set<ClassSession>();
         public DbSet<SessionAttendance> SessionAttendances => Set<SessionAttendance>();
         public DbSet<SessionRecording> SessionRecordings => Set<SessionRecording>();
+
+        public DbSet<PersonalRoomRecording> PersonalRoomRecordings => Set<PersonalRoomRecording>();
 
         public DbSet<SessionPresentation> SessionPresentations => Set<SessionPresentation>();
         public DbSet<EngagementEvent> EngagementEvents => Set<EngagementEvent>();
@@ -93,6 +96,8 @@ namespace iucs.readernest.domain.Data
         public DbSet<PayoutItem> PayoutItems => Set<PayoutItem>();
         public DbSet<StaffCompensationSetting> StaffCompensationSettings => Set<StaffCompensationSetting>();
         public DbSet<StaffPayout> StaffPayouts => Set<StaffPayout>();
+
+        public DbSet<PayoutChange> PayoutChanges => Set<PayoutChange>();
 
         // Resources
         public DbSet<Resource> Resources => Set<Resource>();

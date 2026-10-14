@@ -60,6 +60,11 @@ namespace iucs.readernest.application.Dto.Sessions
     {
         public Guid SessionId { get; set; }
 
+        /// <summary>True when the room is a Personal Meeting Room with no live class in it —
+        /// <see cref="SessionId"/> is then the room owner's account id (the id that room's
+        /// ClassroomHub group is keyed by), not a ClassSession id.</summary>
+        public bool IsPersonalRoom { get; set; }
+
         public string Room { get; set; } = null!;
 
         public string Domain { get; set; } = null!;

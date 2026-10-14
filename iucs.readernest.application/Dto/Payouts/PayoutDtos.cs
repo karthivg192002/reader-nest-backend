@@ -66,6 +66,10 @@ namespace iucs.readernest.application.Dto.Payouts
         public int? DeliveredMinutes { get; set; }
 
         public PayoutReviewDecision? ReviewDecision { get; set; }
+
+        /// <summary>The amount as first calculated, when an approval decision or a correction
+        /// has since changed it; null when the line still stands as calculated.</summary>
+        public decimal? OriginalAmount { get; set; }
     }
 
     /// <summary>One short / unattended class awaiting (or given) a payout decision — a row on the Payout Approvals screen.</summary>
@@ -158,6 +162,43 @@ namespace iucs.readernest.application.Dto.Payouts
     }
 
     /// <summary>Admin correction to one line item — only while its payout is still Pending.</summary>
+    /// <summary>A manual addition (positive) or deduction (negative) line on a teacher's payout.</summary>
+    public class AddPayoutItemRequest
+    {
+        [Required]
+        [Range(-99_999_999, 99_999_999)]
+        public decimal Amount { get; set; }
+
+        [Required]
+        [MaxLength(500)]
+        public string Reason { get; set; } = null!;
+    }
+
+    /// <summary>One entry of a payout's correction history (see PayoutChange).</summary>
+    public class PayoutChangeDto
+    {
+        public Guid Id { get; set; }
+
+        /// <summary>The teacher payout line that was changed; null for a staff payout.</summary>
+        public Guid? PayoutItemId { get; set; }
+
+        public string Description { get; set; } = null!;
+
+        public string Reason { get; set; } = null!;
+
+        public decimal AmountBefore { get; set; }
+
+        public decimal AmountAfter { get; set; }
+
+        public decimal TotalBefore { get; set; }
+
+        public decimal TotalAfter { get; set; }
+
+        public string? ChangedByName { get; set; }
+
+        public DateTime ChangedAtUtc { get; set; }
+    }
+
     public class AdjustPayoutItemRequest
     {
         [Required]

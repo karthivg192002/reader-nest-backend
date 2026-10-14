@@ -63,10 +63,17 @@ namespace iucs.readernest.application.Services
         /// <summary>
         /// Admin correction to one accrued line item -- the only way to act on a
         /// RequiresReview flag (e.g. a teacher's attendance fell well short of the scheduled
-        /// class). Only while the item's payout is still Pending; recalculates the payout's
-        /// TotalAmount from the corrected item and clears the review flag.
+        /// class). Allowed in any status: a finalized or paid payout stays correctable (client
+        /// requirement), every correction is kept in the payout's history. Recalculates the
+        /// payout's TotalAmount from the corrected item and clears the review flag.
         /// </summary>
         Task<PayoutDto> AdjustItemAsync(Guid payoutId, Guid itemId, AdjustPayoutItemRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>Adds a manual addition (positive amount) or deduction (negative) line, in any status.</summary>
+        Task<PayoutDto> AddItemAsync(Guid payoutId, AddPayoutItemRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>Every manual correction made to this payout, newest first.</summary>
+        Task<IReadOnlyList<PayoutChangeDto>> GetHistoryAsync(Guid payoutId, CancellationToken cancellationToken = default);
 
         /// <summary>Locks the month's total and emails the statement to the teacher.</summary>
         Task<PayoutDto> FinalizeAsync(Guid payoutId, CancellationToken cancellationToken = default);

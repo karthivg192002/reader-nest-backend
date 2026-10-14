@@ -50,6 +50,7 @@ namespace iucs.readernest.application.Mappings
                         ScheduledMinutes = i.ScheduledMinutes,
                         DeliveredMinutes = i.DeliveredMinutes,
                         ReviewDecision = i.ReviewDecision,
+                        OriginalAmount = i.AmountBeforeReview is { } original && original != i.Amount ? original : null,
                     })
                     .ToList(),
             };

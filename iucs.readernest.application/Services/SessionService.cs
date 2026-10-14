@@ -1091,11 +1091,11 @@ namespace iucs.readernest.application.Services
                 throw new UnauthorizedException("Invalid or missing recording-finalize token.");
             }
 
-            // Not every room maps to a ClassSession (personal rooms, demo bookings) — Jibri
-            // records those the same as any other room, but there's no session row here to
-            // attach the recording to, so this is a no-op rather than a NotFoundException: the
-            // finalize script has no session id to have gotten wrong, only a room name that's
-            // legitimately outside this feature's scope.
+            // Not every room maps to a ClassSession — Jibri records those the same as any
+            // other room, but there's no session row here to attach the recording to. A
+            // Personal Meeting Room's recording goes to its owner (below); anything else is a
+            // no-op rather than a NotFoundException: the finalize script has no session id to
+            // have gotten wrong, only a room name that's legitimately outside this feature's scope.
             //
             // A personal room's MeetingRoomId is a permanent per-teacher identifier reused
             // across every demo/1-on-1 class that teacher ever runs -- NOT unique per occurrence
@@ -1109,15 +1109,45 @@ namespace iucs.readernest.application.Services
             var candidates = await _unitOfWork.Repository<ClassSession>().Query()
                 .Where(s => s.MeetingRoomId == roomName)
                 .ToListAsync(cancellationToken);
-            if (candidates.Count == 0)
+
+            var now = DateTime.UtcNow;
+            var session = candidates.Count <= 1
+                ? candidates.FirstOrDefault()
+                : candidates.MinBy(s => Math.Abs(((s.ActualEndAtUtc ?? s.ScheduledEndAtUtc) - now).Ticks))!;
+
+            // A personal room is also where its owner's demo classes run, so "closest class"
+            // alone would hang a recording of an ordinary personal meeting on some unrelated
+            // demo -- and show it to that demo's reviewers. Only keep the class when the
+            // recording actually overlaps it; otherwise it's the owner's own meeting.
+            var personalRoomOwnerId = await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.PersonalMeetingRoomId != null && u.PersonalMeetingRoomId == roomName)
+                .Select(u => (Guid?)u.Id)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (personalRoomOwnerId is { } ownerId && (session is null || !RecordingOverlapsSession(session, now, durationSeconds)))
             {
+                // Same retry-safety as the class path below: one row per file.
+                var alreadySaved = await _unitOfWork.Repository<PersonalRoomRecording>()
+                    .ExistsAsync(r => r.OwnerId == ownerId && r.StorageUrl == storageUrl, cancellationToken);
+                if (!alreadySaved)
+                {
+                    var personalRecording = new PersonalRoomRecording
+                    {
+                        OwnerId = ownerId,
+                        StorageUrl = storageUrl,
+                        DurationSeconds = durationSeconds,
+                    };
+                    await _unitOfWork.Repository<PersonalRoomRecording>().AddAsync(personalRecording, cancellationToken);
+                    await _auditLog.StageAsync(AuditAction.Create, nameof(PersonalRoomRecording), personalRecording.Id.ToString(), cancellationToken: cancellationToken);
+                    await _unitOfWork.SaveChangesAsync(cancellationToken);
+                }
+
                 return null;
             }
 
-            var now = DateTime.UtcNow;
-            var session = candidates.Count == 1
-                ? candidates[0]
-                : candidates.MinBy(s => Math.Abs(((s.ActualEndAtUtc ?? s.ScheduledEndAtUtc) - now).Ticks))!;
+            if (session is null)
+            {
+                return null;
+            }
 
             // The finalize-recording.sh script on the video server retries this call once on any
             // failure, including a plain network timeout -- confirmed real in production: a slow
@@ -1149,6 +1179,82 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return ToRecordingDto(recording);
+        }
+
+        /// <summary>Whether a recording that just finished (finalize fires within minutes of it
+        /// ending) was running during this class. The slack covers Jibri's own upload/finalize
+        /// delay; it is wider when the hook didn't report a duration, since the recording's
+        /// start time is then unknown.</summary>
+        private static bool RecordingOverlapsSession(ClassSession session, DateTime now, int? durationSeconds)
+        {
+            if (session.Status == SessionStatus.InProgress)
+            {
+                return true;
+            }
+
+            var slack = durationSeconds is null ? TimeSpan.FromMinutes(30) : TimeSpan.FromMinutes(10);
+            var recordingStart = now.AddSeconds(-(durationSeconds ?? 0));
+            var sessionStart = session.ActualStartAtUtc ?? session.ScheduledStartAtUtc;
+            var sessionEnd = session.ActualEndAtUtc ?? session.ScheduledEndAtUtc;
+            return recordingStart <= sessionEnd + slack && now >= sessionStart - slack;
+        }
+
+        public async Task<IReadOnlyList<PersonalRoomRecordingDto>> ListPersonalRoomRecordingsAsync(
+            Guid ownerUserId,
+            CancellationToken cancellationToken = default)
+        {
+            return await ToPersonalRoomRecordingDtos(
+                    _unitOfWork.Repository<PersonalRoomRecording>().Query()
+                        .Where(r => r.OwnerId == ownerUserId)
+                        .OrderByDescending(r => r.CreatedAtUtc))
+                .ToListAsync(cancellationToken);
+        }
+
+        public async Task<PagedResult<PersonalRoomRecordingDto>> ListAllPersonalRoomRecordingsAsync(
+            int page,
+            int pageSize,
+            CancellationToken cancellationToken = default)
+        {
+            page = Math.Max(1, page);
+            pageSize = Math.Clamp(pageSize, 1, 100);
+
+            var query = _unitOfWork.Repository<PersonalRoomRecording>().Query().OrderByDescending(r => r.CreatedAtUtc);
+            var totalCount = await query.CountAsync(cancellationToken);
+            var items = await ToPersonalRoomRecordingDtos(query.Skip((page - 1) * pageSize).Take(pageSize))
+                .ToListAsync(cancellationToken);
+
+            return new PagedResult<PersonalRoomRecordingDto>
+            {
+                Items = items,
+                TotalCount = totalCount,
+                Page = page,
+                PageSize = pageSize,
+            };
+        }
+
+        private static IQueryable<PersonalRoomRecordingDto> ToPersonalRoomRecordingDtos(IQueryable<PersonalRoomRecording> recordings) =>
+            recordings.Select(r => new PersonalRoomRecordingDto
+            {
+                Id = r.Id,
+                OwnerId = r.OwnerId,
+                OwnerName = (r.Owner.FirstName + " " + r.Owner.LastName).Trim(),
+                StorageUrl = r.StorageUrl,
+                DurationSeconds = r.DurationSeconds,
+                CreatedAtUtc = r.CreatedAtUtc,
+            });
+
+        public async Task DeletePersonalRoomRecordingAsync(
+            Guid? ownerUserId,
+            Guid recordingId,
+            CancellationToken cancellationToken = default)
+        {
+            var recording = await _unitOfWork.Repository<PersonalRoomRecording>().TrackedQuery()
+                .FirstOrDefaultAsync(r => r.Id == recordingId && (ownerUserId == null || r.OwnerId == ownerUserId), cancellationToken)
+                ?? throw new NotFoundException(nameof(PersonalRoomRecording), recordingId);
+
+            _unitOfWork.Repository<PersonalRoomRecording>().Remove(recording);
+            await _auditLog.StageAsync(AuditAction.Delete, nameof(PersonalRoomRecording), recording.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
         public async Task<IReadOnlyList<SessionRecordingDto>> ListRecordingsAsync(
@@ -1361,7 +1467,8 @@ namespace iucs.readernest.application.Services
             DateOnly startDate,
             IReadOnlyDictionary<DayOfWeek, TimeOnly> timeByDay,
             int targetCount,
-            IReadOnlySet<DateOnly> holidays)
+            IReadOnlySet<DateOnly> holidays,
+            IReadOnlySet<DateTime>? occupiedStarts = null)
         {
             var result = new List<DateTime>();
             var date = startDate;
@@ -1370,7 +1477,11 @@ namespace iucs.readernest.application.Services
             {
                 if (timeByDay.TryGetValue(date.DayOfWeek, out var timeForDay) && !holidays.Contains(date))
                 {
-                    result.Add(date.ToDateTime(timeForDay, DateTimeKind.Utc));
+                    var start = date.ToDateTime(timeForDay, DateTimeKind.Utc);
+                    if (occupiedStarts is null || !occupiedStarts.Contains(start))
+                    {
+                        result.Add(start);
+                    }
                 }
 
                 date = date.AddDays(1);
@@ -1396,6 +1507,15 @@ namespace iucs.readernest.application.Services
                 ?? throw new NotFoundException(nameof(Batch), batchId);
             var course = await _unitOfWork.Repository<Course>().GetByIdAsync(batch.CourseId, cancellationToken)
                 ?? throw new NotFoundException(nameof(Course), batch.CourseId);
+
+            var previousTeacherProfileId = batch.TeacherProfileId;
+            var targetTeacherProfileId = request.TeacherProfileId ?? previousTeacherProfileId;
+            var teacherChanged = targetTeacherProfileId != previousTeacherProfileId;
+            if (teacherChanged)
+            {
+                _ = await _unitOfWork.Repository<TeacherProfile>().GetByIdAsync(targetTeacherProfileId, cancellationToken)
+                    ?? throw new NotFoundException(nameof(TeacherProfile), targetTeacherProfileId);
+            }
 
             var slotDays = request.Slots.Select(s => s.DayOfWeek).ToList();
             if (slotDays.Count != slotDays.Distinct().Count())
@@ -1433,7 +1553,7 @@ namespace iucs.readernest.application.Services
                 var windowStart = newStartBySessionId.Values.Min();
                 var windowEnd = newStartBySessionId.Values.Max().AddMinutes(durationMinutes);
                 var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
-                    .Where(s => s.TeacherProfileId == batch.TeacherProfileId
+                    .Where(s => s.TeacherProfileId == targetTeacherProfileId
                         && s.BatchId != batchId
                         && (s.Status == SessionStatus.Scheduled
                             || s.Status == SessionStatus.InProgress
@@ -1461,6 +1581,7 @@ namespace iucs.readernest.application.Services
                     var newStart = newStartBySessionId[session.Id];
                     session.ScheduledStartAtUtc = newStart;
                     session.ScheduledEndAtUtc = newStart.AddMinutes(durationMinutes);
+                    session.TeacherProfileId = targetTeacherProfileId;
                 }
 
                 await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
@@ -1478,7 +1599,23 @@ namespace iucs.readernest.application.Services
                         .ToListAsync(cancellationToken))
                     .ToHashSet();
                 var today = DateOnly.FromDateTime(now);
-                var newStarts = PlaceSessionStartTimes(today, timeByDay, targetCount, holidays);
+                // Slots this batch already holds that the edit leaves alone (a class already
+                // InProgress/Completed/NoShow, today's earlier slot, ...). The unique
+                // (batch, start) index covers every non-cancelled session, so placing a fresh
+                // one on the same instant used to fail the whole save with the misleading
+                // "conflicts with another change" message on every retry. Treat them as already
+                // covered and place the new sessions around them.
+                var remainingIds = remainingSessions.Select(s => s.Id).ToList();
+                var todayStartUtc = today.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+                var occupiedStarts = (await _unitOfWork.Repository<ClassSession>().Query()
+                        .Where(s => s.BatchId == batchId
+                            && s.Status != SessionStatus.Cancelled
+                            && s.ScheduledStartAtUtc >= todayStartUtc
+                            && !remainingIds.Contains(s.Id))
+                        .Select(s => s.ScheduledStartAtUtc)
+                        .ToListAsync(cancellationToken))
+                    .ToHashSet();
+                var newStarts = PlaceSessionStartTimes(today, timeByDay, targetCount, holidays, occupiedStarts);
                 if (newStarts.Count < targetCount)
                 {
                     throw new DomainValidationException("Could not place all remaining sessions within two years; check the selected weekdays.");
@@ -1487,7 +1624,7 @@ namespace iucs.readernest.application.Services
                 var windowStart = newStarts.Min();
                 var windowEnd = newStarts.Max().AddMinutes(durationMinutes);
                 var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
-                    .Where(s => s.TeacherProfileId == batch.TeacherProfileId
+                    .Where(s => s.TeacherProfileId == targetTeacherProfileId
                         && s.BatchId != batchId
                         && (s.Status == SessionStatus.Scheduled
                             || s.Status == SessionStatus.InProgress
@@ -1523,7 +1660,7 @@ namespace iucs.readernest.application.Services
                         new ClassSession
                         {
                             BatchId = batch.Id,
-                            TeacherProfileId = batch.TeacherProfileId,
+                            TeacherProfileId = targetTeacherProfileId,
                             ScheduledStartAtUtc = startUtc,
                             ScheduledEndAtUtc = startUtc.AddMinutes(durationMinutes),
                             MeetingRoomId = $"trn-{Guid.NewGuid():N}",
@@ -1535,6 +1672,16 @@ namespace iucs.readernest.application.Services
 
                 await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession),
                     changesJson: $"{{\"batchId\":\"{batch.Id}\",\"scheduleRegenerated\":true,\"cancelledCount\":{remainingSessions.Count},\"newCount\":{newStarts.Count}}}",
+                    cancellationToken: cancellationToken);
+            }
+
+            // The Manage dialog edits these together. Persist them together so validation uses
+            // the selected teacher at the replacement times instead of the batch's obsolete plan.
+            batch.TeacherProfileId = targetTeacherProfileId;
+            if (teacherChanged)
+            {
+                await _auditLog.StageAsync(AuditAction.Update, nameof(Batch), batch.Id.ToString(),
+                    changesJson: $"{{\"teacherReassignedWithSchedule\":true,\"from\":\"{previousTeacherProfileId}\",\"to\":\"{targetTeacherProfileId}\"}}",
                     cancellationToken: cancellationToken);
             }
 
@@ -1868,7 +2015,7 @@ namespace iucs.readernest.application.Services
                 {
                     // Doesn't exist (let the caller's own not-found handling fire against the
                     // ORIGINAL id) or isn't rescheduled — this is the current, live session.
-                    return currentId;
+                    return await ResolveWrongDayPickAsync(currentId, cancellationToken);
                 }
 
                 var next = await _unitOfWork.Repository<ClassSession>().Query()
@@ -1885,6 +2032,48 @@ namespace iucs.readernest.application.Services
                 currentId = next.Value;
             }
             return currentId;
+        }
+
+        // How far ahead a not-yet-started class has to be before a join to it is treated as a
+        // wrong-day pick, and how early before its start a class counts as "on right now".
+        private static readonly TimeSpan WrongDayPickMinLead = TimeSpan.FromHours(12);
+        private static readonly TimeSpan OpenNowLeadIn = TimeSpan.FromMinutes(30);
+
+        /// <summary>
+        /// Confirmed live (6 Oct 2026, batch "zayd"): Join is open at all times, so at 01:58 the
+        /// teacher opened NEXT week's class (13 Oct 02:00) instead of that day's 02:00 one. Each
+        /// class has its own video room, so teacher and student sat in two different rooms; the
+        /// real class was marked Teacher No-Show, and the 13 Oct class was started + completed a
+        /// week early -- so on 13 Oct the parent had no class to join and it all happened again.
+        /// When the class asked for hasn't started and is more than half a day away, but the same
+        /// batch has a class on right now, that one is what the caller meant. Anything else --
+        /// no batch, nothing on now, a same-day early start -- is returned untouched.
+        /// </summary>
+        private async Task<Guid> ResolveWrongDayPickAsync(Guid sessionId, CancellationToken cancellationToken)
+        {
+            var now = DateTime.UtcNow;
+            var asked = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.Id == sessionId)
+                .Select(s => new { s.BatchId, s.Status, s.ScheduledStartAtUtc })
+                .FirstOrDefaultAsync(cancellationToken);
+            if (asked?.BatchId is not Guid batchId
+                || asked.Status is not (SessionStatus.Scheduled or SessionStatus.CarriedForward)
+                || asked.ScheduledStartAtUtc - now < WrongDayPickMinLead)
+            {
+                return sessionId;
+            }
+
+            var opensBy = now + OpenNowLeadIn;
+            var onNow = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.BatchId == batchId
+                    && s.Id != sessionId
+                    && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward || s.Status == SessionStatus.InProgress)
+                    && s.ScheduledStartAtUtc <= opensBy
+                    && s.ScheduledEndAtUtc >= now)
+                .OrderBy(s => s.ScheduledStartAtUtc)
+                .Select(s => (Guid?)s.Id)
+                .FirstOrDefaultAsync(cancellationToken);
+            return onNow ?? sessionId;
         }
 
         public async Task<JitsiJoinDto> GetJitsiJoinAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default)
@@ -2254,18 +2443,30 @@ namespace iucs.readernest.application.Services
                 .Where(s => s.MeetingRoomId == roomName && s.Status == SessionStatus.InProgress)
                 .ToListAsync(cancellationToken);
 
+            // No live class in the room: if it's someone's Personal Meeting Room, the observer
+            // joins that owner's own room instead -- its ClassroomHub group is keyed by the
+            // owner's account id (see ClassroomHub.JoinSession's isPersonalRoomOwner check).
+            Guid? personalRoomOwnerId = null;
             if (candidates.Count == 0)
             {
-                return null;
+                personalRoomOwnerId = await _unitOfWork.Repository<User>().Query()
+                    .Where(u => u.PersonalMeetingRoomId != null && u.PersonalMeetingRoomId == roomName)
+                    .Select(u => (Guid?)u.Id)
+                    .FirstOrDefaultAsync(cancellationToken);
+                if (personalRoomOwnerId is null)
+                {
+                    return null;
+                }
             }
 
             // Shouldn't happen -- but FinalizeJibriRecordingAsync's own history shows "shouldn't
             // happen" has happened before for this same MeetingRoomId-sharing pattern. Earliest
             // start keeps this deterministic rather than throwing, since Jibri can't react to an
             // error here anyway.
-            var session = candidates.Count == 1
-                ? candidates[0]
-                : candidates.MinBy(s => s.ActualStartAtUtc ?? s.ScheduledStartAtUtc)!;
+            var hubSessionId = personalRoomOwnerId
+                ?? (candidates.Count == 1
+                    ? candidates[0]
+                    : candidates.MinBy(s => s.ActualStartAtUtc ?? s.ScheduledStartAtUtc)!).Id;
 
             var jitsiConfigJson = await _unitOfWork.Repository<Integration>().Query()
                 .Where(i => i.Key == "jitsi")
@@ -2278,11 +2479,12 @@ namespace iucs.readernest.application.Services
             var expiresAtUtc = DateTime.UtcNow.AddHours(4);
 
             var token = _jitsiTokenService.CreateRecordingObserverToken(domain, jitsiConfigJson, roomName, expiresAtUtc);
-            var hubToken = _tokenService.CreateRecordingObserverHubToken(session.Id, expiresAtUtc).AccessToken;
+            var hubToken = _tokenService.CreateRecordingObserverHubToken(hubSessionId, expiresAtUtc).AccessToken;
 
             return new RecordingObserverJoinDto
             {
-                SessionId = session.Id,
+                SessionId = hubSessionId,
+                IsPersonalRoom = personalRoomOwnerId is not null,
                 Room = roomName,
                 Domain = domain,
                 Token = token,

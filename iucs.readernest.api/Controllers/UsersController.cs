@@ -261,6 +261,30 @@ namespace iucs.readernest.api.Controllers
             return Ok(new { url = $"{apiBaseUrl}/m/{slug}" });
         }
 
+        /// <summary>Recordings made in the signed-in member's own personal meeting room (any role).</summary>
+        [HttpGet("me/meeting-room/recordings")]
+        [Microsoft.AspNetCore.Authorization.Authorize]
+        public async Task<ActionResult<IReadOnlyList<application.Dto.Sessions.PersonalRoomRecordingDto>>> MyMeetingRoomRecordings(
+            [FromServices] ISessionService sessionService,
+            CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value);
+            return Ok(await sessionService.ListPersonalRoomRecordingsAsync(userId, cancellationToken));
+        }
+
+        /// <summary>Removes one of the signed-in member's own personal meeting room recordings.</summary>
+        [HttpDelete("me/meeting-room/recordings/{recordingId:guid}")]
+        [Microsoft.AspNetCore.Authorization.Authorize]
+        public async Task<IActionResult> DeleteMyMeetingRoomRecording(
+            Guid recordingId,
+            [FromServices] ISessionService sessionService,
+            CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value);
+            await sessionService.DeletePersonalRoomRecordingAsync(userId, recordingId, cancellationToken);
+            return NoContent();
+        }
+
         /// <summary>
         /// Public, anonymous lookup backing the in-app guest-join page (<c>/join/personal/{id}</c>,
         /// PersonalRoomGuestJoin.tsx) that a fresh <see cref="MyMeetingRoomShortLink"/> now points
@@ -500,12 +524,12 @@ namespace iucs.readernest.api.Controllers
 
         /// <summary>
         /// "View as parent": opens this parent's portal read-only, for 30 minutes, so a
-        /// Relationship Manager can see what the parent sees without knowing their PIN. Same
-        /// grant as Reset PIN (which already lets the caller take over the account outright);
-        /// this is the narrower, audited alternative. Parent accounts only.
+        /// Relationship Manager can see what the parent sees without knowing their PIN. Needs
+        /// only User Management view (ViewAsParent.RequiredPermission) -- the session can't
+        /// change anything, and every one is audited. Parent accounts only.
         /// </summary>
         [HttpPost("{id:guid}/view-as")]
-        [HasPermission(PermissionModule.UserManagement, PermissionAction.Edit)]
+        [HasPermission(PermissionModule.UserManagement, PermissionAction.View)]
         public async Task<ActionResult<application.Dto.Auth.LoginResponse>> ViewAsParent(
             Guid id,
             [FromServices] IAuthService authService,

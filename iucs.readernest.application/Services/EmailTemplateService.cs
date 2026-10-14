@@ -171,6 +171,14 @@ namespace iucs.readernest.application.Services
                     return match.Value;
                 }
 
+                // A token named "...Html" is a block the caller already built as safe HTML
+                // (e.g. PayoutEmailBuilder's breakdown tables, which encode their own values) —
+                // encoding it again would print the markup as text.
+                if (match.Groups[1].Value.EndsWith("Html", StringComparison.Ordinal))
+                {
+                    return value ?? string.Empty;
+                }
+
                 return WebUtility.HtmlEncode(value ?? string.Empty).Replace("\n", "<br/>");
             });
         }

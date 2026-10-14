@@ -65,6 +65,7 @@ namespace iucs.readernest.api.Data
             await EnsureJitsiAutoRecordConfigAsync(context);
             await SeedEmailTemplatesAsync(context);
             await ReconcileJoinLinkEmailTemplatesAsync(context);
+            await ReconcilePayoutEmailTemplatesAsync(context);
             await ReconcileLeaveNotifyParentEmailTemplateAsync(context);
             await EnsureDemoCancelledLeaveEmailTemplateAsync(context);
             await ReconcileWelcomeCredentialsPinTemplateAsync(context);
@@ -2886,6 +2887,29 @@ namespace iucs.readernest.api.Data
                     IsActive = true,
                     IsSystem = true,
                 });
+            }
+        }
+
+        /// <summary>
+        /// SeedEmailTemplatesAsync is insert-only, so a live DB never picks up template text
+        /// changes on its own. Client-reported: the salary emails were hard to read (one
+        /// unformatted block of text). Replaces the payout-statement and salary-slip templates
+        /// with the sectioned layout, skipping any row that already has the new
+        /// {{BreakdownHtml}} token (idempotent, and leaves an admin's own later edits alone).
+        /// </summary>
+        private static async Task ReconcilePayoutEmailTemplatesAsync(ReaderNestDbContext context)
+        {
+            foreach (var seed in EmailTemplateSeedData.All.Where(s => s.Key is "payout-statement" or "salary-slip"))
+            {
+                var existing = await context.EmailTemplates.FirstOrDefaultAsync(t => t.Key == seed.Key);
+                if (existing is null || existing.HtmlBody.Contains("{{BreakdownHtml}}"))
+                {
+                    continue;
+                }
+
+                existing.Subject = seed.Subject;
+                existing.HtmlBody = seed.HtmlBody;
+                existing.PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders);
             }
         }
 

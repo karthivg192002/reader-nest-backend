@@ -11,6 +11,9 @@ namespace iucs.readernest.application.Services
         /// <summary>One staff member's own collections this and last month (IST), never the whole team's.</summary>
         Task<MyCollectionsDto> GetMyCollectionsAsync(Guid userId, CancellationToken cancellationToken = default);
 
+        /// <summary>One IST calendar month's demos, conversions and collections, per counselor plus "Others".</summary>
+        Task<MonthlyFinanceSummaryDto> GetMonthlyFinanceSummaryAsync(int year, int month, CancellationToken cancellationToken = default);
+
         /// <summary>CSV exports for the centralized reports (attendance | revenue | payouts | conversion).</summary>
         Task<string> ExportCsvAsync(string report, CancellationToken cancellationToken = default);
 

@@ -341,23 +341,26 @@ namespace iucs.readernest.application.Common
                     NotificationType.PayoutStatement, "Your payout statement for {{Period}}",
                     """
                     <p>Hi {{TeacherFirstName}},</p>
-                    <p>Your payout for <strong>{{Period}}</strong> has been finalized.</p>
-                    <pre style="background:#F9FAFB;border-radius:6px;padding:16px;white-space:pre-wrap;font-family:inherit;">{{LinesText}}</pre>
-                    <p style="font-weight:600;">Total: {{Total}}</p>
+                    <p>Your payout for <strong>{{Period}}</strong> has been finalized. Here is the full breakdown.</p>
+                    {{BreakdownHtml}}
+                    <p style="color:#6B7280;font-size:12px;margin-top:24px;">If anything here looks wrong, please contact the admin team before the payment is processed.</p>
                     """,
-                    "TeacherFirstName", "Period", "LinesText", "Total"),
+                    "TeacherFirstName", "Period", "BreakdownHtml", "Total"),
 
                 New("salary-slip", "Salary Slip (Paid)",
                     "Sent to the teacher when their finalized payout is marked as paid.",
                     NotificationType.PayoutStatement, "Salary slip — {{Period}} (paid)",
                     """
                     <p>Hi {{TeacherFirstName}},</p>
-                    <p>Here is your salary slip for <strong>{{Period}}</strong>:</p>
-                    <pre style="background:#F9FAFB;border-radius:6px;padding:16px;white-space:pre-wrap;font-family:inherit;">{{SlipBody}}</pre>
-                    <p style="font-weight:600;">Net paid: {{Total}}</p>
-                    <p style="color:#6B7280;font-size:12px;">This is a system-generated salary slip. Please contact the admin team for any discrepancy.</p>
+                    <p>Your salary for <strong>{{Period}}</strong> has been paid on <strong>{{PaidOn}}</strong>.</p>
+                    <p style="margin:20px 0;padding:16px;background:#ECFDF5;border-radius:8px;text-align:center;">
+                      <span style="display:block;color:#047857;font-size:12px;">Net paid</span>
+                      <span style="display:block;color:#065F46;font-size:24px;font-weight:700;">{{Total}}</span>
+                    </p>
+                    {{BreakdownHtml}}
+                    <p style="color:#6B7280;font-size:12px;margin-top:24px;">This is a system-generated salary slip. Please contact the admin team for any discrepancy.</p>
                     """,
-                    "TeacherFirstName", "Period", "SlipBody", "Total"),
+                    "TeacherFirstName", "Period", "PaidOn", "BreakdownHtml", "Total"),
 
                 New("batch-assignment", "Child Assigned to Batch",
                     "Sent to the parent when their child is assigned to a batch.",

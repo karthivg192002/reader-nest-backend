@@ -28,6 +28,22 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _reportsService.GetDashboardSummaryAsync(cancellationToken));
         }
 
+        /// <summary>Month-wise numbers for the Admin/Founder dashboard: demos, conversions and
+        /// collections per admission counselor, with later installments under "Others".
+        /// Defaults to the current IST month.</summary>
+        [HttpGet("monthly-finance")]
+        [HasPermission(PermissionModule.ReportsAnalytics, PermissionAction.View)]
+        public async Task<ActionResult<MonthlyFinanceSummaryDto>> MonthlyFinance(
+            [FromQuery] int? year,
+            [FromQuery] int? month,
+            CancellationToken cancellationToken)
+        {
+            var nowIst = TimeZoneInfo.ConvertTimeFromUtc(
+                DateTime.UtcNow,
+                TimeZoneInfo.FindSystemTimeZoneById(application.Helper.DateTimeDisplay.DefaultTimeZoneId));
+            return Ok(await _reportsService.GetMonthlyFinanceSummaryAsync(year ?? nowIst.Year, month ?? nowIst.Month, cancellationToken));
+        }
+
         /// <summary>The caller's own collections (an admission counselor's dashboard figure) --
         /// only ever their own, so no module permission is needed beyond being signed in staff.</summary>
         [HttpGet("my-collections")]

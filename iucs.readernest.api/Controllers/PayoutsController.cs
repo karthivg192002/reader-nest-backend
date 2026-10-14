@@ -51,7 +51,26 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _payoutService.GetMyEarningsSummaryAsync(userId, year, month, cancellationToken));
         }
 
-        /// <summary>Admin correction to one accrued line item -- the only way to act on a RequiresReview flag. Only while the payout is still Pending.</summary>
+        /// <summary>Adds a manual addition (positive) or deduction (negative) line to a payout, in any status.</summary>
+        [HttpPost("{id:guid}/items")]
+        [HasPermission(PermissionModule.Payouts, PermissionAction.Edit)]
+        public async Task<ActionResult<PayoutDto>> AddItem(
+            Guid id,
+            AddPayoutItemRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _payoutService.AddItemAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>Every manual correction made to a payout, newest first.</summary>
+        [HttpGet("{id:guid}/history")]
+        [HasPermission(PermissionModule.Payouts, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<PayoutChangeDto>>> History(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _payoutService.GetHistoryAsync(id, cancellationToken));
+        }
+
+        /// <summary>Admin correction to one accrued line item -- the only way to act on a RequiresReview flag. Allowed after finalizing too; every correction is kept in the payout's history.</summary>
         [HttpPut("{id:guid}/items/{itemId:guid}")]
         [HasPermission(PermissionModule.Payouts, PermissionAction.Edit)]
         public async Task<ActionResult<PayoutDto>> AdjustItem(

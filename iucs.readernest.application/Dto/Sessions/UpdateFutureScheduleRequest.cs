@@ -13,6 +13,11 @@ namespace iucs.readernest.application.Dto.Sessions
     /// </summary>
     public class UpdateFutureScheduleRequest
     {
+        /// <summary>Optional teacher to assign while applying this schedule. Keeping the teacher
+        /// and intended times in one operation prevents the obsolete schedule from blocking a
+        /// teacher who is free at the replacement times.</summary>
+        public Guid? TeacherProfileId { get; set; }
+
         /// <summary>One entry per weekday this batch should meet on going forward. A given
         /// DayOfWeek must appear at most once. When this is the same set of weekdays the batch's
         /// remaining sessions already run on, only their time-of-day changes (dates untouched);

@@ -133,15 +133,34 @@ namespace iucs.readernest.application.Services
         /// short-lived JWT signed with the same appId/appSecret as room-join tokens) is the
         /// authorization instead of <c>EnsureSessionParticipantAsync</c> — see
         /// <see cref="Common.Interfaces.IJitsiTokenService.ValidateFinalizeToken"/>. Returns null
-        /// (not an error) when <paramref name="roomName"/> doesn't match any ClassSession (e.g.
-        /// a personal or demo room) — Jibri records those too, but there's nothing in our data
-        /// model to attach the recording to.
+        /// (not an error) when <paramref name="roomName"/> doesn't match any ClassSession. A
+        /// recording made in a Personal Meeting Room outside any class is saved for the room's
+        /// owner instead (see <see cref="ListPersonalRoomRecordingsAsync"/>) and also returns null.
         /// </summary>
         Task<SessionRecordingDto?> FinalizeJibriRecordingAsync(
             string roomName,
             string? bearerToken,
             string storageUrl,
             int? durationSeconds,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>Recordings made in this user's own Personal Meeting Room, newest first.</summary>
+        Task<IReadOnlyList<PersonalRoomRecordingDto>> ListPersonalRoomRecordingsAsync(
+            Guid ownerUserId,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>Admin view: every member's Personal Meeting Room recordings, newest first.</summary>
+        Task<iucs.readernest.application.Dto.Common.PagedResult<PersonalRoomRecordingDto>> ListAllPersonalRoomRecordingsAsync(
+            int page,
+            int pageSize,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>Removes a Personal Meeting Room recording — one of this user's own, or any
+        /// when <paramref name="ownerUserId"/> is null (Admin). Like
+        /// <see cref="DeleteRecordingAsync"/>, only the record goes — the file stays in storage.</summary>
+        Task DeletePersonalRoomRecordingAsync(
+            Guid? ownerUserId,
+            Guid recordingId,
             CancellationToken cancellationToken = default);
 
         /// <summary>Engagement tracking: batches of quiz/activity/whiteboard/attention signals from the live classroom.</summary>
@@ -186,10 +205,10 @@ namespace iucs.readernest.application.Services
         /// Machine-to-machine equivalent of <see cref="GetJitsiJoinAsync"/> for Jibri's headless
         /// "recording observer" page: no signed-in caller, so authorization is "does an
         /// InProgress ClassSession exist for this exact room right now" rather than
-        /// IsSessionParticipantAsync. Returns null (not an error) when there's no such session —
-        /// a personal room Jibri is recording ad hoc, or a startup race before the ClassSession
-        /// flips to InProgress — mirroring FinalizeJibriRecordingAsync's "not every room maps to
-        /// a trackable moment" no-op philosophy.
+        /// IsSessionParticipantAsync. A Personal Meeting Room with no live class in it gets a
+        /// join scoped to its owner's own room instead. Returns null (not an error) for any
+        /// other room with no such session — e.g. a startup race before the ClassSession flips
+        /// to InProgress.
         /// </summary>
         Task<RecordingObserverJoinDto?> GetLiveObserverJoinAsync(string roomName, CancellationToken cancellationToken = default);
 

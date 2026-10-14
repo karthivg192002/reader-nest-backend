@@ -60,6 +60,22 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _staffPayoutService.GetEarningsAsync(userId, cancellationToken));
         }
 
+        /// <summary>Corrects a frozen (past-month) payout's payable amount, even after it was paid; kept in its history.</summary>
+        [HttpPut("{id:guid}/amount")]
+        [HasPermission(PermissionModule.Payouts, PermissionAction.Edit)]
+        public async Task<ActionResult<StaffPayoutDto>> Adjust(Guid id, AdjustStaffPayoutRequest request, CancellationToken cancellationToken)
+        {
+            return Ok(await _staffPayoutService.AdjustAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>Every correction made to a frozen payout, newest first.</summary>
+        [HttpGet("{id:guid}/history")]
+        [HasPermission(PermissionModule.Payouts, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<PayoutChangeDto>>> History(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _staffPayoutService.GetHistoryAsync(id, cancellationToken));
+        }
+
         /// <summary>Marks a frozen (past-month) payout as paid.</summary>
         [HttpPost("{id:guid}/mark-paid")]
         [HasPermission(PermissionModule.Payouts, PermissionAction.Edit)]

@@ -582,6 +582,61 @@ namespace iucs.readernest.domain.Migrations
                     b.ToTable("leave_allowances");
                 });
 
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Academics.LeaveCancellationReport", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at_utc");
+
+                    b.Property<DateTime>("GeneratedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("generated_at_utc");
+
+                    b.Property<Guid?>("GeneratedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("generated_by");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<int>("Month")
+                        .HasColumnType("integer")
+                        .HasColumnName("month");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("payload_json");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<int>("Year")
+                        .HasColumnType("integer")
+                        .HasColumnName("year");
+
+                    b.HasKey("Id")
+                        .HasName("pk_leave_cancellation_reports");
+
+                    b.HasIndex("Year", "Month")
+                        .IsUnique()
+                        .HasDatabaseName("ix_leave_cancellation_reports_year_month")
+                        .HasFilter("\"is_deleted\" = FALSE");
+
+                    b.ToTable("leave_cancellation_reports");
+                });
+
             modelBuilder.Entity("iucs.readernest.domain.Entities.Academics.LeaveRequest", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3200,6 +3255,93 @@ namespace iucs.readernest.domain.Migrations
                     b.ToTable("payouts");
                 });
 
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Payouts.PayoutChange", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<decimal>("AmountAfter")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("numeric(12,2)")
+                        .HasColumnName("amount_after");
+
+                    b.Property<decimal>("AmountBefore")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("numeric(12,2)")
+                        .HasColumnName("amount_before");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at_utc");
+
+                    b.Property<string>("Description")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)")
+                        .HasColumnName("description");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<Guid?>("PayoutId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("payout_id");
+
+                    b.Property<Guid?>("PayoutItemId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("payout_item_id");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("reason");
+
+                    b.Property<Guid?>("StaffPayoutId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("staff_payout_id");
+
+                    b.Property<decimal>("TotalAfter")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("numeric(12,2)")
+                        .HasColumnName("total_after");
+
+                    b.Property<decimal>("TotalBefore")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("numeric(12,2)")
+                        .HasColumnName("total_before");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_payout_changes");
+
+                    b.HasIndex("PayoutId")
+                        .HasDatabaseName("ix_payout_changes_payout_id");
+
+                    b.HasIndex("StaffPayoutId")
+                        .HasDatabaseName("ix_payout_changes_staff_payout_id");
+
+                    b.ToTable("payout_changes");
+                });
+
             modelBuilder.Entity("iucs.readernest.domain.Entities.Payouts.PayoutItem", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4257,6 +4399,52 @@ namespace iucs.readernest.domain.Migrations
                         .HasDatabaseName("ix_engagement_events_class_session_id");
 
                     b.ToTable("engagement_events");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Sessions.PersonalRoomRecording", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at_utc");
+
+                    b.Property<int?>("DurationSeconds")
+                        .HasColumnType("integer")
+                        .HasColumnName("duration_seconds");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<Guid>("OwnerId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("owner_id");
+
+                    b.Property<string>("StorageUrl")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("storage_url");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.HasKey("Id")
+                        .HasName("pk_personal_room_recordings");
+
+                    b.HasIndex("OwnerId")
+                        .HasDatabaseName("ix_personal_room_recordings_owner_id");
+
+                    b.ToTable("personal_room_recordings");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Sessions.SessionAttendance", b =>
@@ -6140,6 +6328,25 @@ namespace iucs.readernest.domain.Migrations
                     b.Navigation("TeacherProfile");
                 });
 
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Payouts.PayoutChange", b =>
+                {
+                    b.HasOne("iucs.readernest.domain.Entities.Payouts.Payout", "Payout")
+                        .WithMany()
+                        .HasForeignKey("PayoutId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_payout_changes_payouts_payout_id");
+
+                    b.HasOne("iucs.readernest.domain.Entities.Payouts.StaffPayout", "StaffPayout")
+                        .WithMany()
+                        .HasForeignKey("StaffPayoutId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_payout_changes_staff_payouts_staff_payout_id");
+
+                    b.Navigation("Payout");
+
+                    b.Navigation("StaffPayout");
+                });
+
             modelBuilder.Entity("iucs.readernest.domain.Entities.Payouts.PayoutItem", b =>
                 {
                     b.HasOne("iucs.readernest.domain.Entities.Sessions.ClassSession", "ClassSession")
@@ -6431,6 +6638,18 @@ namespace iucs.readernest.domain.Migrations
                     b.Navigation("Child");
 
                     b.Navigation("ClassSession");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Sessions.PersonalRoomRecording", b =>
+                {
+                    b.HasOne("iucs.readernest.domain.Entities.Users.User", "Owner")
+                        .WithMany()
+                        .HasForeignKey("OwnerId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_personal_room_recordings_users_owner_id");
+
+                    b.Navigation("Owner");
                 });
 
             modelBuilder.Entity("iucs.readernest.domain.Entities.Sessions.SessionAttendance", b =>

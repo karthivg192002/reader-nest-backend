@@ -44,6 +44,7 @@ namespace iucs.readernest.application
             services.AddScoped<IResourceFolderService, ResourceFolderService>();
             services.AddScoped<IStoreService, StoreService>();
             services.AddScoped<IAcademicOpsService, AcademicOpsService>();
+            services.AddScoped<ILeaveCancellationReportService, LeaveCancellationReportService>();
             services.AddScoped<IClassSessionEventLogService, ClassSessionEventLogService>();
             services.AddScoped<IClassSessionLogService, ClassSessionLogService>();
             services.AddScoped<IEnrollmentService, EnrollmentService>();

@@ -16,6 +16,9 @@ namespace iucs.readernest.application.Services
 {
     public class AcademicOpsService : IAcademicOpsService
     {
+        /// <summary>How long before its scheduled start a teacher's join counts as the class starting.</summary>
+        private const int EarlyStartWindowMinutes = 60;
+
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
         private readonly INotificationService _notificationService;
@@ -136,11 +139,21 @@ namespace iucs.readernest.application.Services
                             // tracked entity for this request, so this rides whichever
                             // SaveChangesAsync call happens to run next (the event-log write below
                             // included).
-                            if (session.Status is SessionStatus.Scheduled or SessionStatus.CarriedForward)
+                            //
+                            // Only when the class is actually due: a teacher opening the room days
+                            // or weeks early (seen live: a 5 Nov class flipped to InProgress on
+                            // 11 Oct) must not change the session's status. InProgress sessions
+                            // aren't treated as "upcoming", so such a session was skipped by the
+                            // batch schedule edit and then blocked the slot the new pattern
+                            // placed on the same date.
+                            if (session.ScheduledStartAtUtc <= DateTime.UtcNow.AddMinutes(EarlyStartWindowMinutes))
                             {
-                                session.Status = SessionStatus.InProgress;
+                                if (session.Status is SessionStatus.Scheduled or SessionStatus.CarriedForward)
+                                {
+                                    session.Status = SessionStatus.InProgress;
+                                }
+                                session.ActualStartAtUtc ??= DateTime.UtcNow;
                             }
-                            session.ActualStartAtUtc ??= DateTime.UtcNow;
                         }
 
                         await _eventLog.LogTeacherJoinAsync(

@@ -144,6 +144,54 @@ namespace iucs.readernest.application.Services
             return payout.ToDto(name?.Trim());
         }
 
+        public async Task<StaffPayoutDto> AdjustAsync(
+            Guid staffPayoutId, AdjustStaffPayoutRequest request, CancellationToken cancellationToken = default)
+        {
+            var payout = await _unitOfWork.Repository<StaffPayout>().FirstOrDefaultAsync(p => p.Id == staffPayoutId, cancellationToken)
+                ?? throw new NotFoundException(nameof(StaffPayout), staffPayoutId);
+
+            var reason = request.Reason.Trim();
+            if (reason.Length == 0)
+            {
+                throw new DomainValidationException("A reason is required to change a payout.");
+            }
+            if (request.NewAmount == payout.Amount)
+            {
+                throw new DomainValidationException("That is already this payout's amount.");
+            }
+
+            await _unitOfWork.Repository<PayoutChange>().AddAsync(new PayoutChange
+            {
+                StaffPayoutId = payout.Id,
+                Description = "Payable amount corrected",
+                Reason = reason,
+                AmountBefore = payout.Amount,
+                AmountAfter = request.NewAmount,
+                TotalBefore = payout.Amount,
+                TotalAfter = request.NewAmount,
+            }, cancellationToken);
+            payout.Amount = request.NewAmount;
+            _unitOfWork.Repository<StaffPayout>().Update(payout);
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(StaffPayout), payout.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            var name = await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.Id == payout.UserId)
+                .Select(u => u.FirstName + " " + u.LastName)
+                .FirstOrDefaultAsync(cancellationToken);
+            return payout.ToDto(name?.Trim());
+        }
+
+        public async Task<IReadOnlyList<PayoutChangeDto>> GetHistoryAsync(Guid staffPayoutId, CancellationToken cancellationToken = default)
+        {
+            var changes = await _unitOfWork.Repository<PayoutChange>().Query()
+                .Where(c => c.StaffPayoutId == staffPayoutId)
+                .OrderByDescending(c => c.CreatedAtUtc)
+                .ToListAsync(cancellationToken);
+            return await PayoutChangeMapper.ToDtosAsync(_unitOfWork, changes, cancellationToken);
+        }
+
         /// <summary>
         /// The current month is always live (recomputed, never saved — freeze=false). A past
         /// month is returned from its frozen StaffPayout row if one already exists; otherwise

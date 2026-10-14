@@ -135,6 +135,7 @@ builder.Services.AddHostedService<ReportsDigestBackgroundService>();
 builder.Services.AddHostedService<BulkEmailQueueBackgroundService>();
 // Progress reports: seeds an empty monthly draft per active child on the 1st
 builder.Services.AddHostedService<ProgressReportsBackgroundService>();
+builder.Services.AddHostedService<LeaveCancellationReportBackgroundService>();
 
 // Authentication: JWT bearer
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
@@ -252,7 +253,7 @@ builder.Services
                 }
 
                 // A "view as parent" token also stands for the staff member looking: if they've
-                // since been deactivated or lost User Management edit (or the account is no
+                // since been deactivated or lost User Management view (or the account is no
                 // longer a parent), the session ends on its very next request -- same live
                 // re-check as above, applied to the person actually behind it.
                 var viewAsActorClaim = context.Principal?.FindFirstValue(iucs.readernest.application.Common.ViewAsParent.ActorClaimType);

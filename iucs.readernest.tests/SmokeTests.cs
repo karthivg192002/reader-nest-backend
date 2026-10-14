@@ -787,6 +787,89 @@ namespace iucs.readernest.tests
 
             var finalized = await payouts.FinalizeAsync(payout.Id);
             Assert.Equal(10000m, finalized.TotalAmount);
+
+            // Client: finalizing must not block a genuine correction -- the class turned out to
+            // have run in full, and a bonus is added -- with the before/after kept as history.
+            var corrected = await payouts.AdjustItemAsync(payout.Id, flaggedItem.Id, new AdjustPayoutItemRequest
+            {
+                NewAmount = 45000m,
+                Reason = "Verified from the recording: class ran in full.",
+            });
+            Assert.Equal(PayoutStatus.Finalized, corrected.Status);
+            Assert.Equal(45000m, corrected.TotalAmount);
+            Assert.Null(Assert.Single(corrected.Items).OriginalAmount);
+
+            var withBonus = await payouts.AddItemAsync(payout.Id, new AddPayoutItemRequest { Amount = 500m, Reason = "Festival bonus" });
+            Assert.Equal(45500m, withBonus.TotalAmount);
+            Assert.Equal(2, withBonus.Items.Count);
+
+            var history = await payouts.GetHistoryAsync(payout.Id);
+            Assert.Equal(3, history.Count);
+            Assert.Contains(history, h => h.TotalBefore == 10000m && h.TotalAfter == 45000m && h.Reason.StartsWith("Verified"));
+            Assert.Contains(history, h => h.AmountBefore == 0m && h.AmountAfter == 500m && h.TotalAfter == 45500m);
+        }
+
+        [Fact]
+        public async Task PayoutEmails_ShowSectionedBreakdown_NotEscapedMarkup()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var payouts = CreatePayoutService();
+            await payouts.SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = session.TeacherProfileId, RatePerMinute = 10,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
+            });
+            await SeedFullTeacherAttendanceAsync(session);
+            await CreateSessionService().CompleteAsync(session.Id);
+            var payout = await _db.Context.Payouts.AsNoTracking().FirstAsync();
+            await payouts.AddItemAsync(payout.Id, new AddPayoutItemRequest { Amount = -75m, Reason = "Late by 10 minutes <twice>" });
+            await payouts.AddItemAsync(payout.Id, new AddPayoutItemRequest { Amount = 200m, Reason = "Festival bonus" });
+            _emailSender.Sent.Clear();
+
+            await payouts.FinalizeAsync(payout.Id);
+            await payouts.MarkPaidAsync(payout.Id);
+
+            Assert.Equal(2, _emailSender.Sent.Count);
+            foreach (var (_, _, body) in _emailSender.Sent)
+            {
+                Assert.Contains("<table", body);
+                Assert.DoesNotContain("&lt;table", body);
+                Assert.Contains("Net payable", body);
+                Assert.Contains("Session details", body);
+                Assert.Contains("Festival bonus", body);
+                Assert.Contains("Late by 10 minutes &lt;twice&gt;", body); // a person's note is still escaped
+                Assert.Contains("₹575.00", body); // 450 + 200 - 75
+            }
+
+            // Set PAYOUT_EMAIL_SAMPLE_DIR to write both emails out as .html files to look at.
+            if (Environment.GetEnvironmentVariable("PAYOUT_EMAIL_SAMPLE_DIR") is { Length: > 0 } dir)
+            {
+                File.WriteAllText(Path.Combine(dir, "payout-statement.html"), _emailSender.Sent[0].Body);
+                File.WriteAllText(Path.Combine(dir, "salary-slip.html"), _emailSender.Sent[1].Body);
+            }
+        }
+
+        [Fact]
+        public async Task StaffPayout_AdjustAsync_ChangesAmount_AndKeepsHistory()
+        {
+            var staff = await _db.SeedUserAsync($"staff-adj-{Guid.NewGuid():N}@test.com", "x", UserRole.AdmissionTeam);
+            var payout = new StaffPayout
+            {
+                UserId = staff.Id, PeriodYear = 2026, PeriodMonth = 8, Basis = CompensationBasis.FixedMonthly,
+                Amount = 20000m, AppliedFixedAmount = 20000m, Status = StaffPayoutStatus.Paid,
+            };
+            _db.Context.StaffPayouts.Add(payout);
+            await _db.Context.SaveChangesAsync();
+            var service = new StaffPayoutService(_db.UnitOfWork, _auditLog);
+
+            var adjusted = await service.AdjustAsync(payout.Id, new AdjustStaffPayoutRequest { NewAmount = 18500m, Reason = "3 days unpaid leave" });
+
+            Assert.Equal(18500m, adjusted.Amount);
+            Assert.Equal(StaffPayoutStatus.Paid, adjusted.Status);
+            var change = Assert.Single(await service.GetHistoryAsync(payout.Id));
+            Assert.Equal(20000m, change.AmountBefore);
+            Assert.Equal(18500m, change.AmountAfter);
+            Assert.Equal("3 days unpaid leave", change.Reason);
         }
 
         /// <summary>
@@ -2195,6 +2278,77 @@ namespace iucs.readernest.tests
                 "trn-personal-doesnotexist", "irrelevant-under-the-fake", "https://jitsi.test/recordings/abc/rec.mp4", 900);
 
             Assert.Null(recording);
+        }
+
+        [Fact]
+        public async Task FinalizeJibriRecording_SavesForOwner_WhenRoomIsPersonalRoom()
+        {
+            var owner = await _db.SeedUserAsync($"pr-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            owner.PersonalMeetingRoomId = $"trn-personal-{Guid.NewGuid():N}";
+            await _db.Context.SaveChangesAsync();
+            var service = CreateSessionService(new FakeJitsiTokenService { ValidateFinalizeTokenResult = true });
+
+            // Twice: the finalize hook retries, and a retry must not create a second row.
+            await service.FinalizeJibriRecordingAsync(owner.PersonalMeetingRoomId, "t", "https://jitsi.test/recordings/p/rec.mp4", 600);
+            await service.FinalizeJibriRecordingAsync(owner.PersonalMeetingRoomId, "t", "https://jitsi.test/recordings/p/rec.mp4", 600);
+
+            var mine = await service.ListPersonalRoomRecordingsAsync(owner.Id);
+            var only = Assert.Single(mine);
+            Assert.Equal(600, only.DurationSeconds);
+
+            // Admin sees every member's personal recordings, with whose room it was.
+            var all = await service.ListAllPersonalRoomRecordingsAsync(1, 100);
+            Assert.Contains(all.Items, r => r.Id == only.Id && r.OwnerId == owner.Id && !string.IsNullOrWhiteSpace(r.OwnerName));
+
+            await service.DeletePersonalRoomRecordingAsync(owner.Id, only.Id);
+            Assert.Empty(await service.ListPersonalRoomRecordingsAsync(owner.Id));
+        }
+
+        [Fact]
+        public async Task FinalizeJibriRecording_InPersonalRoom_OnlyAttachesToAClassItOverlaps()
+        {
+            // A teacher's personal room is also where their demo classes run. A recording
+            // finishing long after the last demo is a personal meeting, not that demo's.
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var teacherUser = await _db.Context.Users.FirstAsync(u => u.Id == _db.CurrentUser.UserId);
+            teacherUser.PersonalMeetingRoomId = $"trn-personal-{Guid.NewGuid():N}";
+            session.MeetingRoomId = teacherUser.PersonalMeetingRoomId;
+            session.ScheduledStartAtUtc = DateTime.UtcNow.AddDays(-2);
+            session.ScheduledEndAtUtc = DateTime.UtcNow.AddDays(-2).AddMinutes(45);
+            session.Status = SessionStatus.Completed;
+            await _db.Context.SaveChangesAsync();
+            var service = CreateSessionService(new FakeJitsiTokenService { ValidateFinalizeTokenResult = true });
+
+            var personal = await service.FinalizeJibriRecordingAsync(session.MeetingRoomId, "t", "https://jitsi.test/recordings/p/later.mp4", 600);
+
+            Assert.Null(personal);
+            Assert.Single(await service.ListPersonalRoomRecordingsAsync(teacherUser.Id));
+            Assert.False(await _db.Context.SessionRecordings.AnyAsync(r => r.ClassSessionId == session.Id));
+
+            // The same room while that class is running: the recording is the class's.
+            session.Status = SessionStatus.InProgress;
+            await _db.Context.SaveChangesAsync();
+
+            var classRecording = await service.FinalizeJibriRecordingAsync(session.MeetingRoomId, "t", "https://jitsi.test/recordings/p/demo.mp4", 600);
+
+            Assert.NotNull(classRecording);
+            Assert.Equal(session.Id, classRecording!.ClassSessionId);
+            Assert.Single(await service.ListPersonalRoomRecordingsAsync(teacherUser.Id));
+        }
+
+        [Fact]
+        public async Task GetLiveObserverJoin_JoinsOwnersRoom_WhenPersonalRoomHasNoLiveClass()
+        {
+            var owner = await _db.SeedUserAsync($"po-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            owner.PersonalMeetingRoomId = $"trn-personal-{Guid.NewGuid():N}";
+            await _db.Context.SaveChangesAsync();
+
+            var join = await CreateSessionService().GetLiveObserverJoinAsync(owner.PersonalMeetingRoomId);
+
+            Assert.NotNull(join);
+            Assert.True(join!.IsPersonalRoom);
+            Assert.Equal(owner.Id, join.SessionId);
+            Assert.Null(await CreateSessionService().GetLiveObserverJoinAsync("trn-not-a-room"));
         }
 
         [Fact]
@@ -6635,6 +6789,63 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task UpdateFutureSchedule_ReassignsTeacherAgainstTheReplacementTimesAtomically()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var (incomingTeachersBatch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var incomingTeacherId = incomingTeachersBatch.TeacherProfileId;
+            var day7 = DateTime.UtcNow.AddDays(7);
+            var oldStart = new DateTime(day7.Year, day7.Month, day7.Day, 10, 0, 0, DateTimeKind.Utc);
+
+            var moving = new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = oldStart,
+                ScheduledEndAtUtc = oldStart.AddMinutes(45),
+            };
+            // The incoming teacher is busy at the obsolete time. Saving the teacher first used to
+            // fail here even though the same dialog was moving this batch to a free 2 PM slot.
+            var busyAtOldTime = new ClassSession
+            {
+                BatchId = incomingTeachersBatch.Id,
+                TeacherProfileId = incomingTeacherId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = oldStart,
+                ScheduledEndAtUtc = oldStart.AddMinutes(45),
+            };
+            _db.Context.AddRange(moving, busyAtOldTime);
+            await _db.Context.SaveChangesAsync();
+
+            var newDay1 = (DayOfWeek)(((int)oldStart.DayOfWeek + 1) % 7);
+            var newDay2 = (DayOfWeek)(((int)oldStart.DayOfWeek + 2) % 7);
+            await CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                TeacherProfileId = incomingTeacherId,
+                Slots =
+                [
+                    new GenerateScheduleSlot { DayOfWeek = newDay1, StartTimeUtc = new TimeOnly(14, 0) },
+                    new GenerateScheduleSlot { DayOfWeek = newDay2, StartTimeUtc = new TimeOnly(14, 0) },
+                ],
+                RemainingSessionCount = 9,
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            var updatedBatch = await _db.Context.Batches.FirstAsync(b => b.Id == batch.Id);
+            Assert.Equal(incomingTeacherId, updatedBatch.TeacherProfileId);
+            Assert.Equal(SessionStatus.Cancelled,
+                (await _db.Context.ClassSessions.FirstAsync(s => s.Id == moving.Id)).Status);
+            var replacements = await _db.Context.ClassSessions
+                .Where(s => s.BatchId == batch.Id && s.Status == SessionStatus.Scheduled)
+                .ToListAsync();
+            Assert.Equal(9, replacements.Count);
+            Assert.All(replacements, s => Assert.Equal(incomingTeacherId, s.TeacherProfileId));
+            Assert.All(replacements, s => Assert.Equal(new TimeOnly(14, 0), TimeOnly.FromDateTime(s.ScheduledStartAtUtc)));
+            Assert.All(replacements, s => Assert.Contains(s.ScheduledStartAtUtc.DayOfWeek, new[] { newDay1, newDay2 }));
+        }
+
+        [Fact]
         public async Task UpdateFutureSchedule_NewPatternKeepsAnOldWeekday_DoesNotCollideWithTheJustCancelledSession()
         {
             // Reproduces a live crash: a batch already met on one weekday (say Friday). Adding
@@ -6688,6 +6899,127 @@ namespace iucs.readernest.tests
             Assert.Equal(6, scheduled.Count);
             Assert.DoesNotContain(sessions, s => s.Status == SessionStatus.Cancelled);
             Assert.Equal(3, await _db.Context.ClassSessions.CountAsync(s => s.BatchId == batch.Id && s.Status == SessionStatus.Cancelled));
+        }
+
+        [Fact]
+        public async Task UpdateFutureSchedule_NewPatternLandsOnAnInProgressSlot_SkipsItInsteadOfFailing()
+        {
+            // Live: a teacher opened a class room weeks early, which flipped that future session
+            // to InProgress. The edit only cancels Scheduled/CarriedForward sessions, so the
+            // InProgress one stayed, and the new pattern's placement on the same instant hit the
+            // unique (batch, start) index -- surfaced as "conflicts with another change".
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 3, includeSession: false);
+
+            var day7 = DateTime.UtcNow.AddDays(7);
+            var inProgressStart = new DateTime(day7.Year, day7.Month, day7.Day, 11, 30, 0, DateTimeKind.Utc);
+            _db.Context.Add(new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.InProgress,
+                ScheduledStartAtUtc = inProgressStart,
+                ScheduledEndAtUtc = inProgressStart.AddMinutes(45),
+            });
+            for (var i = 1; i <= 2; i++)
+            {
+                var d = day7.AddDays(7 * i);
+                var start = new DateTime(d.Year, d.Month, d.Day, 11, 30, 0, DateTimeKind.Utc);
+                _db.Context.Add(new ClassSession
+                {
+                    BatchId = batch.Id,
+                    TeacherProfileId = batch.TeacherProfileId,
+                    Status = SessionStatus.Scheduled,
+                    ScheduledStartAtUtc = start,
+                    ScheduledEndAtUtc = start.AddMinutes(45),
+                });
+            }
+            await _db.Context.SaveChangesAsync();
+
+            var otherDay = (DayOfWeek)(((int)day7.DayOfWeek + 1) % 7);
+            var sessions = await CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                Slots =
+                [
+                    new GenerateScheduleSlot { DayOfWeek = day7.DayOfWeek, StartTimeUtc = new TimeOnly(11, 30) },
+                    new GenerateScheduleSlot { DayOfWeek = otherDay, StartTimeUtc = new TimeOnly(11, 30) },
+                ],
+                RemainingSessionCount = 4,
+            });
+
+            Assert.Equal(4, sessions.Count(s => s.Status == SessionStatus.Scheduled));
+            Assert.Equal(1, await _db.Context.ClassSessions.CountAsync(
+                s => s.BatchId == batch.Id && s.ScheduledStartAtUtc == inProgressStart && s.Status != SessionStatus.Cancelled));
+        }
+
+        private LeaveCancellationReportService CreateLeaveCancellationReportService() => new(_db.UnitOfWork);
+
+        private void AddCancelledSession(Batch batch, DateTime startUtc, string reason)
+        {
+            _db.Context.Add(new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Cancelled,
+                CancellationReason = reason,
+                ScheduledStartAtUtc = startUtc,
+                ScheduledEndAtUtc = startUtc.AddMinutes(45),
+            });
+        }
+
+        [Fact]
+        public async Task LeaveCancellationReport_CountsOnlyLeaveCancellations_GroupedByIstDateAndMonth()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 5, includeSession: false);
+
+            // Two leave cancellations on 10 Sep IST (one class-wise), one cancelled by a parent
+            // the same day (must not count), and one at 00:30 IST on 1 Oct = 19:00 UTC on 30 Sep
+            // (belongs to October, not September).
+            AddCancelledSession(batch, new DateTime(2026, 9, 10, 10, 0, 0, DateTimeKind.Utc), "Cancelled by Asha (Teacher): teacher's leave 10 Sep 2026 – 10 Sep 2026, approved by Admin — unwell");
+            AddCancelledSession(batch, new DateTime(2026, 9, 10, 12, 0, 0, DateTimeKind.Utc), "Cancelled by Asha (Teacher): teacher's class-wise leave, approved by Admin — unwell");
+            AddCancelledSession(batch, new DateTime(2026, 9, 10, 14, 0, 0, DateTimeKind.Utc), "Cancelled by Priya (Parent): travelling");
+            AddCancelledSession(batch, new DateTime(2026, 9, 11, 10, 0, 0, DateTimeKind.Utc), "Teacher on approved leave (11 Sep 2026 – 11 Sep 2026).");
+            AddCancelledSession(batch, new DateTime(2026, 9, 30, 19, 0, 0, DateTimeKind.Utc), "Cancelled by Asha (Teacher): teacher's leave 1 Oct 2026 – 1 Oct 2026, approved by Admin — unwell");
+            await _db.Context.SaveChangesAsync();
+
+            var sep = await CreateLeaveCancellationReportService().GetAsync(2026, 9);
+            var oct = await CreateLeaveCancellationReportService().GetAsync(2026, 10);
+
+            Assert.False(sep.IsSnapshot);
+            Assert.Equal(3, sep.TotalCancelledClasses); // 2 on 10 Sep + 1 legacy-worded on 11 Sep
+            var teacher = Assert.Single(sep.Teachers);
+            Assert.Equal(3, teacher.TotalCancelledClasses);
+            Assert.Equal(2, teacher.Days.Count);
+            var day = teacher.Days[0];
+            Assert.Equal(new DateOnly(2026, 9, 10), day.Date);
+            Assert.Equal(2, day.CancelledClasses);
+            Assert.All(day.Classes, c => Assert.Equal("Group", c.ClassType));
+            Assert.Equal(1, oct.TotalCancelledClasses);
+        }
+
+        [Fact]
+        public async Task LeaveCancellationReport_MonthEndSnapshot_IsWrittenAt2359IstAndNotRewritten()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 5, includeSession: false);
+            AddCancelledSession(batch, new DateTime(2026, 9, 10, 10, 0, 0, DateTimeKind.Utc), "Cancelled by Asha (Teacher): teacher's leave 10 Sep 2026 – 10 Sep 2026, approved by Admin — unwell");
+            await _db.Context.SaveChangesAsync();
+            var service = CreateLeaveCancellationReportService();
+
+            // 23:58 IST on 30 Sep (18:28 UTC): not yet.
+            Assert.Empty(await service.EnsureSnapshotsAsync(new DateTime(2026, 9, 30, 18, 28, 0, DateTimeKind.Utc)));
+
+            // 23:59 IST on 30 Sep (18:29 UTC): the September snapshot is written.
+            var generated = await service.EnsureSnapshotsAsync(new DateTime(2026, 9, 30, 18, 29, 0, DateTimeKind.Utc));
+            Assert.Contains((2026, 9), generated);
+
+            // A class edited afterwards must not change the frozen figures, and a second run is a no-op.
+            AddCancelledSession(batch, new DateTime(2026, 9, 12, 10, 0, 0, DateTimeKind.Utc), "Cancelled by Asha (Teacher): teacher's leave 12 Sep 2026 – 12 Sep 2026, approved by Admin — unwell");
+            await _db.Context.SaveChangesAsync();
+            Assert.DoesNotContain((2026, 9), await service.EnsureSnapshotsAsync(new DateTime(2026, 9, 30, 18, 29, 30, DateTimeKind.Utc)));
+
+            var report = await service.GetAsync(2026, 9);
+            Assert.True(report.IsSnapshot);
+            Assert.Equal(1, report.TotalCancelledClasses);
+            Assert.Single(await service.ListGeneratedAsync());
         }
 
         [Fact]
@@ -8084,6 +8416,44 @@ namespace iucs.readernest.tests
             Assert.Equal(1, a.ThisMonthPayments);
             Assert.Equal(3000m, b.ThisMonth);
             Assert.Single(b.Payments);
+        }
+
+        [Fact]
+        public async Task MonthlyFinance_CreditsCounselorUntilEnrollment_ThenLaterInstallmentsAreOthers()
+        {
+            // Client: 4,000 collected while enrolling is the counselor's; the remaining 4,000 the
+            // parent pays after the child is enrolled goes under "Others", not her collection.
+            var counselor = await _db.SeedUserAsync($"counsel-m-{Guid.NewGuid():N}@test.com", "x", UserRole.AdmissionTeam);
+            var (_, invoice) = await SeedInvoiceAsync(amount: 8000);
+            var now = DateTime.UtcNow;
+            var booking = new DemoBooking
+            {
+                ParentName = "Lead Parent", ParentEmail = $"lead-{Guid.NewGuid():N}@test.com", ChildName = "Ira",
+                InvoiceId = invoice.Id, ConversionStatus = ConversionStatus.ReadyForEnrollment,
+                PaymentVerifiedAtUtc = now.AddSeconds(-20),
+            };
+            _db.Context.DemoBookings.Add(booking);
+            await _db.Context.SaveChangesAsync();
+            booking.CreatedBy = counselor.Id;
+            foreach (var paidAt in new[] { now.AddSeconds(-40), now })
+            {
+                _db.Context.PaymentTransactions.Add(new PaymentTransaction
+                {
+                    InvoiceId = invoice.Id, PaymentAccountId = invoice.PaymentAccountId, Amount = 4000m, Currency = invoice.Currency,
+                    Status = TransactionStatus.Success, PaidAtUtc = paidAt, Method = PaymentMethod.Upi,
+                });
+            }
+            await _db.Context.SaveChangesAsync();
+
+            var reports = new ReportsService(_db.UnitOfWork, _notifications);
+            var ist = TimeZoneInfo.ConvertTimeFromUtc(now, TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata"));
+            var summary = await reports.GetMonthlyFinanceSummaryAsync(ist.Year, ist.Month);
+
+            var row = Assert.Single(summary.Counselors, c => c.UserId == counselor.Id);
+            Assert.Equal(4000m, row.AmountCollected);
+            Assert.True(summary.OthersCollected >= 4000m);
+            Assert.Equal(summary.TotalCollected, summary.CounselorCollected + summary.OthersCollected);
+            Assert.Equal(4000m, (await reports.GetMyCollectionsAsync(counselor.Id)).ThisMonth);
         }
 
         [Fact]
@@ -10961,6 +11331,83 @@ namespace iucs.readernest.tests
             Assert.Equal(secondEdit.Id, await service.ResolveCurrentSessionIdAsync(original.Id));
             Assert.Equal(secondEdit.Id, await service.ResolveCurrentSessionIdAsync(firstEdit.Id));
             Assert.Equal(secondEdit.Id, await service.ResolveCurrentSessionIdAsync(secondEdit.Id));
+        }
+
+        // ---- Wrong-day pick (live, 6 Oct 2026): a teacher opened next week's class instead of
+        // the one on right then; each class has its own video room, so teacher and student never
+        // met, and the future class got started + completed a week early ----
+
+        private async Task<ClassSession> AddSiblingSessionAsync(ClassSession of, DateTime startUtc, SessionStatus status = SessionStatus.Scheduled)
+        {
+            var sibling = new ClassSession
+            {
+                BatchId = of.BatchId,
+                TeacherProfileId = of.TeacherProfileId,
+                ScheduledStartAtUtc = startUtc,
+                ScheduledEndAtUtc = startUtc.AddMinutes(45),
+                Status = status,
+            };
+            _db.Context.Add(sibling);
+            await _db.Context.SaveChangesAsync();
+            return sibling;
+        }
+
+        [Fact]
+        public async Task ResolveCurrentSessionId_AFutureClassPickedWhileTheBatchHasOneOnNow_ReturnsTheOneOnNow()
+        {
+            var (_, _, nextWeek) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            var service = CreateSessionService();
+
+            // 01:58 for a 02:00 class -- exactly the live case.
+            var aboutToStart = await AddSiblingSessionAsync(nextWeek, DateTime.UtcNow.AddMinutes(2));
+            Assert.Equal(aboutToStart.Id, await service.ResolveCurrentSessionIdAsync(nextWeek.Id));
+            // The right class still resolves to itself.
+            Assert.Equal(aboutToStart.Id, await service.ResolveCurrentSessionIdAsync(aboutToStart.Id));
+        }
+
+        [Fact]
+        public async Task ResolveCurrentSessionId_AFutureClassPickedWhileOneIsAlreadyRunning_ReturnsTheRunningOne()
+        {
+            var (_, _, nextWeek) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            var running = await AddSiblingSessionAsync(nextWeek, DateTime.UtcNow.AddMinutes(-20), SessionStatus.InProgress);
+
+            Assert.Equal(running.Id, await CreateSessionService().ResolveCurrentSessionIdAsync(nextWeek.Id));
+        }
+
+        [Fact]
+        public async Task ResolveCurrentSessionId_AFutureClass_IsLeftAlone_WhenNothingElseIsOnNow()
+        {
+            var (_, _, tomorrow) = await SeedBatchWithSessionAsync(totalSessions: 4);
+            var service = CreateSessionService();
+
+            // Already over, cancelled, finished, or hours away: none of them is "on right now".
+            await AddSiblingSessionAsync(tomorrow, DateTime.UtcNow.AddHours(-2));
+            await AddSiblingSessionAsync(tomorrow, DateTime.UtcNow.AddMinutes(2), SessionStatus.Cancelled);
+            await AddSiblingSessionAsync(tomorrow, DateTime.UtcNow.AddMinutes(-10), SessionStatus.Completed);
+            await AddSiblingSessionAsync(tomorrow, DateTime.UtcNow.AddHours(3));
+
+            Assert.Equal(tomorrow.Id, await service.ResolveCurrentSessionIdAsync(tomorrow.Id));
+        }
+
+        [Fact]
+        public async Task ResolveCurrentSessionId_ASameDayEarlyStart_IsNotRedirected()
+        {
+            // Teachers do legitimately open a class hours early on the day (seen live: 6-12h).
+            var (_, _, tomorrow) = await SeedBatchWithSessionAsync(totalSessions: 3);
+            var laterToday = await AddSiblingSessionAsync(tomorrow, DateTime.UtcNow.AddHours(6));
+            await AddSiblingSessionAsync(tomorrow, DateTime.UtcNow.AddMinutes(2));
+
+            Assert.Equal(laterToday.Id, await CreateSessionService().ResolveCurrentSessionIdAsync(laterToday.Id));
+        }
+
+        [Fact]
+        public async Task ResolveCurrentSessionId_AnotherBatchsClassOnNow_DoesNotRedirect()
+        {
+            var (_, _, tomorrow) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var (_, _, otherBatch) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            await AddSiblingSessionAsync(otherBatch, DateTime.UtcNow.AddMinutes(2));
+
+            Assert.Equal(tomorrow.Id, await CreateSessionService().ResolveCurrentSessionIdAsync(tomorrow.Id));
         }
 
         /// <summary>
