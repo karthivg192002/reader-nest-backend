@@ -10,6 +10,12 @@ namespace iucs.readernest.application.Services
         /// (Sub Admins use their assigned role's default-route portal), then drops any item
         /// whose RequiredModule the user's role does not grant View on. Admins see all.
         /// </summary>
+        /// <summary>The user's own saved menu order (paths, most used first); empty = default menu.</summary>
+        Task<IReadOnlyList<string>> GetMyOrderAsync(Guid userId, CancellationToken cancellationToken = default);
+
+        /// <summary>Saves the user's own menu order; an empty list goes back to the default menu.</summary>
+        Task<IReadOnlyList<string>> SaveMyOrderAsync(Guid userId, IReadOnlyList<string> paths, CancellationToken cancellationToken = default);
+
         Task<IReadOnlyList<MenuItemDto>> GetForUserAsync(
             Guid userId,
             UserRole role,

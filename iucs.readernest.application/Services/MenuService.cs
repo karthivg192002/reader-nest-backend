@@ -1,6 +1,7 @@
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Dto.Navigation;
 using iucs.readernest.domain.Entities.Navigation;
+using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
 using iucs.readernest.domain.Repository;
 using Microsoft.EntityFrameworkCore;
@@ -20,6 +21,45 @@ namespace iucs.readernest.application.Services
         {
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
+        }
+
+        public async Task<IReadOnlyList<string>> GetMyOrderAsync(Guid userId, CancellationToken cancellationToken = default)
+        {
+            var json = await _unitOfWork.Repository<User>().Query()
+                .Where(u => u.Id == userId)
+                .Select(u => u.MenuOrderJson)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return [];
+            }
+
+            try
+            {
+                return System.Text.Json.JsonSerializer.Deserialize<List<string>>(json) ?? [];
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return [];
+            }
+        }
+
+        public async Task<IReadOnlyList<string>> SaveMyOrderAsync(Guid userId, IReadOnlyList<string> paths, CancellationToken cancellationToken = default)
+        {
+            var user = await _unitOfWork.Repository<User>().GetByIdAsync(userId, cancellationToken)
+                ?? throw new NotFoundException(nameof(User), userId);
+
+            // Only the order is stored -- which items the user may see is still decided by their
+            // role on every load (GetForUserAsync), so a path here can never grant anything.
+            var cleaned = paths
+                .Where(p => !string.IsNullOrWhiteSpace(p) && p.StartsWith('/') && p.Length <= 256)
+                .Select(p => p.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .Take(200)
+                .ToList();
+            user.MenuOrderJson = cleaned.Count == 0 ? null : System.Text.Json.JsonSerializer.Serialize(cleaned);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            return cleaned;
         }
 
         public async Task<IReadOnlyList<MenuItemDto>> GetForUserAsync(

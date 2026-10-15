@@ -5582,6 +5582,10 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("lockout_end_utc");
 
+                    b.Property<string>("MenuOrderJson")
+                        .HasColumnType("text")
+                        .HasColumnName("menu_order_json");
+
                     b.Property<string>("PersonalMeetingRoomId")
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)")

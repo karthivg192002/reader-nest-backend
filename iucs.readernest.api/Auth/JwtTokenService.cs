@@ -21,9 +21,15 @@ namespace iucs.readernest.api.Auth
             _options = options.Value;
         }
 
-        public TokenResult CreateToken(User user, IReadOnlyCollection<string> permissionClaims)
+        public TokenResult CreateToken(User user, IReadOnlyCollection<string> permissionClaims, bool rememberMe = false)
         {
-            return CreateUserToken(user, permissionClaims, DateTime.UtcNow.AddMinutes(_options.AccessTokenMinutes), extraClaims: []);
+            // A "Remember me" login used to get the same 8-hour token as any other, so the
+            // stored login had always expired by the next morning (reported live: "I have to log
+            // in every single time"). It now lasts RememberMeDays, and carries a claim so the
+            // /auth/me refresh keeps re-issuing the long kind.
+            return rememberMe
+                ? CreateUserToken(user, permissionClaims, DateTime.UtcNow.AddDays(_options.RememberMeDays), [new Claim(RememberMeClaim.Type, "1")])
+                : CreateUserToken(user, permissionClaims, DateTime.UtcNow.AddMinutes(_options.AccessTokenMinutes), extraClaims: []);
         }
 
         public TokenResult CreateViewAsToken(User parent, IReadOnlyCollection<string> permissionClaims, Guid actorUserId, DateTime expiresAtUtc)

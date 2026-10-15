@@ -80,7 +80,7 @@ namespace iucs.readernest.application.Services
             // Suspended users (fee default) may still log in: the portal shows the
             // pending-fee "Pay Now" popup and restricts content, per the requirement.
             var permissions = await LoadPermissionClaimsAsync(user, cancellationToken);
-            var token = _tokenService.CreateToken(user, permissions);
+            var token = _tokenService.CreateToken(user, permissions, request.RememberMe);
 
             user.LastLoginAtUtc = DateTime.UtcNow;
             user.FailedLoginAttempts = 0;
@@ -92,7 +92,7 @@ namespace iucs.readernest.application.Services
             return BuildResponse(user, permissions, token, defaultRoute);
         }
 
-        public async Task<LoginResponse> GetCurrentUserAsync(Guid userId, CancellationToken cancellationToken = default)
+        public async Task<LoginResponse> GetCurrentUserAsync(Guid userId, bool rememberMe = false, CancellationToken cancellationToken = default)
         {
             var user = await _unitOfWork.Repository<User>().Query()
                 .Include(u => u.TeacherProfile)
@@ -108,7 +108,7 @@ namespace iucs.readernest.application.Services
             // (and a stale sidebar) on every permission-gated call until they logged out and
             // back in. The frontend swaps its stored token for this one on every call here
             // (SessionProvider already polls this endpoint on load and periodically).
-            var token = _tokenService.CreateToken(user, permissions);
+            var token = _tokenService.CreateToken(user, permissions, rememberMe);
             return BuildResponse(user, permissions, token, defaultRoute);
         }
 

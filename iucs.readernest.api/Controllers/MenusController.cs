@@ -44,6 +44,24 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _menuService.GetForUserAsync(userId, role, viewable, cancellationToken));
         }
 
+        /// <summary>The signed-in user's own left-menu order (Customise menu); empty = the default menu.</summary>
+        [HttpGet("mine/order")]
+        [Authorize]
+        public async Task<ActionResult<IReadOnlyList<string>>> GetMyOrder(CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _menuService.GetMyOrderAsync(userId, cancellationToken));
+        }
+
+        /// <summary>Saves the signed-in user's own menu order (most used first); an empty list resets it.</summary>
+        [HttpPut("mine/order")]
+        [Authorize]
+        public async Task<ActionResult<IReadOnlyList<string>>> SaveMyOrder(SaveMenuOrderRequest request, CancellationToken cancellationToken)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _menuService.SaveMyOrderAsync(userId, request.Paths, cancellationToken));
+        }
+
         /// <summary>
         /// Every configured item including inactive ones. Used by the admin menu manager, but
         /// also by every "My Permissions" screen (Admin's Roles &amp; Permissions, and a Sub

@@ -39,7 +39,8 @@ namespace iucs.readernest.api.Controllers
                 return Ok(await _authService.GetViewAsCurrentUserAsync(userId, actorId, expiresAtUtc, cancellationToken));
             }
 
-            return Ok(await _authService.GetCurrentUserAsync(userId, cancellationToken));
+            var rememberMe = User.FindFirstValue(RememberMeClaim.Type) == "1";
+            return Ok(await _authService.GetCurrentUserAsync(userId, rememberMe, cancellationToken));
         }
 
         /// <summary>

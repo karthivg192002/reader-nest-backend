@@ -73,6 +73,13 @@ namespace iucs.readernest.domain.Entities.Users
         public DateTime? LastLoginAtUtc { get; set; }
 
         /// <summary>
+        /// The member's own left-menu order (Customise menu): a JSON array of menu paths, most
+        /// used first. Null = the portal's default grouped menu. Items not listed (e.g. newly
+        /// granted ones) are shown after the listed ones.
+        /// </summary>
+        public string? MenuOrderJson { get; set; }
+
+        /// <summary>
         /// Consecutive failed login attempts since the last success. The login endpoint's
         /// rate limit (see Program.cs's "login" policy) partitions by IP only — with a 4-digit
         /// PIN's 10,000-value keyspace, an attacker who knows one target's email can spread

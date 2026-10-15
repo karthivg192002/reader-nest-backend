@@ -55,4 +55,10 @@ namespace iucs.readernest.application.Dto.Navigation
 
         public string? RequiredModule { get; set; }
     }
+
+    /// <summary>The user's own left-menu order: menu paths, most used first. Empty = default menu.</summary>
+    public class SaveMenuOrderRequest
+    {
+        public List<string> Paths { get; set; } = [];
+    }
 }

@@ -13,7 +13,7 @@ namespace iucs.readernest.application.Services
 
         Task<BatchDto> UpdateAsync(Guid id, SaveBatchRequest request, CancellationToken cancellationToken = default);
 
-        Task<BatchDto> SetStatusAsync(Guid id, BatchStatus status, CancellationToken cancellationToken = default);
+        Task<BatchDto> SetStatusAsync(Guid id, BatchStatus status, Guid? actorUserId = null, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Cancels every still-upcoming class of the batch in one go (the batch, its students and
@@ -28,7 +28,7 @@ namespace iucs.readernest.application.Services
         /// that student with nothing to show for them; withdraw them (or move them to another
         /// batch) first.
         /// </summary>
-        Task DeleteAsync(Guid id, CancellationToken cancellationToken = default);
+        Task DeleteAsync(Guid id, Guid? actorUserId = null, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// One-time data repair: moves every still-undelivered <c>ClassSession</c> that's fallen

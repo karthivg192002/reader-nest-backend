@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using iucs.readernest.api.Auth;
+using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Admission;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Services;
@@ -15,10 +16,29 @@ namespace iucs.readernest.api.Controllers
     public class DemoBookingsController : ControllerBase
     {
         private readonly IDemoBookingService _demoBookingService;
+        private readonly IDemoReportPdfGenerator _demoReportPdf;
 
-        public DemoBookingsController(IDemoBookingService demoBookingService)
+        public DemoBookingsController(IDemoBookingService demoBookingService, IDemoReportPdfGenerator demoReportPdf)
         {
             _demoBookingService = demoBookingService;
+            _demoReportPdf = demoReportPdf;
+        }
+
+        /// <summary>Month-end demo report, grouped by admission counsellor (a counsellor sees only their own demos).</summary>
+        [HttpGet("monthly-report/{year:int}/{month:int}")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.View)]
+        public async Task<ActionResult<DemoMonthlyReportDto>> MonthlyReport(int year, int month, CancellationToken cancellationToken)
+        {
+            return Ok(await _demoBookingService.GetMonthlyReportAsync(year, month, cancellationToken));
+        }
+
+        /// <summary>The same month-end demo report as a downloadable PDF.</summary>
+        [HttpGet("monthly-report/{year:int}/{month:int}/pdf")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.View)]
+        public async Task<IActionResult> MonthlyReportPdf(int year, int month, CancellationToken cancellationToken)
+        {
+            var report = await _demoBookingService.GetMonthlyReportAsync(year, month, cancellationToken);
+            return File(_demoReportPdf.Generate(report), "application/pdf", $"demo-report-{year}-{month:00}.pdf");
         }
 
         [HttpGet]

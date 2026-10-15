@@ -15,7 +15,11 @@ namespace iucs.readernest.application.Common.Interfaces
     /// </summary>
     public interface ITokenService
     {
-        TokenResult CreateToken(User user, IReadOnlyCollection<string> permissionClaims);
+        /// <summary>
+        /// A normal login token. <paramref name="rememberMe"/> ("Remember me" on the sign-in form)
+        /// makes it long-lived and marks it with <see cref="RememberMeClaim.Type"/>.
+        /// </summary>
+        TokenResult CreateToken(User user, IReadOnlyCollection<string> permissionClaims, bool rememberMe = false);
 
         /// <summary>
         /// A read-only "view as parent" token (see <see cref="Common.ViewAsParent"/>): the same

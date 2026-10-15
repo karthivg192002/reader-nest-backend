@@ -58,7 +58,8 @@ namespace iucs.readernest.api.Controllers
         [HasPermission(PermissionModule.CourseBatchManagement, PermissionAction.Delete)]
         public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
         {
-            await _batchService.DeleteAsync(id, cancellationToken);
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            await _batchService.DeleteAsync(id, userId, cancellationToken);
             return NoContent();
         }
 
@@ -137,7 +138,8 @@ namespace iucs.readernest.api.Controllers
             UpdateBatchStatusRequest request,
             CancellationToken cancellationToken)
         {
-            return Ok(await _batchService.SetStatusAsync(id, request.Status, cancellationToken));
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _batchService.SetStatusAsync(id, request.Status, userId, cancellationToken));
         }
 
         /// <summary>The batch's current student roster (WBS p.17 "Assign Students").</summary>

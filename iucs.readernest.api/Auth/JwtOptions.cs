@@ -12,5 +12,8 @@ namespace iucs.readernest.api.Auth
         public string SigningKey { get; set; } = null!;
 
         public int AccessTokenMinutes { get; set; } = 480;
+
+        /// <summary>Lifetime of a login made with "Remember me" ticked (renewed on every /auth/me refresh).</summary>
+        public int RememberMeDays { get; set; } = 30;
     }
 }
