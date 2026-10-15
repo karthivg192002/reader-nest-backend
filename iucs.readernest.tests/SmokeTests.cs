@@ -6554,6 +6554,24 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task GenerateSchedule_PastStartDate_PlacesEverySessionAfterNow()
+        {
+            // A class placed in the past is never joined, so the no-show job would mark it a
+            // teacher no-show (payout deduction + make-up) as soon as it was generated.
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 3, includeSession: false);
+            var justGone = DateTime.UtcNow.AddMinutes(-5);
+
+            var sessions = await CreateSessionService().GenerateScheduleAsync(batch.Id, new GenerateScheduleRequest
+            {
+                StartDate = DateOnly.FromDateTime(justGone.AddDays(-14)),
+                Slots = [new GenerateScheduleSlot { DayOfWeek = justGone.DayOfWeek, StartTimeUtc = TimeOnly.FromDateTime(justGone) }],
+            });
+
+            Assert.Equal(3, sessions.Count);
+            Assert.All(sessions, s => Assert.True(s.ScheduledStartAtUtc > DateTime.UtcNow, $"Placed in the past: {s.ScheduledStartAtUtc:O}"));
+        }
+
+        [Fact]
         public async Task GenerateSchedule_SessionCountOverride_PlacesOnlyThatManySessions_NotTheCoursesFull()
         {
             // A course's own TotalSessions (48) is the default, but a batch continuing

@@ -1406,7 +1406,10 @@ namespace iucs.readernest.application.Services
             // there was previously no way to generate only the sessions actually still owed.
             var targetSessionCount = request.SessionCount ?? course.TotalSessions;
 
-            var starts = PlaceSessionStartTimes(request.StartDate, timeByDay, targetSessionCount, holidays);
+            // Never before now: a class placed in the past (a start date already gone, or today at a
+            // time that has passed) is never joined, so the no-show job would mark it a teacher
+            // no-show -- docking the teacher's payout and booking a make-up -- straight away.
+            var starts = PlaceSessionStartTimes(request.StartDate, timeByDay, targetSessionCount, holidays, notBefore: now);
             if (starts.Count < targetSessionCount)
             {
                 throw new DomainValidationException("Could not place all sessions within two years; check the selected weekdays.");
