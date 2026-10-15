@@ -1549,6 +1549,59 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task DemoMonthlyReport_GroupsTheMonthsDemosByCounselor_WithAmountPaid()
+        {
+            // Client (2026-10-15): month-end demo report per counsellor (Megha, Suraksha, Parul).
+            var megha = await _db.SeedUserAsync($"megha-{Guid.NewGuid():N}@test.com", "x", UserRole.AdmissionTeam);
+            var parul = await _db.SeedUserAsync($"parul-{Guid.NewGuid():N}@test.com", "x", UserRole.AdmissionTeam);
+            megha.FirstName = "Megha";
+            parul.FirstName = "Parul";
+            await _db.Context.SaveChangesAsync();
+            var (_, paidInvoice) = await SeedInvoiceAsync(amount: 6000);
+            (await _db.Context.Invoices.FindAsync(paidInvoice.Id))!.AmountPaid = 6000;
+
+            // 8 Oct 4 PM IST = 10:30 UTC.
+            async Task<DemoBooking> Book(User counselor, string child, DateTime startUtc, SessionStatus status)
+            {
+                _db.CurrentUser.UserId = counselor.Id; // DemoBooking.CreatedBy = the counsellor
+                var (session, booking) = await SeedDemoSessionAsync($"lead-{Guid.NewGuid():N}@test.com", startAtUtc: startUtc);
+                session.Status = status;
+                booking.ChildName = child;
+                await _db.Context.SaveChangesAsync();
+                return booking;
+            }
+
+            var enrolled = await Book(megha, "Aarav", new DateTime(2026, 10, 8, 10, 30, 0, DateTimeKind.Utc), SessionStatus.Completed);
+            enrolled.ConversionStatus = ConversionStatus.Enrolled;
+            enrolled.InvoiceId = paidInvoice.Id;
+            await Book(megha, "Diya", new DateTime(2026, 10, 2, 10, 30, 0, DateTimeKind.Utc), SessionStatus.TeacherNoShow);
+            await Book(parul, "Kabir", new DateTime(2026, 10, 20, 12, 0, 0, DateTimeKind.Utc), SessionStatus.Cancelled);
+            await Book(parul, "September kid", new DateTime(2026, 9, 30, 18, 0, 0, DateTimeKind.Utc), SessionStatus.Completed);
+            await Book(parul, "November kid", new DateTime(2026, 10, 31, 19, 0, 0, DateTimeKind.Utc), SessionStatus.Scheduled);
+            await _db.Context.SaveChangesAsync();
+            _db.CurrentUser.UserId = null;
+
+            var report = await CreateDemoBookingService().GetMonthlyReportAsync(2026, 10);
+
+            Assert.Equal("October 2026", report.MonthLabel);
+            Assert.Equal(["Megha User", "Parul User"], report.Counselors.Select(c => c.CounselorName));
+            var meghaSection = report.Counselors[0];
+            Assert.Equal(["Diya", "Aarav"], meghaSection.Rows.Select(r => r.StudentName)); // by date
+            Assert.Equal("Teacher no-show", meghaSection.Rows[0].DemoStatus);
+            Assert.Equal("08 Oct 2026, 4:00 PM", meghaSection.Rows[1].DateTimeLabel);
+            Assert.Equal("Enrolled", meghaSection.Rows[1].Outcome);
+            Assert.Equal(6000, meghaSection.Rows[1].AmountPaid);
+            Assert.Null(meghaSection.Rows[0].AmountPaid);
+            Assert.Equal(1, meghaSection.EnrolledCount);
+            Assert.Equal(1, meghaSection.CompletedCount);
+            // 30 Sep 11:30 PM IST is September; 1 Nov 12:30 AM IST is November.
+            Assert.Equal(["Kabir"], report.Counselors[1].Rows.Select(r => r.StudentName));
+
+            var pdf = new iucs.readernest.api.Services.DemoReportPdfGenerator().Generate(report);
+            Assert.Equal("%PDF", System.Text.Encoding.ASCII.GetString(pdf, 0, 4));
+        }
+
+        [Fact]
         public async Task CaptureJoinAttendance_ParentOnDemoSession_PrimaryContactEmailMatch_SetsParentJoinedAtUtc()
         {
             // Regression: a demo lead has no Child/BatchEnrollment row, so the regular
@@ -9695,6 +9748,25 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task ViewAs_AdminCanViewStaffAndTeacherAccounts_ButNotAnotherAdmin()
+        {
+            // Client (2026-10-15): the Admin can open every profile -- RMs, counsellors, teachers, parents.
+            var admin = await _db.SeedUserAsync($"a-{Guid.NewGuid():N}@test.com", "pin", UserRole.Admin);
+            var otherAdmin = await _db.SeedUserAsync($"a2-{Guid.NewGuid():N}@test.com", "pin", UserRole.Admin);
+            var teacher = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "pin", UserRole.Teacher);
+            var counselor = await _db.SeedUserAsync($"c-{Guid.NewGuid():N}@test.com", "pin", UserRole.AdmissionTeam);
+            _db.CurrentUser.UserId = admin.Id;
+            var service = CreateAuthService();
+
+            var asTeacher = await service.StartViewAsParentAsync(admin.Id, teacher.Id);
+            Assert.Equal(teacher.Id, asTeacher.User.Id);
+            Assert.StartsWith("/teacher", asTeacher.DefaultRoute);
+            Assert.Equal($"test-view-as-token:{teacher.Id}:{admin.Id}", asTeacher.AccessToken); // read-only kind
+            Assert.StartsWith("/admission", (await service.StartViewAsParentAsync(admin.Id, counselor.Id)).DefaultRoute);
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.StartViewAsParentAsync(admin.Id, otherAdmin.Id));
+        }
+
+        [Fact]
         public async Task ViewAsParent_RefreshKeepsTheViewAsTokenAndItsOriginalExpiry()
         {
             var rm = await _db.SeedUserAsync($"rm-{Guid.NewGuid():N}@test.com", "rm-pin", UserRole.SubAdmin);
@@ -9976,7 +10048,8 @@ namespace iucs.readernest.tests
 
                 var future = await context.ClassSessions.FirstAsync(s => s.Id == futureSession.Id);
                 Assert.Equal(SessionStatus.Cancelled, future.Status);
-                Assert.Contains("Dormant", future.CancellationReason!);
+                // Client: only who cancelled it, never batch wording like "Batch marked Dormant."
+                Assert.StartsWith("Cancelled by ", future.CancellationReason!);
 
                 var past = await context.ClassSessions.FirstAsync(s => s.Id == pastSession.Id);
                 Assert.Equal(SessionStatus.Scheduled, past.Status); // history untouched
@@ -10011,7 +10084,9 @@ namespace iucs.readernest.tests
 
                 var session = await context.ClassSessions.FirstAsync(s => s.Id == futureSession.Id);
                 Assert.Equal(SessionStatus.Cancelled, session.Status);
-                Assert.Contains("deleted", session.CancellationReason!, StringComparison.OrdinalIgnoreCase);
+                // Client: only who cancelled it, never "Batch deleted."
+                Assert.StartsWith("Cancelled by ", session.CancellationReason!);
+                Assert.DoesNotContain("deleted", session.CancellationReason!, StringComparison.OrdinalIgnoreCase);
             }
         }
 

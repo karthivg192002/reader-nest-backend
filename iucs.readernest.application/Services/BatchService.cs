@@ -289,7 +289,7 @@ namespace iucs.readernest.application.Services
             return await GetAsync(batch.Id, cancellationToken);
         }
 
-        public async Task<BatchDto> SetStatusAsync(Guid id, BatchStatus status, CancellationToken cancellationToken = default)
+        public async Task<BatchDto> SetStatusAsync(Guid id, BatchStatus status, Guid? actorUserId = null, CancellationToken cancellationToken = default)
         {
             var batch = await _unitOfWork.Repository<Batch>().GetByIdAsync(id, cancellationToken)
                 ?? throw new NotFoundException(nameof(Batch), id);
@@ -310,7 +310,8 @@ namespace iucs.readernest.application.Services
             // future sessions left to cancel; this only bites the manual/early transition.
             if (status is BatchStatus.Dormant or BatchStatus.Archived)
             {
-                await CancelDanglingFutureSessionsAsync(id, $"Batch marked {status}.", cancellationToken);
+                var who = await CancelledBy.DescribeAsync(_unitOfWork, actorUserId, cancellationToken);
+                await CancelDanglingFutureSessionsAsync(id, CancelledBy.Reason(who, null), cancellationToken);
                 await ExpireSubscriptionsForCompletedBatchAsync(batch, cancellationToken);
             }
 
@@ -332,7 +333,7 @@ namespace iucs.readernest.application.Services
         /// Dormant/Archived, so nothing stays on a teacher's or parent's calendar for a batch
         /// that no longer exists.
         /// </summary>
-        public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
+        public async Task DeleteAsync(Guid id, Guid? actorUserId = null, CancellationToken cancellationToken = default)
         {
             var batch = await _unitOfWork.Repository<Batch>().GetByIdAsync(id, cancellationToken)
                 ?? throw new NotFoundException(nameof(Batch), id);
@@ -345,7 +346,10 @@ namespace iucs.readernest.application.Services
                     $"Batch '{batch.Name}' has {activeCount} active student(s); withdraw them (or move them to another batch) before deleting it.");
             }
 
-            var cancelledSessionCount = await CancelDanglingFutureSessionsAsync(id, "Batch deleted.", cancellationToken);
+            // Just "Cancelled by {name} ({role})": the session list used to show these classes as
+            // "Batch deleted." with no name, which the client asked never to show users.
+            var who = await CancelledBy.DescribeAsync(_unitOfWork, actorUserId, cancellationToken);
+            var cancelledSessionCount = await CancelDanglingFutureSessionsAsync(id, CancelledBy.Reason(who, null), cancellationToken);
 
             _unitOfWork.Repository<Batch>().Remove(batch);
             // Who deleted it and when are already captured without any extra work here — this

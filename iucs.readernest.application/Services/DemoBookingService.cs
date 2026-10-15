@@ -1599,6 +1599,107 @@ namespace iucs.readernest.application.Services
             }
         }
 
+        public async Task<DemoMonthlyReportDto> GetMonthlyReportAsync(int year, int month, CancellationToken cancellationToken = default)
+        {
+            if (year < 2000 || year > 2100 || month < 1 || month > 12)
+            {
+                throw new DomainValidationException("Please choose a valid month.");
+            }
+
+            // The month's edges in IST (the academy's day), as UTC instants.
+            var zone = TimeZoneInfo.FindSystemTimeZoneById(DateTimeDisplay.DefaultTimeZoneId);
+            var firstLocal = new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Unspecified);
+            var fromUtc = TimeZoneInfo.ConvertTimeToUtc(firstLocal, zone);
+            var toUtc = TimeZoneInfo.ConvertTimeToUtc(firstLocal.AddMonths(1), zone);
+
+            var query = BaseQuery().Where(b => b.ClassSession != null
+                && b.ClassSession.ScheduledStartAtUtc >= fromUtc
+                && b.ClassSession.ScheduledStartAtUtc < toUtc);
+            if (await CreatorScopeAsync(cancellationToken) is { } scope)
+            {
+                query = query.Where(b => b.CreatedBy == scope);
+            }
+
+            var bookings = await query.ToListAsync(cancellationToken);
+
+            var counselorIds = bookings.Where(b => b.CreatedBy.HasValue).Select(b => b.CreatedBy!.Value).Distinct().ToList();
+            var counselorNames = await _unitOfWork.Repository<User>().Query()
+                .Where(u => counselorIds.Contains(u.Id))
+                .ToDictionaryAsync(u => u.Id, u => $"{u.FirstName} {u.LastName}".Trim(), cancellationToken);
+
+            const string bookedOnline = "Booked online";
+            var groups = bookings
+                .GroupBy(b => b.CreatedBy is { } id && counselorNames.TryGetValue(id, out var name) && name.Length > 0 ? name : bookedOnline)
+                .OrderBy(g => g.Key == bookedOnline ? 1 : 0)
+                .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(g =>
+                {
+                    var rows = g.OrderBy(b => b.ClassSession!.ScheduledStartAtUtc).Select(b =>
+                    {
+                        var session = b.ClassSession!;
+                        var teacher = session.TeacherProfile?.User;
+                        return new DemoMonthlyReportRowDto
+                        {
+                            BookingId = b.Id,
+                            ScheduledStartAtUtc = session.ScheduledStartAtUtc,
+                            DateTimeLabel = TimeZoneInfo.ConvertTimeFromUtc(session.ScheduledStartAtUtc, zone).ToString("dd MMM yyyy, h:mm tt"),
+                            StudentName = b.ChildName,
+                            ParentName = b.ParentName,
+                            TeacherName = teacher is null ? "—" : $"{teacher.FirstName} {teacher.LastName}".Trim(),
+                            DemoStatus = DemoStatusLabel(session.Status),
+                            Outcome = ConversionLabel(b.ConversionStatus),
+                            Enrolled = b.ConversionStatus == ConversionStatus.Enrolled,
+                            AmountPaid = b.Invoice is { AmountPaid: > 0 } invoice ? invoice.AmountPaid : null,
+                        };
+                    }).ToList();
+
+                    return new DemoMonthlyReportCounselorDto
+                    {
+                        CounselorName = g.Key,
+                        DemoCount = rows.Count,
+                        CompletedCount = g.Count(b => b.ClassSession!.Status == SessionStatus.Completed),
+                        EnrolledCount = rows.Count(r => r.Enrolled),
+                        TotalAmountPaid = rows.Sum(r => r.AmountPaid ?? 0),
+                        Rows = rows,
+                    };
+                })
+                .ToList();
+
+            return new DemoMonthlyReportDto
+            {
+                Year = year,
+                Month = month,
+                MonthLabel = firstLocal.ToString("MMMM yyyy"),
+                GeneratedAtUtc = DateTime.UtcNow,
+                Counselors = groups,
+            };
+        }
+
+        private static string DemoStatusLabel(SessionStatus status) => status switch
+        {
+            SessionStatus.Scheduled or SessionStatus.CarriedForward => "Scheduled",
+            SessionStatus.InProgress => "In progress",
+            SessionStatus.Completed => "Completed",
+            SessionStatus.Cancelled => "Cancelled",
+            SessionStatus.Rescheduled => "Rescheduled",
+            SessionStatus.TeacherNoShow => "Teacher no-show",
+            SessionStatus.StudentNoShow => "Student no-show",
+            _ => status.ToString(),
+        };
+
+        private static string ConversionLabel(ConversionStatus status) => status switch
+        {
+            ConversionStatus.DemoScheduled => "Demo scheduled",
+            ConversionStatus.DemoCompleted => "Demo completed",
+            ConversionStatus.FollowUpInProgress => "Follow-up",
+            ConversionStatus.PaymentPending => "Payment pending",
+            ConversionStatus.PartiallyPaid => "Partially paid",
+            ConversionStatus.Enrolled => "Enrolled",
+            ConversionStatus.NotInterested => "Not interested",
+            ConversionStatus.ReadyForEnrollment => "Ready for enrollment",
+            _ => status.ToString(),
+        };
+
         private IQueryable<DemoBooking> BaseQuery()
         {
             return _unitOfWork.Repository<DemoBooking>().Query()

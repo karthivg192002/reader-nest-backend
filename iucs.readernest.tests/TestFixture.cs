@@ -211,7 +211,7 @@ namespace iucs.readernest.tests
 
     public class FakeTokenService : ITokenService
     {
-        public TokenResult CreateToken(User user, IReadOnlyCollection<string> permissionClaims)
+        public TokenResult CreateToken(User user, IReadOnlyCollection<string> permissionClaims, bool rememberMe = false)
         {
             return new TokenResult { AccessToken = "test-token", ExpiresAtUtc = DateTime.UtcNow.AddHours(1) };
         }

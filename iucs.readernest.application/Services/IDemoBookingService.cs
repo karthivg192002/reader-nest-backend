@@ -19,6 +19,12 @@ namespace iucs.readernest.application.Services
         /// <summary>Per-parent demo record: every demo each parent has taken, grouped by email, with fee totals.</summary>
         Task<IReadOnlyList<ParentDemoHistoryDto>> ListParentHistoryAsync(string? search, CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// Month-end demo report: every demo whose class falls in the month (IST), grouped by the
+        /// counsellor who booked it. A counsellor limited to their own demos sees only their section.
+        /// </summary>
+        Task<DemoMonthlyReportDto> GetMonthlyReportAsync(int year, int month, CancellationToken cancellationToken = default);
+
         Task<DemoBookingDto> UpdateConversionStatusAsync(
             Guid id,
             UpdateConversionStatusRequest request,

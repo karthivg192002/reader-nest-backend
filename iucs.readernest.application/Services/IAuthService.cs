@@ -7,7 +7,8 @@ namespace iucs.readernest.application.Services
     {
         Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default);
 
-        Task<LoginResponse> GetCurrentUserAsync(Guid userId, CancellationToken cancellationToken = default);
+        /// <summary>Re-reads the user and re-issues their token; <paramref name="rememberMe"/> keeps a "Remember me" login long-lived.</summary>
+        Task<LoginResponse> GetCurrentUserAsync(Guid userId, bool rememberMe = false, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Starts a read-only "view as parent" session (see <see cref="Common.ViewAsParent"/>):

@@ -12,5 +12,8 @@ namespace iucs.readernest.application.Dto.Auth
         [Required]
         [RegularExpression(@"^\d{4}$", ErrorMessage = "PIN must be exactly 4 digits.")]
         public string Pin { get; set; } = null!;
+
+        /// <summary>"Remember me" on the sign-in form: issue a long-lived login instead of an 8-hour one.</summary>
+        public bool RememberMe { get; set; }
     }
 }

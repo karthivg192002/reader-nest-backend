@@ -36,7 +36,7 @@ namespace iucs.readernest.api.Middleware
                 {
                     Status = StatusCodes.Status403Forbidden,
                     Title = "Read-only view",
-                    Detail = "You're viewing this parent's account in read-only mode, so nothing can be changed, paid or joined from here.",
+                    Detail = "You're viewing this account in read-only mode, so nothing can be changed, paid or joined from here.",
                 }, (System.Text.Json.JsonSerializerOptions?)null, "application/problem+json");
                 return;
             }
