@@ -258,20 +258,22 @@ builder.Services
                 var viewAsActorClaim = context.Principal?.FindFirstValue(iucs.readernest.application.Common.ViewAsParent.ActorClaimType);
                 if (viewAsActorClaim is not null)
                 {
-                    if (!Guid.TryParse(viewAsActorClaim, out var actorId) || access.Role != UserRole.Parent)
+                    if (!Guid.TryParse(viewAsActorClaim, out var actorId) || access.Role == UserRole.Admin)
                     {
                         context.Fail("This view-as session is no longer valid.");
                         return;
                     }
 
                     var actor = await authService.GetCurrentAccessAsync(actorId, context.HttpContext.RequestAborted);
+                    // Staff/teacher accounts: Admin only (see AuthService.StartViewAsParentAsync).
                     var actorAllowed = actor is not null
                         && actor.Status == UserStatus.Active
                         && (actor.Role == UserRole.Admin
-                            || actor.Permissions.Contains(iucs.readernest.application.Common.ViewAsParent.RequiredPermission));
+                            || (access.Role == UserRole.Parent
+                                && actor.Permissions.Contains(iucs.readernest.application.Common.ViewAsParent.RequiredPermission)));
                     if (!actorAllowed)
                     {
-                        context.Fail("You no longer have access to view this parent's account.");
+                        context.Fail("You no longer have access to view this account.");
                         return;
                     }
                 }

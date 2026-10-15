@@ -115,13 +115,27 @@ namespace iucs.readernest.application.Services
         public async Task<LoginResponse> StartViewAsParentAsync(Guid actorUserId, Guid parentUserId, CancellationToken cancellationToken = default)
         {
             var parent = await _unitOfWork.Repository<User>().Query()
+                .Include(u => u.TeacherProfile)
                 .FirstOrDefaultAsync(u => u.Id == parentUserId, cancellationToken)
                 ?? throw new NotFoundException(nameof(User), parentUserId);
 
-            // Parents only: a staff, teacher or admin account is never viewable this way.
+            // Client (2026-10-15): the Admin can open every profile -- Relationship Managers,
+            // admission counsellors, teachers and parents. Anyone else with User Management view
+            // (the RMs) still only views parents. An Admin account is never viewable this way.
+            if (parent.Role == UserRole.Admin)
+            {
+                throw new DomainValidationException("Admin accounts can't be viewed this way.");
+            }
             if (parent.Role != UserRole.Parent)
             {
-                throw new DomainValidationException("Only parent accounts can be viewed this way.");
+                var actorRole = await _unitOfWork.Repository<User>().Query()
+                    .Where(u => u.Id == actorUserId)
+                    .Select(u => (UserRole?)u.Role)
+                    .FirstOrDefaultAsync(cancellationToken);
+                if (actorRole != UserRole.Admin)
+                {
+                    throw new DomainValidationException("Only an Admin can view staff and teacher accounts.");
+                }
             }
             // Same rule as login: a deactivated parent couldn't sign in, so there's nothing to see.
             if (parent.Status == UserStatus.Inactive)
@@ -135,15 +149,16 @@ namespace iucs.readernest.application.Services
 
             // Recorded under the staff member's own (normal) login, naming the parent viewed.
             await _auditLog.StageAsync(AuditAction.Access, nameof(User), parent.Id.ToString(),
-                $"{{\"note\":\"Started read-only 'View as parent' session ({ViewAsParent.SessionMinutes} min)\"}}", cancellationToken);
+                $"{{\"note\":\"Started read-only 'View as {(parent.Role == UserRole.Parent ? "parent" : "user")}' session ({ViewAsParent.SessionMinutes} min)\"}}", cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            return BuildResponse(parent, permissions, token, "/parent");
+            return BuildResponse(parent, permissions, token, await ViewAsRouteAsync(parent, cancellationToken));
         }
 
         public async Task<LoginResponse> GetViewAsCurrentUserAsync(Guid parentUserId, Guid actorUserId, DateTime expiresAtUtc, CancellationToken cancellationToken = default)
         {
             var parent = await _unitOfWork.Repository<User>().Query()
+                .Include(u => u.TeacherProfile)
                 .FirstOrDefaultAsync(u => u.Id == parentUserId, cancellationToken)
                 ?? throw new NotFoundException(nameof(User), parentUserId);
 
@@ -152,8 +167,12 @@ namespace iucs.readernest.application.Services
             // portal's periodic refresh can't stretch a 30-minute session.
             var permissions = await LoadPermissionClaimsAsync(parent, cancellationToken);
             var token = _tokenService.CreateViewAsToken(parent, permissions, actorUserId, expiresAtUtc);
-            return BuildResponse(parent, permissions, token, "/parent");
+            return BuildResponse(parent, permissions, token, await ViewAsRouteAsync(parent, cancellationToken));
         }
+
+        /// <summary>The portal a view-as tab opens: a parent's own, else the one the user signs in to.</summary>
+        private async Task<string> ViewAsRouteAsync(User user, CancellationToken cancellationToken) =>
+            user.Role == UserRole.Parent ? "/parent" : await ResolveDefaultRouteAsync(user, cancellationToken);
 
         public async Task EndViewAsParentAsync(Guid parentUserId, CancellationToken cancellationToken = default)
         {

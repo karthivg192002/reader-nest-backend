@@ -9748,6 +9748,25 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task ViewAs_AdminCanViewStaffAndTeacherAccounts_ButNotAnotherAdmin()
+        {
+            // Client (2026-10-15): the Admin can open every profile -- RMs, counsellors, teachers, parents.
+            var admin = await _db.SeedUserAsync($"a-{Guid.NewGuid():N}@test.com", "pin", UserRole.Admin);
+            var otherAdmin = await _db.SeedUserAsync($"a2-{Guid.NewGuid():N}@test.com", "pin", UserRole.Admin);
+            var teacher = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "pin", UserRole.Teacher);
+            var counselor = await _db.SeedUserAsync($"c-{Guid.NewGuid():N}@test.com", "pin", UserRole.AdmissionTeam);
+            _db.CurrentUser.UserId = admin.Id;
+            var service = CreateAuthService();
+
+            var asTeacher = await service.StartViewAsParentAsync(admin.Id, teacher.Id);
+            Assert.Equal(teacher.Id, asTeacher.User.Id);
+            Assert.StartsWith("/teacher", asTeacher.DefaultRoute);
+            Assert.Equal($"test-view-as-token:{teacher.Id}:{admin.Id}", asTeacher.AccessToken); // read-only kind
+            Assert.StartsWith("/admission", (await service.StartViewAsParentAsync(admin.Id, counselor.Id)).DefaultRoute);
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.StartViewAsParentAsync(admin.Id, otherAdmin.Id));
+        }
+
+        [Fact]
         public async Task ViewAsParent_RefreshKeepsTheViewAsTokenAndItsOriginalExpiry()
         {
             var rm = await _db.SeedUserAsync($"rm-{Guid.NewGuid():N}@test.com", "rm-pin", UserRole.SubAdmin);
