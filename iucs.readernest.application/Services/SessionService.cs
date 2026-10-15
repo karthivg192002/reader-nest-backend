@@ -1462,13 +1462,16 @@ namespace iucs.readernest.application.Services
         /// UpdateFutureScheduleAsync: the UTC start times of <paramref name="targetCount"/>
         /// sessions on the given weekday/time pattern, walking forward from
         /// <paramref name="startDate"/> and skipping holidays. Stops early (returning fewer than
-        /// requested) if a two-year walk never places them all — callers decide what that means.</summary>
+        /// requested) if a two-year walk never places them all — callers decide what that means.
+        /// Slots at or before <paramref name="notBefore"/> are skipped (e.g. today's slot whose
+        /// time has already gone).</summary>
         private static List<DateTime> PlaceSessionStartTimes(
             DateOnly startDate,
             IReadOnlyDictionary<DayOfWeek, TimeOnly> timeByDay,
             int targetCount,
             IReadOnlySet<DateOnly> holidays,
-            IReadOnlySet<DateTime>? occupiedStarts = null)
+            IReadOnlySet<DateTime>? occupiedStarts = null,
+            DateTime? notBefore = null)
         {
             var result = new List<DateTime>();
             var date = startDate;
@@ -1478,7 +1481,7 @@ namespace iucs.readernest.application.Services
                 if (timeByDay.TryGetValue(date.DayOfWeek, out var timeForDay) && !holidays.Contains(date))
                 {
                     var start = date.ToDateTime(timeForDay, DateTimeKind.Utc);
-                    if (occupiedStarts is null || !occupiedStarts.Contains(start))
+                    if ((occupiedStarts is null || !occupiedStarts.Contains(start)) && (notBefore is null || start > notBefore))
                     {
                         result.Add(start);
                     }
@@ -1550,6 +1553,16 @@ namespace iucs.readernest.application.Services
                     s => DateOnly.FromDateTime(s.ScheduledStartAtUtc)
                         .ToDateTime(timeByDay[s.ScheduledStartAtUtc.DayOfWeek], DateTimeKind.Utc));
 
+                // Same dates, new time: moving today's class to a time that has already gone
+                // would put it in the past, where it counts as missed straight away.
+                var alreadyGone = remainingSessions.FirstOrDefault(s => newStartBySessionId[s.Id] <= now);
+                if (alreadyGone is not null)
+                {
+                    throw new DomainValidationException(
+                        $"That time has already passed for the class on {DateTimeDisplay.ToLocal(newStartBySessionId[alreadyGone.Id])}. " +
+                        "Pick a later time, or reschedule that one class on its own.");
+                }
+
                 var windowStart = newStartBySessionId.Values.Min();
                 var windowEnd = newStartBySessionId.Values.Max().AddMinutes(durationMinutes);
                 var otherTeacherSessions = await _unitOfWork.Repository<ClassSession>().Query()
@@ -1615,7 +1628,9 @@ namespace iucs.readernest.application.Services
                         .Select(s => s.ScheduledStartAtUtc)
                         .ToListAsync(cancellationToken))
                     .ToHashSet();
-                var newStarts = PlaceSessionStartTimes(today, timeByDay, targetCount, holidays, occupiedStarts);
+                // From now, not from midnight: a slot earlier today has already gone, and a class
+                // placed there would count as missed the moment it was saved.
+                var newStarts = PlaceSessionStartTimes(today, timeByDay, targetCount, holidays, occupiedStarts, notBefore: now);
                 if (newStarts.Count < targetCount)
                 {
                     throw new DomainValidationException("Could not place all remaining sessions within two years; check the selected weekdays.");

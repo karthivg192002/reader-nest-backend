@@ -6735,6 +6735,67 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task UpdateFutureSchedule_RegeneratedSessions_SkipTodaysSlotOnceItsTimeHasPassed()
+        {
+            // Reported live: re-planning at 10:51 PM with today's weekday at 10:45 PM placed a class
+            // six minutes in the past, which counted as missed straight away.
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var day7 = DateTime.UtcNow.AddDays(7);
+            var start = new DateTime(day7.Year, day7.Month, day7.Day, 10, 0, 0, DateTimeKind.Utc);
+            _db.Context.Add(new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = start,
+                ScheduledEndAtUtc = start.AddMinutes(45),
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var justGone = DateTime.UtcNow.AddMinutes(-5);
+            await CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                Slots = [new GenerateScheduleSlot { DayOfWeek = justGone.DayOfWeek, StartTimeUtc = TimeOnly.FromDateTime(justGone) }],
+                RemainingSessionCount = 2,
+            });
+
+            _db.Context.ChangeTracker.Clear();
+            var placed = await _db.Context.ClassSessions
+                .Where(s => s.BatchId == batch.Id && s.Status == SessionStatus.Scheduled)
+                .ToListAsync();
+            Assert.Equal(2, placed.Count);
+            Assert.All(placed, s => Assert.True(s.ScheduledStartAtUtc > DateTime.UtcNow, $"Placed in the past: {s.ScheduledStartAtUtc:O}"));
+        }
+
+        [Fact]
+        public async Task UpdateFutureSchedule_TimeOnlyChange_RefusesTimeAlreadyPassedToday()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var later = DateTime.UtcNow.AddMinutes(30);
+            var earlier = DateTime.UtcNow.AddMinutes(-30);
+            if (later.Date != DateTime.UtcNow.Date || earlier.Date != DateTime.UtcNow.Date)
+            {
+                return; // too close to midnight UTC for "earlier today" to exist
+            }
+            var tonight = new DateTime(later.Year, later.Month, later.Day, later.Hour, later.Minute, 0, DateTimeKind.Utc);
+            _db.Context.Add(new ClassSession
+            {
+                BatchId = batch.Id,
+                TeacherProfileId = batch.TeacherProfileId,
+                Status = SessionStatus.Scheduled,
+                ScheduledStartAtUtc = tonight,
+                ScheduledEndAtUtc = tonight.AddMinutes(45),
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var ex = await Assert.ThrowsAsync<DomainValidationException>(() => CreateSessionService().UpdateFutureScheduleAsync(batch.Id, new UpdateFutureScheduleRequest
+            {
+                Slots = [new GenerateScheduleSlot { DayOfWeek = tonight.DayOfWeek, StartTimeUtc = new TimeOnly(earlier.Hour, earlier.Minute) }],
+            }));
+            Assert.Contains("already passed", ex.Message);
+        }
+
+        [Fact]
         public async Task UpdateFutureSchedule_TimeOnlyChange_BlocksWhenNewTimeDoubleBooksTheTeacher()
         {
             var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
