@@ -50,6 +50,7 @@ namespace iucs.readernest.application.Mappings
                 DueDate = invoice.DueDate,
                 IssuedAtUtc = invoice.IssuedAtUtc,
                 PaidAtUtc = invoice.PaidAtUtc,
+                PaymentLinkExpiresAtUtc = invoice.PaymentLinkExpiresAtUtc,
             };
         }
 

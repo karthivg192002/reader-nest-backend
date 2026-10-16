@@ -43,6 +43,7 @@ namespace iucs.readernest.application.Mappings
                 InvoiceId = booking.InvoiceId,
                 InvoiceAmount = booking.Invoice?.Amount,
                 InvoiceAmountPaid = booking.Invoice?.AmountPaid,
+                PaymentLinkExpiresAtUtc = booking.Invoice?.PaymentLinkExpiresAtUtc,
                 TermsAcceptedAtUtc = booking.TermsAcceptedAtUtc,
                 PaymentVerifiedAtUtc = booking.PaymentVerifiedAtUtc,
                 Participants = booking.Participants

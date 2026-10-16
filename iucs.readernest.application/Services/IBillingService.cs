@@ -76,6 +76,13 @@ namespace iucs.readernest.application.Services
         Task<InvoiceDto> RecordPaymentAsync(Guid invoiceId, RecordPaymentRequest request, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Closes an unpaid invoice (client, 2026-10-16: a parent no longer interested in enrolling):
+        /// nothing is expected against it any more, it stops counting as pending/overdue, and any fee
+        /// suspension standing on it is lifted. Refused once anything has been paid on it.
+        /// </summary>
+        Task<InvoiceDto> CancelInvoiceAsync(Guid invoiceId, CancelInvoiceRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Creates a shareable Pay Now link for an open invoice via the gateway,
         /// routed through the invoice's department payment account.
         /// </summary>

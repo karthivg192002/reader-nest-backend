@@ -123,6 +123,7 @@ builder.Services.AddHostedService<AbandonedClassCompletionBackgroundService>();
 builder.Services.AddHostedService<NoShowDetectionBackgroundService>();
 // Batch payment plan reminders: "payment after N sessions" / "payment due on a specific date"
 builder.Services.AddHostedService<PaymentPlanReminderBackgroundService>();
+builder.Services.AddHostedService<DemoFollowUpBackgroundService>();
 // Catches a completed class that never received a recording — auto-record can start
 // with no error yet still fail later in the pipeline, which nothing else catches
 builder.Services.AddHostedService<RecordingReconciliationBackgroundService>();

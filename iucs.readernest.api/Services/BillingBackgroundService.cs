@@ -161,6 +161,14 @@ namespace iucs.readernest.api.Services
             // Admission payment-link invoices of leads that are not enrolled yet never age into
             // Overdue (see AdmissionInvoices) -- otherwise an unpaid link could suspend a sibling.
             var admissionExempt = await AdmissionInvoices.ExemptFromOverdueHandlingAsync(unitOfWork, cancellationToken);
+            // ...and one that turned Overdue before it was exempt (e.g. a demo-only family, see
+            // AdmissionInvoices) goes back to its unpaid state, so Billing doesn't show it overdue.
+            await unitOfWork.Repository<Invoice>().ExecuteUpdateAsync(
+                i => i.Status == InvoiceStatus.Overdue && admissionExempt.Contains(i.Id),
+                setters => setters
+                    .SetProperty(i => i.Status, i => i.AmountPaid > 0 ? InvoiceStatus.PartiallyPaid : InvoiceStatus.Pending)
+                    .SetProperty(i => i.UpdatedAtUtc, now),
+                cancellationToken);
             var overdueCount = await unitOfWork.Repository<Invoice>().ExecuteUpdateAsync(
                 i => (i.Status == InvoiceStatus.Pending || i.Status == InvoiceStatus.PartiallyPaid)
                      && i.DueDate < today
@@ -206,6 +214,21 @@ namespace iucs.readernest.api.Services
             {
                 var graceDays = await BillingSettings.GetSuspensionGraceDaysAsync(unitOfWork, cancellationToken);
                 var suspensionCutoff = today.AddDays(-graceDays);
+                // A suspension standing on an exempt invoice (raised before the exemption) is lifted.
+                var exemptSuspensions = await unitOfWork.Repository<FeeSuspension>().TrackedQuery()
+                    .Where(s => s.Status == SuspensionStatus.Active && s.InvoiceId != null && admissionExempt.Contains(s.InvoiceId.Value))
+                    .ToListAsync(cancellationToken);
+                foreach (var suspension in exemptSuspensions)
+                {
+                    suspension.Status = SuspensionStatus.Lifted;
+                    suspension.LiftedAtUtc = now;
+                    suspension.AutoRestored = true;
+                }
+                if (exemptSuspensions.Count > 0)
+                {
+                    await unitOfWork.SaveChangesAsync(cancellationToken);
+                }
+
                 var overdueInvoices = await unitOfWork.Repository<Invoice>().Query()
                     .Where(i => i.Status == InvoiceStatus.Overdue && i.DueDate <= suspensionCutoff
                                 && !admissionExempt.Contains(i.Id))

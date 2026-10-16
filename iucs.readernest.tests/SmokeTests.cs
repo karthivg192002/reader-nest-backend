@@ -4805,7 +4805,159 @@ namespace iucs.readernest.tests
             booking.ConversionStatus = ConversionStatus.Enrolled;
             await _db.Context.SaveChangesAsync();
 
+            // Client (2026-10-16): still exempt while no child of the family is in a class...
+            Assert.Contains(invoiceId, await AdmissionInvoices.ExemptFromOverdueHandlingAsync(_db.UnitOfWork));
+
+            // ...and handled normally once one is.
+            var parentProfileId = (await _db.Context.Invoices.SingleAsync(i => i.Id == invoiceId)).ParentProfileId;
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var child = new Child { ParentProfileId = parentProfileId, FirstName = "Om", LastName = "Shah" };
+            _db.Context.Add(child);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.Add(new BatchEnrollment { BatchId = batch.Id, ChildId = child.Id });
+            await _db.Context.SaveChangesAsync();
+
             Assert.DoesNotContain(invoiceId, await AdmissionInvoices.ExemptFromOverdueHandlingAsync(_db.UnitOfWork));
+        }
+
+        [Fact]
+        public async Task OverdueHandling_SkipsFamiliesWhoseChildWasNeverInAClass()
+        {
+            // Client (2026-10-16): a parent who only attended a demo got "payment overdue" emails.
+            var (_, invoice) = await SeedInvoiceAsync(amount: 5000);
+            Assert.Contains(invoice.Id, await AdmissionInvoices.ExemptFromOverdueHandlingAsync(_db.UnitOfWork));
+
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 1, includeSession: false);
+            var child = new Child { ParentProfileId = invoice.ParentProfileId, FirstName = "Riya", LastName = "K" };
+            _db.Context.Add(child);
+            await _db.Context.SaveChangesAsync();
+            _db.Context.Add(new BatchEnrollment { BatchId = batch.Id, ChildId = child.Id });
+            await _db.Context.SaveChangesAsync();
+
+            Assert.DoesNotContain(invoice.Id, await AdmissionInvoices.ExemptFromOverdueHandlingAsync(_db.UnitOfWork));
+        }
+
+        [Fact]
+        public async Task CancelInvoice_ClosesIt_LiftsItsSuspension_AndRefusesOncePartPaid()
+        {
+            var (billing, invoice) = await SeedInvoiceAsync(amount: 3000);
+            _db.Context.FeeSuspensions.Add(new FeeSuspension
+            {
+                ParentProfileId = invoice.ParentProfileId, InvoiceId = invoice.Id,
+                Status = SuspensionStatus.Active, SuspendedAtUtc = DateTime.UtcNow,
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var cancelled = await billing.CancelInvoiceAsync(invoice.Id, new CancelInvoiceRequest { Reason = "Parent not interested" });
+
+            Assert.Equal(InvoiceStatus.Cancelled, cancelled.Status);
+            Assert.Equal(SuspensionStatus.Lifted, (await _db.Context.FeeSuspensions.AsNoTracking().SingleAsync(s => s.InvoiceId == invoice.Id)).Status);
+            await Assert.ThrowsAsync<DomainValidationException>(() => billing.CancelInvoiceAsync(invoice.Id, new CancelInvoiceRequest()));
+
+            var partPaid = await billing.CreateInvoiceAsync(new CreateInvoiceRequest
+            {
+                ParentProfileId = invoice.ParentProfileId, DepartmentId = WellKnownDepartments.Phonics, Amount = 3000,
+                DueDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)),
+            });
+            await billing.RecordPaymentAsync(partPaid.Id, new RecordPaymentRequest { Amount = 1000 });
+            await Assert.ThrowsAsync<DomainValidationException>(() => billing.CancelInvoiceAsync(partPaid.Id, new CancelInvoiceRequest()));
+        }
+
+        [Fact]
+        public void InvoicePayToken_RegeneratingMakesTheOldLinkInvalid_AndSetsA48HourExpiry()
+        {
+            var invoice = new Invoice { Id = Guid.NewGuid() };
+            var legacy = "i" + invoice.Id.ToString("N") + new string('0', 16);
+            var first = InvoicePayToken.Issue(invoice, "secret");
+            Assert.InRange(invoice.PaymentLinkExpiresAtUtc!.Value, DateTime.UtcNow.AddHours(47.9), DateTime.UtcNow.AddHours(48.1));
+            Assert.True(InvoicePayToken.IsGenuine(first, invoice.Id, invoice.PaymentLinkCode, "secret"));
+
+            var second = InvoicePayToken.Issue(invoice, "secret");
+            Assert.NotEqual(first, second);
+            Assert.False(InvoicePayToken.IsGenuine(first, invoice.Id, invoice.PaymentLinkCode, "secret"));
+            Assert.True(InvoicePayToken.IsGenuine(second, invoice.Id, invoice.PaymentLinkCode, "secret"));
+            Assert.False(InvoicePayToken.IsGenuine(legacy, invoice.Id, invoice.PaymentLinkCode, "secret"));
+        }
+
+        private async Task<(AdmissionPaymentService Admission, DemoBookingDto Demo, AdmissionPaymentLinkDto Link)> SeedAdmissionLinkAsync()
+        {
+            var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            var category = new CourseCategory { Name = $"Cat-{Guid.NewGuid():N}", DepartmentId = WellKnownDepartments.Phonics };
+            var course = new Course
+            {
+                CourseCategory = category, Name = "Super Reader", Type = CourseType.Group,
+                DurationMinutes = 45, Price = 5000, TotalSessions = 36, DepartmentId = WellKnownDepartments.Phonics,
+            };
+            _db.Context.AddRange(teacher, category, course,
+                new PaymentAccount { Name = "Phonics", DepartmentId = WellKnownDepartments.Phonics, GatewayProvider = "simulated", GatewayAccountRef = "ph" });
+            await _db.Context.SaveChangesAsync();
+            var demoService = CreateDemoBookingService();
+            var start = DateTime.UtcNow.AddDays(1);
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Dev Shah", ParentEmail = $"dev-{Guid.NewGuid():N}@example.com", ParentPhone = "9666666666", ChildName = "Om",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+            var admission = new AdmissionPaymentService(
+                _db.UnitOfWork, demoService, CreateUserService(), CreateBillingService(), _notifications, _auditLog, new ConfigurationBuilder().Build());
+            var link = await admission.SendPaymentLinkAsync(demo.Id, new SendAdmissionPaymentLinkRequest { CourseId = course.Id });
+            return (admission, demo, link);
+        }
+
+        [Fact]
+        public async Task AdmissionPaymentLink_Lasts48Hours_AndRegenerateReplacesIt()
+        {
+            // Client (2026-10-16): links valid 48 hours; counsellor can regenerate on the same invoice.
+            var (admission, demo, link) = await SeedAdmissionLinkAsync();
+            var oldToken = link.PaymentUrl.Split("/pay/")[1];
+            Assert.Contains("48 hours", link.ShareMessage);
+            Assert.NotNull(link.Booking.PaymentLinkExpiresAtUtc);
+            Assert.NotNull(await admission.GetPublicPaymentAsync(oldToken));
+
+            var fresh = await admission.RegenerateLinkAsync(demo.Id);
+            var newToken = fresh.PaymentUrl.Split("/pay/")[1];
+            Assert.NotEqual(oldToken, newToken);
+            Assert.Equal(link.Booking.InvoiceId, fresh.Booking.InvoiceId); // same invoice
+            await Assert.ThrowsAsync<NotFoundException>(() => admission.GetPublicPaymentAsync(oldToken));
+            Assert.NotNull(await admission.GetPublicPaymentAsync(newToken));
+
+            var invoice = await _db.Context.Invoices.SingleAsync(i => i.Id == fresh.Booking.InvoiceId);
+            invoice.PaymentLinkExpiresAtUtc = DateTime.UtcNow.AddMinutes(-1);
+            await _db.Context.SaveChangesAsync();
+            var expired = await Assert.ThrowsAsync<NotFoundException>(() => admission.GetPublicPaymentAsync(newToken));
+            Assert.Contains("expired", expired.Message);
+        }
+
+        [Fact]
+        public async Task DemoFollowUpEmails_GoTwoDaysAfterTheDemo_ThenEvery15Days_UntilEnrolled()
+        {
+            var (_, demo, _) = await SeedAdmissionLinkAsync();
+            var booking = await _db.Context.DemoBookings.Include(b => b.ClassSession).SingleAsync(b => b.Id == demo.Id);
+            var demoEnd = DateTime.UtcNow.AddDays(-3);
+            booking.ClassSession!.Status = SessionStatus.Completed;
+            booking.ClassSession.ScheduledStartAtUtc = demoEnd.AddMinutes(-30);
+            booking.ClassSession.ScheduledEndAtUtc = demoEnd;
+            booking.ConversionStatus = ConversionStatus.FollowUpInProgress;
+            await _db.Context.SaveChangesAsync();
+            var services = new Microsoft.Extensions.DependencyInjection.ServiceCollection();
+            Microsoft.Extensions.DependencyInjection.ServiceCollectionServiceExtensions.AddSingleton(services, _db.UnitOfWork);
+            Microsoft.Extensions.DependencyInjection.ServiceCollectionServiceExtensions.AddSingleton<IEmailTemplateService>(services, _emailTemplates);
+            Microsoft.Extensions.DependencyInjection.ServiceCollectionServiceExtensions.AddSingleton<iucs.readernest.application.Common.Interfaces.IEmailSender>(services, _emailSender);
+            var provider = Microsoft.Extensions.DependencyInjection.ServiceCollectionContainerBuilderExtensions.BuildServiceProvider(services);
+            var now = DateTime.UtcNow;
+            int SentTo() => _emailSender.Sent.Count(m => m.To == demo.ParentEmail);
+            var before = SentTo();
+
+            Assert.Equal(1, await iucs.readernest.api.Services.DemoFollowUpBackgroundService.RunCycleAsync(provider, now, default));
+            Assert.Equal(0, await iucs.readernest.api.Services.DemoFollowUpBackgroundService.RunCycleAsync(provider, now.AddDays(1), default));
+            Assert.Equal(1, await iucs.readernest.api.Services.DemoFollowUpBackgroundService.RunCycleAsync(provider, now.AddDays(15), default));
+            Assert.Equal(before + 2, SentTo());
+
+            var tracked = await _db.Context.DemoBookings.SingleAsync(b => b.Id == demo.Id);
+            tracked.ConversionStatus = ConversionStatus.Enrolled;
+            await _db.Context.SaveChangesAsync();
+            Assert.Equal(0, await iucs.readernest.api.Services.DemoFollowUpBackgroundService.RunCycleAsync(provider, now.AddDays(31), default));
         }
 
         /// <summary>Client request 2026-10-02: two kids in one demo each need their own payment link.</summary>

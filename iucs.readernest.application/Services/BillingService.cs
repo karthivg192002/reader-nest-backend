@@ -1967,6 +1967,8 @@ namespace iucs.readernest.application.Services
                 Url = link.Url,
                 GatewayReference = link.GatewayReference,
                 AmountDue = invoice.Amount - invoice.AmountPaid,
+                // The gateway itself closes the link then (see the adapters' expiry field).
+                ExpiresAtUtc = PaymentLinkRules.NewExpiryUtc(),
             };
         }
 
@@ -2138,6 +2140,63 @@ namespace iucs.readernest.application.Services
                 cancellationToken);
 
             return ToDto(await SubscriptionQuery().FirstAsync(s => s.Id == id, cancellationToken));
+        }
+
+        public async Task<InvoiceDto> CancelInvoiceAsync(Guid invoiceId, CancelInvoiceRequest request, CancellationToken cancellationToken = default)
+        {
+            var invoice = await _unitOfWork.Repository<Invoice>().GetByIdAsync(invoiceId, cancellationToken)
+                ?? throw new NotFoundException(nameof(Invoice), invoiceId);
+
+            if (invoice.Status is InvoiceStatus.Paid or InvoiceStatus.Cancelled)
+            {
+                throw new DomainValidationException($"Invoice '{invoice.InvoiceNumber}' is already {invoice.Status}.");
+            }
+            if (invoice.AmountPaid > 0)
+            {
+                throw new DomainValidationException(
+                    "Part of this invoice has already been paid, so it can't be cancelled. Refund that payment first, or record the rest.");
+            }
+
+            invoice.Status = InvoiceStatus.Cancelled;
+            _unitOfWork.Repository<Invoice>().Update(invoice);
+
+            // Nothing is owed any more, so it can't keep a family suspended.
+            var suspensions = await _unitOfWork.Repository<FeeSuspension>().TrackedQuery()
+                .Where(s => s.InvoiceId == invoice.Id && s.Status == SuspensionStatus.Active)
+                .ToListAsync(cancellationToken);
+            foreach (var suspension in suspensions)
+            {
+                suspension.Status = SuspensionStatus.Lifted;
+                suspension.LiftedAtUtc = DateTime.UtcNow;
+            }
+
+            // A parent who isn't enrolling would otherwise be billed again next cycle.
+            var stoppedSubscription = false;
+            if (request.StopSubscription && invoice.SubscriptionId is { } subscriptionId)
+            {
+                var subscription = await _unitOfWork.Repository<Subscription>().GetByIdAsync(subscriptionId, cancellationToken);
+                if (subscription is not null && subscription.Status == SubscriptionStatus.Active)
+                {
+                    subscription.Status = SubscriptionStatus.Cancelled;
+                    subscription.CancelledAtUtc = DateTime.UtcNow;
+                    subscription.NextBillingAtUtc = null;
+                    _unitOfWork.Repository<Subscription>().Update(subscription);
+                    stoppedSubscription = true;
+                }
+            }
+
+            await _auditLog.StageAsync(AuditAction.Update, nameof(Invoice), invoice.Id.ToString(),
+                changesJson: System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    note = "Invoice cancelled",
+                    reason = string.IsNullOrWhiteSpace(request.Reason) ? null : request.Reason.Trim(),
+                    stoppedSubscription,
+                    liftedSuspensions = suspensions.Count,
+                }),
+                cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return (await WithDtoIncludes(_unitOfWork.Repository<Invoice>().Query()).FirstAsync(i => i.Id == invoice.Id, cancellationToken)).ToDto();
         }
 
         public async Task<SubscriptionDto> CancelSubscriptionAsync(Guid id, CancellationToken cancellationToken = default)

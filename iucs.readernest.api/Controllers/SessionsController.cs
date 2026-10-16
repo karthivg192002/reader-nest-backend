@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using iucs.readernest.api.Auth;
 using iucs.readernest.application.Common.Interfaces;
@@ -438,18 +439,34 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _sessionService.ListAllRecordingsAsync(page <= 0 ? 1 : page, pageSize <= 0 ? 20 : pageSize, date, null, cancellationToken));
         }
 
-        /// <summary>Admin only: every member's Personal Meeting Room recordings, newest first.
-        /// Each owner sees only their own (GET /api/users/me/meeting-room/recordings); Admin
-        /// oversees all of them from the Recordings page.</summary>
+        /// <summary>Admin and the Founder Dashboard: every member's Personal Meeting Room recordings,
+        /// newest first. Each owner sees only their own (GET /api/users/me/meeting-room/recordings).
+        /// Deleting one stays Admin only (below).</summary>
         [HttpGet("recordings/personal")]
-        [Authorize(Roles = nameof(UserRole.Admin))]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.SubAdmin)}")]
         public async Task<ActionResult<iucs.readernest.application.Dto.Common.PagedResult<PersonalRoomRecordingDto>>> ListPersonalRoomRecordings(
             [FromQuery] int page,
             [FromQuery] int pageSize,
+            [FromServices] iucs.readernest.domain.Repository.IUnitOfWork unitOfWork,
             CancellationToken cancellationToken)
         {
+            // Client (2026-10-16): the Founder Dashboard role sees these too; no other Sub Admin.
+            if (User.IsInRole(nameof(UserRole.SubAdmin)))
+            {
+                var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+                var isFounder = await unitOfWork.Repository<iucs.readernest.domain.Entities.Users.User>().Query()
+                    .AnyAsync(u => u.Id == userId && u.RoleDefinition != null && u.RoleDefinition.Name == FounderRoleName, cancellationToken);
+                if (!isFounder)
+                {
+                    return Forbid();
+                }
+            }
+
             return Ok(await _sessionService.ListAllPersonalRoomRecordingsAsync(page <= 0 ? 1 : page, pageSize <= 0 ? 20 : pageSize, cancellationToken));
         }
+
+        /// <summary>The Founder Dashboard's role (DatabaseInitializer's "admin-management" preset).</summary>
+        private const string FounderRoleName = "admin-management";
 
         /// <summary>Admin only: removes any member's Personal Meeting Room recording (the record; the file stays in storage).</summary>
         [HttpDelete("recordings/personal/{recordingId:guid}")]

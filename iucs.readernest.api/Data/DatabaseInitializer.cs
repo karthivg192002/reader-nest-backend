@@ -71,6 +71,7 @@ namespace iucs.readernest.api.Data
             await ReconcileWelcomeCredentialsPinTemplateAsync(context);
             await EnsureEmailTemplatesMenuAsync(context);
             await EnsureProgressReportEmailTemplateAsync(context);
+            await EnsureDemoFollowUpEmailTemplateAsync(context);
             await EnsureDemoScheduledTeacherEmailTemplateAsync(context);
             await EnsurePinResetEmailTemplateAsync(context);
             await EnsureParentFeedbackEmailTemplateAsync(context);
@@ -2378,6 +2379,34 @@ namespace iucs.readernest.api.Data
                 SortOrder = (resources?.SortOrder ?? 0) + 1,
                 IsActive = true,
                 RequiredModule = PermissionModule.ContentAccessManagement.ToString(),
+            });
+        }
+
+        /// <summary>
+        /// SeedEmailTemplatesAsync is insert-only, so a live DB that predates the automatic demo
+        /// follow-up email (client 2026-10-16) never picks it up on its own -- inserts just the
+        /// "demo-follow-up" row if missing.
+        /// </summary>
+        private static async Task EnsureDemoFollowUpEmailTemplateAsync(ReaderNestDbContext context)
+        {
+            if (context.EmailTemplates.Local.Any(t => t.Key == "demo-follow-up") ||
+                await context.EmailTemplates.AnyAsync(t => t.Key == "demo-follow-up"))
+            {
+                return;
+            }
+
+            var seed = EmailTemplateSeedData.All.First(s => s.Key == "demo-follow-up");
+            context.EmailTemplates.Add(new EmailTemplate
+            {
+                Key = seed.Key,
+                Name = seed.Name,
+                Description = seed.Description,
+                Category = seed.Category,
+                Subject = seed.Subject,
+                HtmlBody = seed.HtmlBody,
+                PlaceholdersJson = JsonSerializer.Serialize(seed.Placeholders),
+                IsActive = true,
+                IsSystem = true,
             });
         }
 
