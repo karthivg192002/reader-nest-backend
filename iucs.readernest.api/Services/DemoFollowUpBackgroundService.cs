@@ -22,6 +22,7 @@ namespace iucs.readernest.api.Services
         private static readonly TimeSpan Interval = TimeSpan.FromHours(1);
         public static readonly TimeSpan FirstEmailAfter = TimeSpan.FromDays(2);
         public static readonly TimeSpan RepeatEvery = TimeSpan.FromDays(15);
+        private static readonly TimeSpan RepeatTolerance = TimeSpan.FromHours(3);
 
         /// <summary>A demo older than this gets no first email -- no blast to every old lead on day one.</summary>
         public static readonly TimeSpan StartWindow = TimeSpan.FromDays(60);
@@ -80,7 +81,9 @@ namespace iucs.readernest.api.Services
 
             var firstDueBefore = nowUtc - FirstEmailAfter;
             var oldestFirst = nowUtc - StartWindow;
-            var repeatDueBefore = nowUtc - RepeatEvery;
+            // A few hours of slack: the daily run lands at a slightly different minute each day, so an
+            // exact 15 x 24h comparison would push some parents to day 16.
+            var repeatDueBefore = nowUtc - RepeatEvery + RepeatTolerance;
 
             var due = await unitOfWork.Repository<DemoBooking>().TrackedQuery()
                 .Include(b => b.ClassSession)
