@@ -66,6 +66,8 @@ namespace iucs.readernest.api.Services.Payments
                     ["invoiceId"] = invoice.Id.ToString(),
                     ["department"] = account.Department?.Name ?? account.Name,
                 },
+                // 48-hour links (client 2026-10-16), ISO 8601 with offset as Cashfree expects.
+                link_expiry_time = new DateTimeOffset(PaymentLinkRules.NewExpiryUtc()).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture),
             });
 
             var client = _httpClientFactory.CreateClient(nameof(CashfreeGateway));

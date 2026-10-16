@@ -323,7 +323,9 @@ namespace iucs.readernest.application.Services
                 // the raw gateway link let a new parent pay without them) -- so the link is the
                 // portal's /pay page, which shows the Terms and then opens the gateway.
                 var frontendBase = (_configuration["Frontend:BaseUrl"] ?? "https://thereadernest.in").TrimEnd('/');
-                paymentLinkUrl = $"{frontendBase}/pay/{InvoicePayToken.Create(invoice.Id, _configuration["Jwt:SigningKey"])}";
+                var trackedInvoice = await _unitOfWork.Repository<Invoice>().GetByIdAsync(invoice.Id, cancellationToken);
+                paymentLinkUrl = $"{frontendBase}/pay/{InvoicePayToken.Issue(trackedInvoice!, _configuration["Jwt:SigningKey"])}";
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
             }
             else if (invoice is not null && amountDue > 0)
             {

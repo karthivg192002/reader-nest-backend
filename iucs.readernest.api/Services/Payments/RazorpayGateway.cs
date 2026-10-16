@@ -59,6 +59,8 @@ namespace iucs.readernest.api.Services.Payments
                 reference_id = $"{invoice.InvoiceNumber}-{Guid.NewGuid():N}"[..40],
                 description = $"{brandName} — invoice {invoice.InvoiceNumber} ({account.Department?.Name ?? account.Name})",
                 notes = new { invoiceId = invoice.Id.ToString(), department = account.Department?.Name ?? account.Name },
+                // 48-hour links (client 2026-10-16): Razorpay marks it expired after this.
+                expire_by = new DateTimeOffset(PaymentLinkRules.NewExpiryUtc()).ToUnixTimeSeconds(),
             });
 
             var client = _httpClientFactory.CreateClient(nameof(RazorpayGateway));

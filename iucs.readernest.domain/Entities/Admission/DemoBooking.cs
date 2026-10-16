@@ -92,6 +92,12 @@ namespace iucs.readernest.domain.Entities.Admission
         /// </summary>
         public DateTime? ParentJoinedAtUtc { get; set; }
 
+        /// <summary>Automatic "would you like to enroll?" emails sent after the demo (DemoFollowUpBackgroundService).</summary>
+        public int FollowUpEmailCount { get; set; }
+
+        /// <summary>When the last automatic follow-up email went out; the next one is due 15 days later.</summary>
+        public DateTime? LastFollowUpEmailAtUtc { get; set; }
+
         public ICollection<DemoParticipant> Participants { get; set; } = new List<DemoParticipant>();
     }
 }

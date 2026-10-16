@@ -212,6 +212,19 @@ namespace iucs.readernest.application.Common
                 // never got any email at all -- they'd only find out by checking their dashboard,
                 // and had no join link of their own even then. Uses the same fixed room (and
                 // therefore the same JoinUrl-worthy link) the parent's demo-confirmed email gets.
+                // Client (2026-10-16): parents who attended a demo but haven't enrolled get this
+                // automatically, 2 days after the demo and then every 15 days, until they enroll.
+                New("demo-follow-up", "Demo Follow-Up (Parent, automatic)",
+                    "Sent automatically to a parent whose child attended a demo but hasn't enrolled: 2 days after the demo, then every 15 days. Stops once the child is enrolled or the lead is marked Not interested.",
+                    NotificationType.General, "Would you like to enroll {{ChildName}} at {{OrgName}}?",
+                    """
+                    <p>Hello {{ParentName}},</p>
+                    <p>Thank you for attending the demo class for <strong>{{ChildName}}</strong> on {{DemoDate}}. We hope {{ChildName}} enjoyed it!</p>
+                    <p>Would you like to go ahead and enroll {{ChildName}}, or are you still considering it?</p>
+                    <p>Just reply to this email and let us know -- your admission counsellor will be happy to answer any questions and help you get started.</p>
+                    """,
+                    "ParentName", "ChildName", "DemoDate"),
+
                 New("demo-scheduled-teacher", "Demo Class Scheduled (Teacher)",
                     "Sent to the assigned teacher when a demo class is booked, with their join link for the parent's fixed meeting room.",
                     NotificationType.BookingConfirmation, "You have a demo class scheduled",

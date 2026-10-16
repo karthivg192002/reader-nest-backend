@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using iucs.readernest.domain.Entities.Billing;
 
 namespace iucs.readernest.application.Common
 {
@@ -17,30 +18,62 @@ namespace iucs.readernest.application.Common
         // Only for a deployment with no Jwt:SigningKey (local dev / tests); production always sets one.
         private const string FallbackSecret = "reader-nest-invoice-pay-link";
 
-        public static string Create(Guid invoiceId, string? secret) =>
-            Prefix + invoiceId.ToString("N") + Sign(invoiceId, secret);
+        /// <summary>
+        /// Issues a fresh link for <paramref name="invoice"/> (tracked; the caller saves): a new
+        /// per-link code, so any earlier link for it stops working, valid for
+        /// <see cref="PaymentLinkRules.ValidHours"/> hours.
+        /// </summary>
+        public static string Issue(Invoice invoice, string? secret)
+        {
+            invoice.PaymentLinkCode = Guid.NewGuid().ToString("N")[..16];
+            invoice.PaymentLinkExpiresAtUtc = PaymentLinkRules.NewExpiryUtc();
+            return Prefix + invoice.Id.ToString("N") + Sign(invoice.Id, invoice.PaymentLinkCode, secret);
+        }
 
         public static bool LooksLikeInvoiceToken(string token) =>
             token.Length == 1 + 32 + SignatureLength && token[0] == Prefix;
 
-        /// <summary>The invoice id, or null for anything that isn't a genuine, unaltered code.</summary>
-        public static Guid? Read(string token, string? secret)
+        /// <summary>The invoice id a code claims to be for (not yet verified -- see <see cref="IsGenuine"/>).</summary>
+        public static Guid? PeekInvoiceId(string token) =>
+            LooksLikeInvoiceToken(token) && Guid.TryParseExact(token.Substring(1, 32), "N", out var invoiceId) ? invoiceId : null;
+
+        /// <summary>
+        /// Whether the code is an unaltered one for the invoice's CURRENT link. A link made before
+        /// per-link codes existed (no code stored yet) is still accepted until the invoice gets a
+        /// fresh one; after that only the newest link works.
+        /// </summary>
+        public static bool IsGenuine(string token, Guid invoiceId, string? currentCode, string? secret)
         {
-            if (!LooksLikeInvoiceToken(token) || !Guid.TryParseExact(token.Substring(1, 32), "N", out var invoiceId))
+            if (PeekInvoiceId(token) != invoiceId)
             {
-                return null;
+                return false;
             }
 
-            var expected = Encoding.ASCII.GetBytes(Sign(invoiceId, secret));
+            var expected = Encoding.ASCII.GetBytes(Sign(invoiceId, currentCode, secret));
             var actual = Encoding.ASCII.GetBytes(token[33..].ToLowerInvariant());
-            return CryptographicOperations.FixedTimeEquals(expected, actual) ? invoiceId : null;
+            return CryptographicOperations.FixedTimeEquals(expected, actual);
         }
 
-        private static string Sign(Guid invoiceId, string? secret)
+        private static string Sign(Guid invoiceId, string? code, string? secret)
         {
             var key = Encoding.UTF8.GetBytes(string.IsNullOrWhiteSpace(secret) ? FallbackSecret : secret);
-            var hash = HMACSHA256.HashData(key, Encoding.UTF8.GetBytes("invoice-pay:" + invoiceId.ToString("N")));
+            var payload = "invoice-pay:" + invoiceId.ToString("N") + (code is null ? string.Empty : ":" + code);
+            var hash = HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(payload));
             return Convert.ToHexString(hash).ToLowerInvariant()[..SignatureLength];
         }
+    }
+
+    /// <summary>Client (2026-10-16): a payment link is valid for 48 hours from when it's made.</summary>
+    public static class PaymentLinkRules
+    {
+        public const int ValidHours = 48;
+
+        public static DateTime NewExpiryUtc() => DateTime.UtcNow.AddHours(ValidHours);
+
+        public const string ExpiredMessage =
+            "This payment link has expired (links are valid for 48 hours). Please ask your counsellor for a new one.";
+
+        /// <summary>Line added to every message staff send with a link.</summary>
+        public const string ValidityNote = "Please note: this payment link is valid for 48 hours only.";
     }
 }

@@ -19,6 +19,9 @@ namespace iucs.readernest.application.Services
     {
         Task<AdmissionPaymentLinkDto> SendPaymentLinkAsync(Guid demoBookingId, SendAdmissionPaymentLinkRequest request, CancellationToken cancellationToken = default);
 
+        /// <summary>A fresh 48-hour link for the lead's existing invoice; the previous link stops working.</summary>
+        Task<AdmissionPaymentLinkDto> RegenerateLinkAsync(Guid demoBookingId, CancellationToken cancellationToken = default);
+
         Task<PublicAdmissionPaymentDto> GetPublicPaymentAsync(string token, CancellationToken cancellationToken = default);
 
         Task<StartPublicAdmissionPaymentResultDto> StartPublicPaymentAsync(string token, StartPublicAdmissionPaymentRequest request, CancellationToken cancellationToken = default);
@@ -160,28 +163,70 @@ namespace iucs.readernest.application.Services
             tracked.TermsAcceptedAtUtc = null;
             tracked.PaymentLinkUrl = $"{BaseUrl()}/pay/{tracked.PaymentToken}";
             tracked.ConversionStatus = ConversionStatus.PaymentPending;
+            var trackedInvoice = await _unitOfWork.Repository<Invoice>().GetByIdAsync(invoice.Id, cancellationToken);
+            trackedInvoice!.PaymentLinkExpiresAtUtc = PaymentLinkRules.NewExpiryUtc();
             await _auditLog.StageAsync(AuditAction.Update, nameof(DemoBooking), tracked.Id.ToString(),
                 $"{{\"note\":\"Admission payment link issued\",\"amount\":{amount}}}", cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
+            return await BuildLinkResultAsync(tracked, course, invoice.Currency, amount, cancellationToken);
+        }
+
+        public async Task<AdmissionPaymentLinkDto> RegenerateLinkAsync(Guid demoBookingId, CancellationToken cancellationToken = default)
+        {
+            // Same visibility as every other demo screen (a counsellor only sees their own leads).
+            await _demoBookingService.GetAsync(demoBookingId, cancellationToken);
+
+            var booking = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
+                .Include(b => b.Invoice)
+                .Include(b => b.Course)
+                .FirstOrDefaultAsync(b => b.Id == demoBookingId, cancellationToken)
+                ?? throw new NotFoundException(nameof(DemoBooking), demoBookingId);
+            if (booking.PaymentToken is null || booking.Invoice is null || booking.Course is null)
+            {
+                throw new DomainValidationException("No payment link has been sent for this lead yet -- use Send payment link first.");
+            }
+            if (booking.Invoice.Status is InvoiceStatus.Paid or InvoiceStatus.Cancelled)
+            {
+                throw new DomainValidationException($"This invoice is already {booking.Invoice.Status}, so there's nothing to pay.");
+            }
+
+            // A brand-new link, valid for another 48 hours; the old one stops working.
+            booking.PaymentToken = NewToken();
+            booking.PaymentLinkUrl = $"{BaseUrl()}/pay/{booking.PaymentToken}";
+            booking.TermsAcceptedAtUtc = null;
+            booking.Invoice.PaymentLinkExpiresAtUtc = PaymentLinkRules.NewExpiryUtc();
+            await _auditLog.StageAsync(AuditAction.Update, nameof(DemoBooking), booking.Id.ToString(),
+                "{\"note\":\"Admission payment link regenerated\"}", cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            var outstanding = booking.Invoice.Amount - booking.Invoice.AmountPaid;
+            return await BuildLinkResultAsync(booking, booking.Course, booking.Invoice.Currency, outstanding, cancellationToken);
+        }
+
+        private async Task<AdmissionPaymentLinkDto> BuildLinkResultAsync(
+            DemoBooking booking, Course course, string currency, decimal amount, CancellationToken cancellationToken)
+        {
             var shareMessage = string.Join("\n",
-                $"Hello {tracked.ParentName},",
+                $"Hello {booking.ParentName},",
                 "",
-                tracked.ClassSessionId is null
-                    ? $"Thank you for choosing The Reader Nest. To confirm {tracked.ChildName}'s admission for {course.Name}, please complete the payment of {invoice.Currency} {amount:0.##} here:"
-                    : $"Thank you for attending the demo class. To confirm {tracked.ChildName}'s admission for {course.Name}, please complete the payment of {invoice.Currency} {amount:0.##} here:",
-                tracked.PaymentLinkUrl,
+                booking.ClassSessionId is null
+                    ? $"Thank you for choosing The Reader Nest. To confirm {booking.ChildName}'s admission for {course.Name}, please complete the payment of {currency} {amount:0.##} here:"
+                    : $"Thank you for attending the demo class. To confirm {booking.ChildName}'s admission for {course.Name}, please complete the payment of {currency} {amount:0.##} here:",
+                booking.PaymentLinkUrl,
+                "",
+                PaymentLinkRules.ValidityNote,
                 "",
                 "You'll be asked to accept our Terms & Conditions before paying. Once we verify your payment, your login details will be emailed to you automatically.");
 
             return new AdmissionPaymentLinkDto
             {
-                Booking = await _demoBookingService.GetAsync(demoBookingId, cancellationToken),
-                PaymentUrl = tracked.PaymentLinkUrl,
+                Booking = await _demoBookingService.GetAsync(booking.Id, cancellationToken),
+                PaymentUrl = booking.PaymentLinkUrl!,
                 CourseName = course.Name,
                 ListPrice = course.Price,
                 Amount = amount,
-                Currency = invoice.Currency,
+                Currency = currency,
                 ShareMessage = shareMessage,
             };
         }
@@ -251,8 +296,7 @@ namespace iucs.readernest.application.Services
 
         public async Task<PaymentLinkDto?> TermsFirstPayLinkAsync(Guid invoiceId, CancellationToken cancellationToken = default)
         {
-            var invoice = await _unitOfWork.Repository<Invoice>().Query()
-                .FirstOrDefaultAsync(i => i.Id == invoiceId, cancellationToken);
+            var invoice = await _unitOfWork.Repository<Invoice>().GetByIdAsync(invoiceId, cancellationToken);
             if (invoice is null || invoice.Status is InvoiceStatus.Paid or InvoiceStatus.Cancelled)
             {
                 return null;
@@ -265,11 +309,16 @@ namespace iucs.readernest.application.Services
                 return null;
             }
 
+            // Every click makes a fresh 48-hour link; the one shared before stops working.
+            var code = InvoicePayToken.Issue(invoice, _configuration["Jwt:SigningKey"]);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
             return new PaymentLinkDto
             {
                 InvoiceId = invoice.Id,
                 InvoiceNumber = invoice.InvoiceNumber,
-                Url = $"{BaseUrl()}/pay/{InvoicePayToken.Create(invoiceId, _configuration["Jwt:SigningKey"])}",
+                Url = $"{BaseUrl()}/pay/{code}",
+                ExpiresAtUtc = invoice.PaymentLinkExpiresAtUtc,
                 GatewayReference = string.Empty,
                 AmountDue = invoice.Amount - invoice.AmountPaid,
             };
@@ -429,17 +478,23 @@ namespace iucs.readernest.application.Services
             if (!string.IsNullOrWhiteSpace(token) && InvoicePayToken.LooksLikeInvoiceToken(token))
             {
                 // A staff-shared invoice link (Payments, manual admission) for a first-time parent.
-                var invoiceId = InvoicePayToken.Read(token, _configuration["Jwt:SigningKey"])
+                var invoiceId = InvoicePayToken.PeekInvoiceId(token)
                     ?? throw new NotFoundException("This payment link is not valid.");
                 var invoice = await _unitOfWork.Repository<Invoice>().Query()
                     .Include(i => i.Course)
                     .Include(i => i.Child)
                     .Include(i => i.ParentProfile).ThenInclude(p => p.User)
                     .FirstOrDefaultAsync(i => i.Id == invoiceId, cancellationToken);
-                if (invoice is null || invoice.Status == InvoiceStatus.Cancelled)
+                if (invoice is null || !InvoicePayToken.IsGenuine(token, invoiceId, invoice.PaymentLinkCode, _configuration["Jwt:SigningKey"]))
+                {
+                    // An older link replaced by a regenerated one lands here too.
+                    throw new NotFoundException("This payment link is no longer valid. Please ask your counsellor for a new one.");
+                }
+                if (invoice.Status == InvoiceStatus.Cancelled)
                 {
                     throw new NotFoundException("This payment link is no longer valid. Please ask your counsellor for a new one.");
                 }
+                EnsureLinkNotExpired(invoice);
 
                 var demo = await _unitOfWork.Repository<DemoBooking>().Query()
                     .FirstOrDefaultAsync(b => b.InvoiceId == invoice.Id, cancellationToken);
@@ -476,8 +531,19 @@ namespace iucs.readernest.application.Services
             {
                 throw new NotFoundException("This payment link is no longer valid. Please ask your counsellor for a new one.");
             }
+            EnsureLinkNotExpired(booking.Invoice);
 
             return booking;
+        }
+
+        /// <summary>48-hour links (client 2026-10-16). A paid invoice still opens, so the parent can see it's done.</summary>
+        private static void EnsureLinkNotExpired(Invoice invoice)
+        {
+            if (invoice.Status != InvoiceStatus.Paid
+                && invoice.PaymentLinkExpiresAtUtc is { } expiresAt && expiresAt < DateTime.UtcNow)
+            {
+                throw new NotFoundException(PaymentLinkRules.ExpiredMessage);
+            }
         }
 
         private static string NewToken() => Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();

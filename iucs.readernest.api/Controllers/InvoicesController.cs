@@ -71,6 +71,17 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _billingService.RecordPaymentAsync(id, request, cancellationToken));
         }
 
+        /// <summary>Cancels an unpaid invoice (parent no longer enrolling) so nothing is expected against it.</summary>
+        [HttpPost("{id:guid}/cancel")]
+        [HasPermission(PermissionModule.BillingFinance, PermissionAction.Approve)]
+        public async Task<ActionResult<InvoiceDto>> Cancel(
+            Guid id,
+            CancelInvoiceRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _billingService.CancelInvoiceAsync(id, request, cancellationToken));
+        }
+
         /// <summary>Successful payments on this invoice — what a refund can be requested against.</summary>
         [HttpGet("{id:guid}/transactions")]
         [HasPermission(PermissionModule.BillingFinance, PermissionAction.View)]

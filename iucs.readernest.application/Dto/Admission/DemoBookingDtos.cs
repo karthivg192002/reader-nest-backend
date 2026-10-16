@@ -213,6 +213,9 @@ namespace iucs.readernest.application.Dto.Admission
 
         public decimal? InvoiceAmountPaid { get; set; }
 
+        /// <summary>When the payment link shared with the parent stops working (48 hours after it was made).</summary>
+        public DateTime? PaymentLinkExpiresAtUtc { get; set; }
+
         public DateTime? TermsAcceptedAtUtc { get; set; }
 
         public DateTime? PaymentVerifiedAtUtc { get; set; }

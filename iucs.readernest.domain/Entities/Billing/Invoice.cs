@@ -67,6 +67,15 @@ namespace iucs.readernest.domain.Entities.Billing
 
         public DateTime? PaidAtUtc { get; set; }
 
+        /// <summary>When the current payment link for this invoice stops working (48 hours after it
+        /// was made, client 2026-10-16). Null = no link issued since this rule began.</summary>
+        public DateTime? PaymentLinkExpiresAtUtc { get; set; }
+
+        /// <summary>Per-link code inside the /pay/i... link (InvoicePayToken); a new one on every
+        /// regenerate, so an older link for the same invoice stops working.</summary>
+        [System.ComponentModel.DataAnnotations.MaxLength(32)]
+        public string? PaymentLinkCode { get; set; }
+
         /// <summary>
         /// True only for invoices BillingBackgroundService generated for a subscription's
         /// recurring cycle. Not settable through CreateInvoiceRequest/POST /api/invoices —

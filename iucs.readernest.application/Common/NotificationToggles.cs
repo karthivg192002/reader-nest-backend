@@ -13,6 +13,7 @@ namespace iucs.readernest.application.Common
         public const string FeeReminders = "notify.feeReminders";
         public const string LeaveRequests = "notify.leaveRequests";
         public const string WeeklyDigest = "notify.weeklyDigest";
+        public const string DemoFollowUps = "notify.demoFollowUps";
 
         public static async Task<bool> IsEnabledAsync(
             IUnitOfWork unitOfWork,

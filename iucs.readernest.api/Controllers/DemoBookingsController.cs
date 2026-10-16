@@ -206,6 +206,17 @@ namespace iucs.readernest.api.Controllers
             return Ok(await admissionPaymentService.SendPaymentLinkAsync(id, request, cancellationToken));
         }
 
+        /// <summary>Payment links last 48 hours: makes a fresh one for the same invoice to copy and share again.</summary>
+        [HttpPost("{id:guid}/payment-link/regenerate")]
+        [HasPermission(PermissionModule.Admission, PermissionAction.Edit)]
+        public async Task<ActionResult<AdmissionPaymentLinkDto>> RegeneratePaymentLink(
+            Guid id,
+            [FromServices] IAdmissionPaymentService admissionPaymentService,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await admissionPaymentService.RegenerateLinkAsync(id, cancellationToken));
+        }
+
         /// <summary>
         /// The counsellor has verified the parent's payment and clicks Enroll: the parent's login
         /// is emailed automatically and the lead moves on to ReadyForEnrollment.

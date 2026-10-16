@@ -932,6 +932,10 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("department_id");
 
+                    b.Property<int>("FollowUpEmailCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("follow_up_email_count");
+
                     b.Property<string>("FollowUpNotes")
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)")
@@ -944,6 +948,10 @@ namespace iucs.readernest.domain.Migrations
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("boolean")
                         .HasColumnName("is_deleted");
+
+                    b.Property<DateTime?>("LastFollowUpEmailAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_follow_up_email_at_utc");
 
                     b.Property<DateOnly?>("NextFollowUpOn")
                         .HasColumnType("date")
@@ -1644,6 +1652,15 @@ namespace iucs.readernest.domain.Migrations
                     b.Property<Guid>("PaymentAccountId")
                         .HasColumnType("uuid")
                         .HasColumnName("payment_account_id");
+
+                    b.Property<string>("PaymentLinkCode")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("payment_link_code");
+
+                    b.Property<DateTime?>("PaymentLinkExpiresAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("payment_link_expires_at_utc");
 
                     b.Property<string>("Status")
                         .IsRequired()

@@ -93,6 +93,9 @@ namespace iucs.readernest.application.Dto.Billing
         public DateTime IssuedAtUtc { get; set; }
 
         public DateTime? PaidAtUtc { get; set; }
+
+        /// <summary>When the payment link last shared for this invoice stops working; null = none issued yet.</summary>
+        public DateTime? PaymentLinkExpiresAtUtc { get; set; }
     }
 
     /// <summary>
@@ -317,6 +320,19 @@ namespace iucs.readernest.application.Dto.Billing
         public string GatewayReference { get; set; } = null!;
 
         public decimal AmountDue { get; set; }
+
+        /// <summary>When this link stops working (48 hours after it was made).</summary>
+        public DateTime? ExpiresAtUtc { get; set; }
+    }
+
+    public class CancelInvoiceRequest
+    {
+        /// <summary>Why it was cancelled (e.g. "Parent not interested"); kept in the audit log.</summary>
+        [System.ComponentModel.DataAnnotations.MaxLength(500)]
+        public string? Reason { get; set; }
+
+        /// <summary>Also stop the subscription this invoice belongs to, so no further invoices are raised.</summary>
+        public bool StopSubscription { get; set; } = true;
     }
 
     public class RecordPaymentRequest
