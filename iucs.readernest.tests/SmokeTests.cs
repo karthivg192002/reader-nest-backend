@@ -11519,6 +11519,63 @@ namespace iucs.readernest.tests
             Assert.Equal(tomorrow.Id, await CreateSessionService().ResolveCurrentSessionIdAsync(tomorrow.Id));
         }
 
+        // ---- Back-to-back classes for one child (live, 17 Oct 2026, Lekshana): at 1:30 the parent
+        // kept pressing Join on the 12:30 class, so parent and the 1:30 teacher sat in two rooms ----
+
+        private async Task<(User Parent, ClassSession Earlier, ClassSession Now)> SeedBackToBackClassesAsync(bool secondIsOnNow = true)
+        {
+            var (_, _, earlier) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var (_, _, next) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var (parent, enrollment) = await SeedFolderParentEnrolledAsync(earlier.BatchId!.Value);
+            _db.Context.Add(new BatchEnrollment { BatchId = next.BatchId!.Value, ChildId = enrollment.ChildId, Status = EnrollmentStatus.Active });
+
+            earlier.ScheduledStartAtUtc = DateTime.UtcNow.AddMinutes(-60);
+            earlier.ScheduledEndAtUtc = DateTime.UtcNow.AddMinutes(-15);
+            earlier.Status = SessionStatus.Completed;
+            earlier.MeetingRoomId = "trn-earlier";
+            var start = secondIsOnNow ? DateTime.UtcNow.AddMinutes(-1) : DateTime.UtcNow.AddHours(3);
+            next.ScheduledStartAtUtc = start;
+            next.ScheduledEndAtUtc = start.AddMinutes(45);
+            next.MeetingRoomId = "trn-now";
+            _db.Context.UpdateRange(earlier, next);
+            await _db.Context.SaveChangesAsync();
+            return (parent, earlier, next);
+        }
+
+        [Fact]
+        public async Task GetJitsiJoin_ParentJoiningAFinishedClass_WhileTheirChildHasAnotherOnNow_GetsTheOneOnNow()
+        {
+            var (parent, earlier, now) = await SeedBackToBackClassesAsync();
+
+            var join = await CreateSessionService().GetJitsiJoinAsync(earlier.Id, parent.Id);
+
+            Assert.Equal(now.Id, join.SessionId);
+            Assert.Equal("trn-now", join.Room);
+        }
+
+        [Fact]
+        public async Task GetJitsiJoin_ParentRejoiningAFinishedClass_WithNothingElseOnNow_StaysInIt()
+        {
+            // The deliberate "rejoin after the class ended" grace keeps working.
+            var (parent, earlier, _) = await SeedBackToBackClassesAsync(secondIsOnNow: false);
+
+            var join = await CreateSessionService().GetJitsiJoinAsync(earlier.Id, parent.Id);
+
+            Assert.Equal(earlier.Id, join.SessionId);
+            Assert.Equal("trn-earlier", join.Room);
+        }
+
+        [Fact]
+        public async Task GetJitsiJoin_ParentJoiningAClassStillRunning_IsNotRedirected()
+        {
+            var (parent, earlier, _) = await SeedBackToBackClassesAsync();
+            earlier.Status = SessionStatus.InProgress;   // ran over -- still going
+            _db.Context.Update(earlier);
+            await _db.Context.SaveChangesAsync();
+
+            Assert.Equal("trn-earlier", (await CreateSessionService().GetJitsiJoinAsync(earlier.Id, parent.Id)).Room);
+        }
+
         /// <summary>
         /// BUG-008. Reported again after BUG-007's DemoBooking-link fix above, this time for the
         /// far more common cause: a parent's (or teacher's) own portal tab was simply already

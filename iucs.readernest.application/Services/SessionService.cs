@@ -2076,6 +2076,51 @@ namespace iucs.readernest.application.Services
             return onNow ?? sessionId;
         }
 
+        /// <summary>
+        /// Confirmed live (17 Oct 2026, Lekshana): two classes back to back for one child, in two
+        /// different batches. Join stays open for hours after a class ends, so at 1:30 the parent
+        /// kept pressing Join on the 12:30 class -- its own room -- while the 1:30 teacher waited in
+        /// the 1:30 room; neither could see the other. When a parent joins a class that is already
+        /// over and one of their children (enrolled in that class's batch) has another class on
+        /// right now, that is the class they meant. Returns null when there is nothing to redirect.
+        /// </summary>
+        private async Task<ClassSession?> FindChildsClassOnNowAsync(ClassSession asked, Guid parentUserId, CancellationToken cancellationToken)
+        {
+            var now = DateTime.UtcNow;
+            var isOver = asked.Status == SessionStatus.Completed
+                || (asked.Status != SessionStatus.InProgress && now > asked.ScheduledEndAtUtc);
+            if (!isOver || asked.BatchId is not Guid batchId)
+            {
+                return null;
+            }
+
+            var childIds = await _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => e.BatchId == batchId && e.Status == EnrollmentStatus.Active)
+                .Join(_unitOfWork.Repository<Child>().Query(), e => e.ChildId, c => c.Id, (e, c) => c)
+                .Join(_unitOfWork.Repository<ParentProfile>().Query(), c => c.ParentProfileId, p => p.Id, (c, p) => new { c.Id, p.UserId })
+                .Where(x => x.UserId == parentUserId)
+                .Select(x => x.Id)
+                .ToListAsync(cancellationToken);
+            if (childIds.Count == 0)
+            {
+                return null;
+            }
+
+            var theirBatchIds = _unitOfWork.Repository<BatchEnrollment>().Query()
+                .Where(e => childIds.Contains(e.ChildId) && e.Status == EnrollmentStatus.Active)
+                .Select(e => e.BatchId);
+            var opensBy = now + OpenNowLeadIn;
+            return await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.Id != asked.Id
+                    && s.BatchId != null && theirBatchIds.Contains(s.BatchId.Value)
+                    && (s.Status == SessionStatus.Scheduled || s.Status == SessionStatus.CarriedForward || s.Status == SessionStatus.InProgress)
+                    && !string.IsNullOrEmpty(s.MeetingRoomId)
+                    && s.ScheduledStartAtUtc <= opensBy
+                    && s.ScheduledEndAtUtc >= now)
+                .OrderBy(s => s.ScheduledStartAtUtc)
+                .FirstOrDefaultAsync(cancellationToken);
+        }
+
         public async Task<JitsiJoinDto> GetJitsiJoinAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default)
         {
             // Confirmed live: a teacher and a student, each joining from their own portal after
@@ -2105,6 +2150,12 @@ namespace iucs.readernest.application.Services
             if (!await IsSessionParticipantAsync(session, userId, cancellationToken))
             {
                 throw new ForbiddenException("You do not have access to this session.");
+            }
+
+            if (user.Role == UserRole.Parent
+                && await FindChildsClassOnNowAsync(session, userId, cancellationToken) is ClassSession onNow)
+            {
+                session = onNow;
             }
 
             // Mirrors the frontend's own join-window rule (parent/utils.ts isJoinable: 10
