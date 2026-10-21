@@ -414,6 +414,28 @@ namespace iucs.readernest.api.Hubs
             await Clients.OthersInGroup(Group(sessionId)).SendAsync("MuteAll");
         }
 
+        /// <summary>
+        /// Teacher-only: mutes or unmutes one student's microphone (by connection id), the
+        /// per-student counterpart of MuteAll. Goes through the hub for the same reason as
+        /// MuteAll -- Jitsi's own remote mute needs Jitsi-moderator rights, and it cannot
+        /// unmute anyone at all.
+        /// </summary>
+        public async Task SetStudentMute(string sessionId, string connectionId, bool muted)
+        {
+            if (!IsTeacherInRoom(sessionId))
+            {
+                return;
+            }
+
+            // Same room-membership guard as SetBoardAccess: never address a connection in another class.
+            if (!Rooms.TryGetValue(sessionId, out var room) || !room.ContainsKey(connectionId))
+            {
+                return;
+            }
+
+            await Clients.Client(connectionId).SendAsync("SetMute", muted);
+        }
+
         // ---- chat (interactive panel) ----
 
         public async Task SendChat(string sessionId, string text)
