@@ -47,6 +47,8 @@ namespace iucs.readernest.tests
             log.Record("not json");
             log.Record("[1,2,3]");
             log.Record("""{"kind":"stroke"}""");
+            log.Record("""{"kind":5}""");
+            log.Record("""{"kind":"stroke","stroke":{"id":7,"persistent":true}}""");
             Assert.Empty(log.Snapshot());
 
             log.Record(Lasting);

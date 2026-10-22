@@ -48,9 +48,12 @@ namespace iucs.readernest.api.Hubs
                     temporaryOnly = root.TryGetProperty("temporaryOnly", out var only) && only.ValueKind == JsonValueKind.True;
                 }
             }
-            catch (JsonException)
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException)
             {
-                return; // not an op this log understands -- still relayed live, just not kept
+                // Not an op this log understands (bad JSON, or "kind"/"id" that isn't a string) --
+                // still relayed live, just not kept. It must never throw: SendAnnotation records
+                // before it relays, so an exception here would keep a mark off every child's screen.
+                return;
             }
 
             lock (_ops)
