@@ -32,6 +32,10 @@ namespace iucs.readernest.api.Hubs
         // participant from calling SendBoard directly (visible and callable from the browser's
         // own dev tools) regardless of whether they'd actually been granted access.
         private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> BoardAccessGrants = new();
+        // Screen annotation is intentionally a separate grant from whiteboard access. A teacher
+        // may let a child work on the board without letting them draw over a presented document.
+        // Keyed by stable participant key so the permission survives a SignalR reconnect.
+        private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> AnnotationAccessGrants = new();
         // Every board op sent so far this session, replayed (in order) to a connection that
         // joins after some were already drawn. SendBoard only ever relayed live to whoever was
         // ALREADY connected — a student who joined the call after the teacher started drawing
@@ -294,6 +298,10 @@ namespace iucs.readernest.api.Hubs
             {
                 await Clients.Caller.SendAsync("BoardAccess", true);
             }
+            if (role == "student" && AnnotationAccessGrants.TryGetValue(sessionId, out var annotationGrants) && annotationGrants.ContainsKey(participantKey))
+            {
+                await Clients.Caller.SendAsync("AnnotationAccess", true);
+            }
 
             // Lasting marks over the video stage that are still on everyone else's screen.
             if (AnnotationHistory.TryGetValue(sessionId, out var annotationLog))
@@ -407,10 +415,17 @@ namespace iucs.readernest.api.Hubs
         /// draws again.</summary>
         public async Task SendAnnotation(string sessionId, string opJson)
         {
-            // IsJoined is set only after JoinSession's participant/guest-token authorization.
-            // Children can therefore annotate without making this a blind relay for callers
-            // who merely know a session id.
             if (!IsJoined(sessionId))
+            {
+                return;
+            }
+
+            // The UI is not the security boundary: an old or modified client can invoke this
+            // hub method directly. Teachers always have access; students need the dedicated
+            // annotation grant (whiteboard access alone is deliberately insufficient).
+            var hasAccess = IsTeacherInRoom(sessionId)
+                || (ParticipantKeyFor(sessionId) is { } key && AnnotationAccessGrants.TryGetValue(sessionId, out var grants) && grants.ContainsKey(key));
+            if (!hasAccess)
             {
                 return;
             }
@@ -673,6 +688,33 @@ namespace iucs.readernest.api.Hubs
             await BroadcastRosterAsync(sessionId);
         }
 
+        /// <summary>Teacher-only screen-annotation permission toggle for one participant.</summary>
+        public async Task SetAnnotationAccess(string sessionId, string connectionId, bool allowed)
+        {
+            if (!IsTeacherInRoom(sessionId))
+            {
+                return;
+            }
+
+            if (!Rooms.TryGetValue(sessionId, out var room) || !room.TryGetValue(connectionId, out var target))
+            {
+                return;
+            }
+
+            var grants = AnnotationAccessGrants.GetOrAdd(sessionId, _ => new ConcurrentDictionary<string, byte>());
+            if (allowed)
+            {
+                grants[target.Key] = 0;
+            }
+            else
+            {
+                grants.TryRemove(target.Key, out _);
+            }
+
+            await Clients.Client(connectionId).SendAsync("AnnotationAccess", allowed);
+            await BroadcastRosterAsync(sessionId);
+        }
+
         // ---- helpers ----
 
         private async Task RemoveFromSessionAsync(string sessionId, bool wasExplicit)
@@ -727,6 +769,7 @@ namespace iucs.readernest.api.Hubs
                     Rooms.TryRemove(sessionId, out _);
                     Scores.TryRemove(sessionId, out _); // class over — scoreboard resets
                     BoardAccessGrants.TryRemove(sessionId, out _);
+                    AnnotationAccessGrants.TryRemove(sessionId, out _);
                     BoardHistory.TryRemove(sessionId, out _);
                     CurrentSlide.TryRemove(sessionId, out _);
                     PinnedParticipant.TryRemove(sessionId, out _);
@@ -778,6 +821,7 @@ namespace iucs.readernest.api.Hubs
             // real participants see -- it's a robot, not a classmate, and the frontend's roster
             // types/UI have no concept of a third role to render it correctly anyway.
             BoardAccessGrants.TryGetValue(sessionId, out var boardGrants);
+            AnnotationAccessGrants.TryGetValue(sessionId, out var annotationGrants);
             var roster = room
                 .Where(kv => kv.Value.Role != "observer")
                 .Select(kv => new
@@ -787,6 +831,7 @@ namespace iucs.readernest.api.Hubs
                     role = kv.Value.Role,
                     handRaised = kv.Value.HandRaised,
                     boardAccess = kv.Value.Role == "teacher" || (boardGrants is not null && boardGrants.ContainsKey(kv.Value.Key)),
+                    annotationAccess = kv.Value.Role == "teacher" || (annotationGrants is not null && annotationGrants.ContainsKey(kv.Value.Key)),
                 })
                 .OrderByDescending(p => p.role == "teacher")
                 .ThenBy(p => p.name)

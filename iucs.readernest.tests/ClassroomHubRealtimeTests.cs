@@ -90,6 +90,53 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task Annotation_RequiresItsOwnGrant_AndRevocationIsEnforcedServerSide()
+        {
+            var teacher = await JoinTeacherAsync();
+            var studentId = Guid.NewGuid();
+            var student = await JoinStudentAsync("annotation-student", studentId);
+            const string mark = """{"kind":"stroke","stroke":{"id":"m1","points":[{"x":0.4,"y":0.4}],"color":"red","width":4}}""";
+
+            _sent.Clear();
+            await student.SendAnnotation(SessionId, mark);
+            Assert.DoesNotContain(_sent, m => m.Method == "Annotation");
+
+            // Whiteboard permission must not implicitly permit drawing over a presentation.
+            await teacher.SetBoardAccess(SessionId, "annotation-student", true);
+            _sent.Clear();
+            await student.SendAnnotation(SessionId, mark);
+            Assert.DoesNotContain(_sent, m => m.Method == "Annotation");
+
+            await teacher.SetAnnotationAccess(SessionId, "annotation-student", true);
+            _sent.Clear();
+            await student.SendAnnotation(SessionId, mark);
+            Assert.Contains(_sent, m => m.Method == "Annotation" && m.To.StartsWith("othersInGroup:"));
+
+            await teacher.SetAnnotationAccess(SessionId, "annotation-student", false);
+            _sent.Clear();
+            await student.SendAnnotation(SessionId, mark);
+            Assert.DoesNotContain(_sent, m => m.Method == "Annotation");
+        }
+
+        [Fact]
+        public async Task AnnotationAccess_SurvivesStudentReconnect()
+        {
+            var teacher = await JoinTeacherAsync();
+            var studentId = Guid.NewGuid();
+            var student = await JoinStudentAsync("annotation-first", studentId);
+            await teacher.SetAnnotationAccess(SessionId, "annotation-first", true);
+
+            await student.OnDisconnectedAsync(null);
+            _sent.Clear();
+            var reconnected = await JoinStudentAsync("annotation-back", studentId);
+
+            Assert.Contains(SentTo("caller:annotation-back"), m => m.Method == "AnnotationAccess" && Equals(m.Args[0], true));
+            const string mark = """{"kind":"clear"}""";
+            await reconnected.SendAnnotation(SessionId, mark);
+            Assert.Contains(_sent, m => m.Method == "Annotation" && m.To.StartsWith("othersInGroup:"));
+        }
+
+        [Fact]
         public async Task LateJoiner_GetsTheBoardAndLastingAnnotations_WithAResetOnlyWhenThereIsSomethingToRebuild()
         {
             var teacher = await JoinTeacherAsync();
