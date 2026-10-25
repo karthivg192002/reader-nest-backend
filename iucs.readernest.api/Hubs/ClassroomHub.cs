@@ -396,8 +396,16 @@ namespace iucs.readernest.api.Hubs
 
             // The teacher always has access; anyone else needs an explicit grant recorded by
             // SetBoardAccess below — this is the actual enforcement, not just a UI hint.
-            var hasAccess = IsTeacherInRoom(sessionId)
-                || (ParticipantKeyFor(sessionId) is { } key && BoardAccessGrants.TryGetValue(sessionId, out var grants) && grants.ContainsKey(key));
+            var participantKey = ParticipantKeyFor(sessionId);
+            var hasBoardAccess = participantKey is { } boardKey
+                && BoardAccessGrants.TryGetValue(sessionId, out var boardGrants)
+                && boardGrants.ContainsKey(boardKey);
+            var isSlideAnnotation = SlideAnnotationOperation.IsValid(opJson);
+            var hasAnnotationAccess = isSlideAnnotation
+                && participantKey is { } annotationKey
+                && AnnotationAccessGrants.TryGetValue(sessionId, out var annotationGrants)
+                && annotationGrants.ContainsKey(annotationKey);
+            var hasAccess = IsTeacherInRoom(sessionId) || hasBoardAccess || hasAnnotationAccess;
             if (!hasAccess)
             {
                 return;

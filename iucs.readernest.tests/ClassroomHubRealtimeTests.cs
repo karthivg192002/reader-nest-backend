@@ -119,6 +119,27 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task AnnotationGrant_AllowsSlideMarks_ButNotWhiteboardOperations()
+        {
+            var teacher = await JoinTeacherAsync();
+            var student = await JoinStudentAsync("slide-student", Guid.NewGuid());
+            await teacher.SetAnnotationAccess(SessionId, "slide-student", true);
+
+            _sent.Clear();
+            await student.SendBoard(SessionId, """{"kind":"slideStroke","slide":0,"stroke":{"id":"s1","points":[{"x":0.2,"y":0.4}]}}""");
+            Assert.Contains(_sent, m => m.Method == "Board" && m.To.StartsWith("othersInGroup:"));
+
+            _sent.Clear();
+            await student.SendBoard(SessionId, """{"kind":"stroke","id":"whiteboard-mark"}""");
+            Assert.DoesNotContain(_sent, m => m.Method == "Board");
+
+            await teacher.SetAnnotationAccess(SessionId, "slide-student", false);
+            _sent.Clear();
+            await student.SendBoard(SessionId, """{"kind":"slideClear","slide":0}""");
+            Assert.DoesNotContain(_sent, m => m.Method == "Board");
+        }
+
+        [Fact]
         public async Task AnnotationAccess_SurvivesStudentReconnect()
         {
             var teacher = await JoinTeacherAsync();
