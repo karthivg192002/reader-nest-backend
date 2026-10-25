@@ -51,6 +51,9 @@ namespace iucs.readernest.api.Hubs
         // Next/Previous clicks have gotten to, so JoinSession can land a mid-class joiner on the
         // right slide instead of always page 0.
         private static readonly ConcurrentDictionary<string, int> CurrentSlide = new();
+        // Google Slides deck currently embedded in the classroom. Unlike an uploaded PDF this
+        // has no REST record, so the hub remembers the validated embed URL for late joiners.
+        private static readonly ConcurrentDictionary<string, string> CurrentPresentationLink = new();
 
         // Whichever participant the teacher currently has spotlighted/pinned in their own
         // Jitsi view (null = nobody pinned) — see SetPinned's own doc comment for why this
@@ -327,6 +330,10 @@ namespace iucs.readernest.api.Hubs
             {
                 await Clients.Caller.SendAsync("Slide", pageIndex);
             }
+            if (CurrentPresentationLink.TryGetValue(sessionId, out var presentationLink))
+            {
+                await Clients.Caller.SendAsync("PresentationLink", presentationLink);
+            }
 
             // Same idea again for whoever the teacher currently has pinned/spotlighted — a
             // student who joins after the teacher already pinned themselves (or anyone else)
@@ -455,6 +462,37 @@ namespace iucs.readernest.api.Hubs
 
             CurrentSlide[sessionId] = pageIndex;
             await Clients.OthersInGroup(Group(sessionId)).SendAsync("Slide", pageIndex);
+        }
+
+        /// <summary>Teacher-only: selects or clears a Google Slides deck embedded inside the
+        /// classroom. Only canonical HTTPS Google Slides embed URLs are accepted; arbitrary
+        /// iframe URLs are never relayed to students.</summary>
+        public async Task SetPresentationLink(string sessionId, string? url)
+        {
+            if (!IsTeacherInRoom(sessionId))
+            {
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                CurrentPresentationLink.TryRemove(sessionId, out _);
+                await Clients.OthersInGroup(Group(sessionId)).SendAsync("PresentationLink", null);
+                return;
+            }
+
+            if (url.Length > 2048
+                || !Uri.TryCreate(url, UriKind.Absolute, out var parsed)
+                || parsed.Scheme != Uri.UriSchemeHttps
+                || !string.Equals(parsed.Host, "docs.google.com", StringComparison.OrdinalIgnoreCase)
+                || !parsed.AbsolutePath.StartsWith("/presentation/d/", StringComparison.Ordinal)
+                || !parsed.AbsolutePath.EndsWith("/embed", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            CurrentPresentationLink[sessionId] = url;
+            await Clients.OthersInGroup(Group(sessionId)).SendAsync("PresentationLink", url);
         }
 
         // ---- pin / spotlight sync ----
@@ -778,6 +816,7 @@ namespace iucs.readernest.api.Hubs
                     AnnotationAccessGrants.TryRemove(sessionId, out _);
                     BoardHistory.TryRemove(sessionId, out _);
                     CurrentSlide.TryRemove(sessionId, out _);
+                    CurrentPresentationLink.TryRemove(sessionId, out _);
                     PinnedParticipant.TryRemove(sessionId, out _);
                     AnnotationHistory.TryRemove(sessionId, out _);
                     RaisedHands.TryRemove(sessionId, out _);
