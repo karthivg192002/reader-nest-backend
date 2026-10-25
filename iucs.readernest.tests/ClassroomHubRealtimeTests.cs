@@ -137,26 +137,6 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
-        public async Task GoogleSlidesLink_IsTeacherOnlyValidatedAndReplayedToLateJoiners()
-        {
-            var teacher = await JoinTeacherAsync();
-            var student = await JoinStudentAsync("slides-student", Guid.NewGuid());
-            const string embed = "https://docs.google.com/presentation/d/deck-id/embed?start=false";
-
-            _sent.Clear();
-            await student.SetPresentationLink(SessionId, embed);
-            await teacher.SetPresentationLink(SessionId, "https://example.com/not-allowed");
-            Assert.DoesNotContain(_sent, m => m.Method == "PresentationLink");
-
-            await teacher.SetPresentationLink(SessionId, embed);
-            Assert.Contains(_sent, m => m.Method == "PresentationLink" && Equals(m.Args[0], embed));
-
-            _sent.Clear();
-            await JoinStudentAsync("slides-late", Guid.NewGuid(), "Late");
-            Assert.Contains(SentTo("caller:slides-late"), m => m.Method == "PresentationLink" && Equals(m.Args[0], embed));
-        }
-
-        [Fact]
         public async Task MalformedAnnotation_IsNotRelayedEvenFromAnAuthorizedParticipant()
         {
             var teacher = await JoinTeacherAsync();

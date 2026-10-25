@@ -712,6 +712,83 @@ namespace iucs.readernest.api.Controllers
             return Ok(presentation);
         }
 
+        public sealed record ImportGoogleSlidesRequest(string Url);
+
+        /// <summary>Imports a publicly shared Google Slides deck as a PDF owned by this classroom.
+        /// Children then download it from Meet to Manage using their guest token, so they never
+        /// need a Google account or third-party cookies and annotations stay page-synchronized.</summary>
+        [HttpPost("{id:guid}/presentation/google-slides")]
+        [Authorize]
+        public async Task<ActionResult<SessionPresentationDto>> ImportGoogleSlides(
+            Guid id,
+            ImportGoogleSlidesRequest request,
+            [FromServices] IHttpClientFactory httpClientFactory,
+            CancellationToken cancellationToken)
+        {
+            if (!TryGetGoogleSlidesId(request.Url, out var deckId))
+            {
+                return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "Use a valid Google Slides or Google Drive presentation link." });
+            }
+
+            var exportUrl = $"https://docs.google.com/presentation/d/{deckId}/export/pdf";
+            using var response = await httpClientFactory.CreateClient().GetAsync(exportUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                return BadRequest(new ProblemDetails { Status = 400, Title = "Google Slides could not be imported", Detail = "Set the presentation access to 'Anyone with the link', then try again." });
+            }
+            if (response.Content.Headers.ContentLength is > MaxPresentationUploadBytes)
+            {
+                return BadRequest(new ProblemDetails { Status = 400, Title = "Presentation is too large", Detail = "The exported PDF must be 100 MB or smaller." });
+            }
+
+            await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
+            await using var pdf = new MemoryStream();
+            var buffer = new byte[81920];
+            int read;
+            while ((read = await source.ReadAsync(buffer, cancellationToken)) > 0)
+            {
+                if (pdf.Length + read > MaxPresentationUploadBytes)
+                {
+                    return BadRequest(new ProblemDetails { Status = 400, Title = "Presentation is too large", Detail = "The exported PDF must be 100 MB or smaller." });
+                }
+                await pdf.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+            }
+            if (pdf.Length < 5)
+            {
+                return BadRequest(new ProblemDetails { Status = 400, Title = "Google Slides could not be imported", Detail = "Google returned an empty presentation." });
+            }
+            pdf.Position = 0;
+            var signature = new byte[5];
+            _ = await pdf.ReadAsync(signature, cancellationToken);
+            if (System.Text.Encoding.ASCII.GetString(signature) != "%PDF-")
+            {
+                return BadRequest(new ProblemDetails { Status = 400, Title = "Google Slides could not be imported", Detail = "Set the presentation access to 'Anyone with the link', then try again." });
+            }
+            pdf.Position = 0;
+
+            var fileName = $"google-slides-{deckId}.pdf";
+            var stored = await _fileStorage.StoreAsync(pdf, fileName, cancellationToken);
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            return Ok(await _sessionService.UploadPresentationAsync(id, userId, stored.RelativePath, fileName, cancellationToken));
+        }
+
+        private static bool TryGetGoogleSlidesId(string? value, out string deckId)
+        {
+            deckId = string.Empty;
+            if (!Uri.TryCreate(value?.Trim(), UriKind.Absolute, out var url) || url.Scheme != Uri.UriSchemeHttps)
+                return false;
+            string? candidate = null;
+            var parts = url.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            if (string.Equals(url.Host, "docs.google.com", StringComparison.OrdinalIgnoreCase)
+                && parts.Length >= 3 && parts[0] == "presentation" && parts[1] == "d") candidate = parts[2];
+            if (string.Equals(url.Host, "drive.google.com", StringComparison.OrdinalIgnoreCase)
+                && parts.Length >= 3 && parts[0] == "file" && parts[1] == "d") candidate = parts[2];
+            if (candidate is null || candidate.Length > 200 || candidate.Any(ch => !char.IsAsciiLetterOrDigit(ch) && ch is not '-' and not '_'))
+                return false;
+            deckId = candidate;
+            return true;
+        }
+
         /// <summary>Whether a deck has been uploaded for this session yet, and its file name — same
         /// participant access as joining the class itself.</summary>
         [HttpGet("{id:guid}/presentation")]
