@@ -139,7 +139,7 @@ namespace iucs.readernest.api.Hubs
         /// could join, watch, and control a class that isn't theirs by guessing/knowing
         /// its session id.
         /// </summary>
-        public async Task JoinSession(string sessionId, string displayName)
+        public async Task<string> JoinSession(string sessionId, string displayName)
         {
             if (!Guid.TryParse(sessionId, out var sessionGuid))
             {
@@ -353,6 +353,12 @@ namespace iucs.readernest.api.Hubs
             {
                 await _academicOpsService.CaptureJoinAttendanceAsync(sessionGuid, userId, Context.ConnectionAborted);
             }
+
+            // The requested id can be an old id from a tab opened before a reschedule. Return
+            // the canonical id so the client uses the same room key for every later hub call;
+            // otherwise Join succeeds into the resolved room but all subsequent commands carry
+            // the stale id and are rejected by IsJoined.
+            return sessionId;
         }
 
         public async Task LeaveSession(string sessionId)
@@ -415,7 +421,7 @@ namespace iucs.readernest.api.Hubs
         /// draws again.</summary>
         public async Task SendAnnotation(string sessionId, string opJson)
         {
-            if (!IsJoined(sessionId))
+            if (!IsJoined(sessionId) || !AnnotationLog.IsValidOperation(opJson))
             {
                 return;
             }

@@ -6,6 +6,25 @@ namespace iucs.readernest.tests
     /// <summary>What a late joiner is sent so their screen matches the class's lasting annotations.</summary>
     public class AnnotationLogTests
     {
+        [Theory]
+        [InlineData("not-json")]
+        [InlineData("{\"kind\":\"unknown\"}")]
+        [InlineData("{\"kind\":\"stroke\",\"stroke\":{\"id\":\"x\"}}")]
+        [InlineData("{\"kind\":\"strokeAppend\",\"strokeId\":\"x\",\"points\":[{\"x\":\"bad\",\"y\":1}]}")]
+        public void InvalidOperations_AreRejected(string operation)
+        {
+            Assert.False(AnnotationLog.IsValidOperation(operation));
+        }
+
+        [Theory]
+        [InlineData("{\"kind\":\"clear\"}")]
+        [InlineData("{\"kind\":\"stroke\",\"stroke\":{\"id\":\"x\",\"points\":[{\"x\":0.1,\"y\":0.2}]}}")]
+        [InlineData("{\"kind\":\"strokeAppend\",\"strokeId\":\"x\",\"points\":[{\"x\":0.1,\"y\":0.2}]}")]
+        public void ValidOperations_AreAccepted(string operation)
+        {
+            Assert.True(AnnotationLog.IsValidOperation(operation));
+        }
+
         private const string Lasting = """{"kind":"stroke","stroke":{"id":"a","points":[{"x":0.1,"y":0.1}],"color":"red","width":4,"persistent":true,"space":"share"}}""";
         private const string LastingAppend = """{"kind":"strokeAppend","strokeId":"a","points":[{"x":0.2,"y":0.2}]}""";
         private const string Temporary = """{"kind":"stroke","stroke":{"id":"t","points":[{"x":0.5,"y":0.5}],"color":"red","width":4}}""";

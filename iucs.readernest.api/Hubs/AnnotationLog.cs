@@ -13,9 +13,73 @@ namespace iucs.readernest.api.Hubs
     {
         /// <summary>Far more than a class ever draws; a ceiling so one client can't grow this without end.</summary>
         public const int MaxOps = 4000;
+        public const int MaxOperationLength = 32_000;
 
         private readonly List<string> _ops = new();
         private readonly HashSet<string> _strokeIds = new(StringComparer.Ordinal);
+
+        /// <summary>Rejects malformed or oversized operations before they are broadcast. A
+        /// granted student must not be able to poison every viewer's canvas with arbitrary JSON.</summary>
+        public static bool IsValidOperation(string opJson)
+        {
+            if (string.IsNullOrWhiteSpace(opJson) || opJson.Length > MaxOperationLength)
+            {
+                return false;
+            }
+
+            try
+            {
+                using var doc = JsonDocument.Parse(opJson);
+                var root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("kind", out var kindElement))
+                {
+                    return false;
+                }
+
+                var kind = kindElement.GetString();
+                if (kind == "clear") return true;
+                if (kind == "stroke")
+                {
+                    return root.TryGetProperty("stroke", out var stroke)
+                        && stroke.ValueKind == JsonValueKind.Object
+                        && HasShortString(stroke, "id")
+                        && HasReasonablePoints(stroke, "points");
+                }
+
+                return kind == "strokeAppend"
+                    && HasShortString(root, "strokeId")
+                    && HasReasonablePoints(root, "points");
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        private static bool HasShortString(JsonElement parent, string property) =>
+            parent.TryGetProperty(property, out var value)
+            && value.ValueKind == JsonValueKind.String
+            && value.GetString() is { Length: > 0 and <= 128 };
+
+        private static bool HasReasonablePoints(JsonElement parent, string property)
+        {
+            if (!parent.TryGetProperty(property, out var points) || points.ValueKind != JsonValueKind.Array || points.GetArrayLength() is < 1 or > 512)
+            {
+                return false;
+            }
+
+            foreach (var point in points.EnumerateArray())
+            {
+                if (point.ValueKind != JsonValueKind.Object
+                    || !point.TryGetProperty("x", out var x) || x.ValueKind != JsonValueKind.Number || !x.TryGetDouble(out var xValue) || !double.IsFinite(xValue)
+                    || !point.TryGetProperty("y", out var y) || y.ValueKind != JsonValueKind.Number || !y.TryGetDouble(out var yValue) || !double.IsFinite(yValue))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
 
         /// <summary>Remembers the op if it belongs to a lasting mark, or forgets everything on a full clear.</summary>
         public void Record(string opJson)

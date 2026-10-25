@@ -137,6 +137,17 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task MalformedAnnotation_IsNotRelayedEvenFromAnAuthorizedParticipant()
+        {
+            var teacher = await JoinTeacherAsync();
+            _sent.Clear();
+
+            await teacher.SendAnnotation(SessionId, """{"kind":"stroke","stroke":{"id":"broken"}}""");
+
+            Assert.DoesNotContain(_sent, m => m.Method == "Annotation");
+        }
+
+        [Fact]
         public async Task LateJoiner_GetsTheBoardAndLastingAnnotations_WithAResetOnlyWhenThereIsSomethingToRebuild()
         {
             var teacher = await JoinTeacherAsync();
