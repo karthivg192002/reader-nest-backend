@@ -389,7 +389,9 @@ namespace iucs.readernest.api.Hubs
         /// <summary>Relays one board operation (stroke/clear/page op) to everyone else in the class.</summary>
         public async Task SendBoard(string sessionId, string opJson)
         {
-            if (!IsJoined(sessionId))
+            if (!IsJoined(sessionId)
+                || string.IsNullOrWhiteSpace(opJson)
+                || opJson.Length > AnnotationLog.MaxOperationLength)
             {
                 return;
             }
@@ -463,6 +465,19 @@ namespace iucs.readernest.api.Hubs
 
             CurrentSlide[sessionId] = pageIndex;
             await Clients.OthersInGroup(Group(sessionId)).SendAsync("Slide", pageIndex);
+        }
+
+        /// <summary>Teacher-only: ends the current deck for connected viewers and prevents a
+        /// reconnect from replaying the last page as though the presentation were still live.</summary>
+        public async Task StopPresentation(string sessionId)
+        {
+            if (!IsTeacherInRoom(sessionId))
+            {
+                return;
+            }
+
+            CurrentSlide.TryRemove(sessionId, out _);
+            await Clients.OthersInGroup(Group(sessionId)).SendAsync("PresentationStopped");
         }
 
 

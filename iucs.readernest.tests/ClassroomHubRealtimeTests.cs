@@ -140,6 +140,36 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task StopPresentation_IsTeacherOnly_AndClearsReconnectReplay()
+        {
+            var teacher = await JoinTeacherAsync();
+            var student = await JoinStudentAsync("presentation-student", Guid.NewGuid());
+            await teacher.SendSlide(SessionId, 2);
+
+            _sent.Clear();
+            await student.StopPresentation(SessionId);
+            Assert.DoesNotContain(_sent, m => m.Method == "PresentationStopped");
+
+            await teacher.StopPresentation(SessionId);
+            Assert.Contains(_sent, m => m.Method == "PresentationStopped" && m.To.StartsWith("othersInGroup:"));
+
+            _sent.Clear();
+            await JoinStudentAsync("late-after-stop", Guid.NewGuid());
+            Assert.DoesNotContain(_sent, m => m.Method == "Slide");
+        }
+
+        [Fact]
+        public async Task OversizedBoardOperation_IsNotStoredOrRelayed()
+        {
+            var teacher = await JoinTeacherAsync();
+            _sent.Clear();
+
+            await teacher.SendBoard(SessionId, new string('x', AnnotationLog.MaxOperationLength + 1));
+
+            Assert.DoesNotContain(_sent, m => m.Method == "Board");
+        }
+
+        [Fact]
         public async Task AnnotationAccess_SurvivesStudentReconnect()
         {
             var teacher = await JoinTeacherAsync();
