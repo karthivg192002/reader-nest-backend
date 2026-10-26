@@ -145,6 +145,36 @@ namespace iucs.readernest.application.Dto.Sessions
         /// <summary>Optional class summary shown in session history.</summary>
         [MaxLength(2000)]
         public string? Summary { get; set; }
+
+        /// <summary>How the teacher says the class went (End Class form). Admin-team only.</summary>
+        public TeacherClassStatus? ClassStatus { get; set; }
+
+        /// <summary>Note for the admin team; required unless <see cref="ClassStatus"/> is CompletedFully.</summary>
+        [MaxLength(1000)]
+        public string? AdminNote { get; set; }
+    }
+
+    /// <summary>The teacher's class status + admin note given after the class already ended
+    /// (her dashboard's "Feedback pending" list).</summary>
+    public class TeacherClassFeedbackRequest
+    {
+        [Required]
+        public TeacherClassStatus ClassStatus { get; set; }
+
+        [MaxLength(1000)]
+        public string? AdminNote { get; set; }
+    }
+
+    /// <summary>A completed class of the calling teacher's that still has no status/admin note.</summary>
+    public class FeedbackPendingSessionDto
+    {
+        public Guid SessionId { get; set; }
+
+        public string ClassName { get; set; } = null!;
+
+        public DateTime ScheduledStartAtUtc { get; set; }
+
+        public DateTime ScheduledEndAtUtc { get; set; }
     }
 
     /// <summary>Editing a completed session's notes after the fact -- see

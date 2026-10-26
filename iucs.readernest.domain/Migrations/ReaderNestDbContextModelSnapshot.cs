@@ -4213,6 +4213,20 @@ namespace iucs.readernest.domain.Migrations
                         .HasColumnType("character varying(2000)")
                         .HasColumnName("summary");
 
+                    b.Property<string>("TeacherAdminNote")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("teacher_admin_note");
+
+                    b.Property<string>("TeacherClassStatus")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("teacher_class_status");
+
+                    b.Property<DateTime?>("TeacherFeedbackAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("teacher_feedback_at_utc");
+
                     b.Property<Guid>("TeacherProfileId")
                         .HasColumnType("uuid")
                         .HasColumnName("teacher_profile_id");

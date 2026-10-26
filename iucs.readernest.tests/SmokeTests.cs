@@ -6681,6 +6681,36 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task GenerateSchedule_SkipsClassesInsideTheTeachersApprovedLeave_AndStillPlacesThemAll()
+        {
+            // Live, 26 Oct 2026 (Mokshit Jain): one class of a 12-class Mon/Wed/Fri block fell in
+            // the teacher's approved leave and the whole schedule was refused.
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 4, includeSession: false);
+            var monday = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(14));
+            while (monday.DayOfWeek != DayOfWeek.Monday) monday = monday.AddDays(1);
+            var leaveDay = monday.AddDays(7); // the second Monday
+            _db.Context.Add(new LeaveRequest
+            {
+                TeacherProfileId = batch.TeacherProfileId,
+                StartAtUtc = leaveDay.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc),
+                EndAtUtc = leaveDay.AddDays(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc),
+                Reason = "Out of town",
+                Status = LeaveStatus.Approved,
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var sessions = await CreateSessionService().GenerateScheduleAsync(batch.Id, new GenerateScheduleRequest
+            {
+                StartDate = monday,
+                Slots = [new GenerateScheduleSlot { DayOfWeek = DayOfWeek.Monday, StartTimeUtc = new TimeOnly(11, 30) }],
+            });
+
+            Assert.Equal(4, sessions.Count);
+            Assert.DoesNotContain(sessions, s => DateOnly.FromDateTime(s.ScheduledStartAtUtc) == leaveDay);
+            Assert.Equal(monday.AddDays(28), DateOnly.FromDateTime(sessions.Max(s => s.ScheduledStartAtUtc)));
+        }
+
+        [Fact]
         public async Task GenerateSchedule_SessionCountOverride_PlacesOnlyThatManySessions_NotTheCoursesFull()
         {
             // A course's own TotalSessions (48) is the default, but a batch continuing
@@ -8380,6 +8410,63 @@ namespace iucs.readernest.tests
             var items = await verifyContext.PayoutItems.Where(i => i.ClassSessionId == session.Id).ToListAsync();
             Assert.Single(items);
             verifyContext.Dispose();
+        }
+
+        // ---- Teacher class feedback for the admin team (client request 26 Oct 2026) ----
+
+        [Fact]
+        public async Task Complete_WithClassStatusAndNote_StoresTheTeachersFeedback()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            await CreateSessionService().CompleteAsync(session.Id, new CompleteSessionRequest
+            {
+                Summary = "Topic: short a",
+                ClassStatus = TeacherClassStatus.StudentLeftEarly,
+                AdminNote = "  Child had to leave at 5:50 for a doctor visit.  ",
+            });
+
+            var (verify, _) = _db.CreateConcurrentSession();
+            var saved = await verify.ClassSessions.FirstAsync(s => s.Id == session.Id);
+            Assert.Equal(TeacherClassStatus.StudentLeftEarly, saved.TeacherClassStatus);
+            Assert.Equal("Child had to leave at 5:50 for a doctor visit.", saved.TeacherAdminNote);
+            Assert.NotNull(saved.TeacherFeedbackAtUtc);
+            verify.Dispose();
+        }
+
+        [Fact]
+        public async Task Complete_AnythingButCompletedFully_WithoutANote_IsRefused()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => CreateSessionService().CompleteAsync(session.Id,
+                new CompleteSessionRequest { ClassStatus = TeacherClassStatus.EndedEarly, AdminNote = "   " }));
+        }
+
+        [Fact]
+        public async Task FeedbackPending_ListsAClassEndedWithoutFeedback_UntilTheTeacherGivesIt()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            var service = CreateSessionService();
+            await service.CompleteAsync(session.Id, new CompleteSessionRequest()); // e.g. auto-completed
+
+            Assert.Contains(await service.ListFeedbackPendingAsync(), p => p.SessionId == session.Id);
+
+            await service.SubmitTeacherFeedbackAsync(session.Id, new TeacherClassFeedbackRequest { ClassStatus = TeacherClassStatus.CompletedFully });
+
+            Assert.DoesNotContain(await CreateSessionService().ListFeedbackPendingAsync(), p => p.SessionId == session.Id);
+        }
+
+        [Fact]
+        public async Task Complete_WithoutClassStatus_StillWorks_ForAutoCompletionAndOlderScreens()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 2);
+            await CreateSessionService().CompleteAsync(session.Id, new CompleteSessionRequest());
+
+            var (verify, _) = _db.CreateConcurrentSession();
+            var saved = await verify.ClassSessions.FirstAsync(s => s.Id == session.Id);
+            Assert.Equal(SessionStatus.Completed, saved.Status);
+            Assert.Null(saved.TeacherClassStatus);
+            verify.Dispose();
         }
 
         [Fact]

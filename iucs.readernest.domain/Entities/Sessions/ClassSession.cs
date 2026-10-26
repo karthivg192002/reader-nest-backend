@@ -67,6 +67,18 @@ namespace iucs.readernest.domain.Entities.Sessions
         [MaxLength(2000)]
         public string? Summary { get; set; }
 
+        /// <summary>The teacher's own account of how the class went (End Class form, or later
+        /// from her dashboard's "Feedback pending"). Admin-team only, never emailed to parents.
+        /// Null until she gives it -- e.g. a class auto-completed after she closed the tab.</summary>
+        public TeacherClassStatus? TeacherClassStatus { get; set; }
+
+        /// <summary>The teacher's note for the admin team; required unless the class was
+        /// completed fully. Never sent to parents.</summary>
+        [MaxLength(1000)]
+        public string? TeacherAdminNote { get; set; }
+
+        public DateTime? TeacherFeedbackAtUtc { get; set; }
+
         /// <summary>Set once RecordingReconciliationBackgroundService has alerted admins that this
         /// completed session never got a recording — auto-record can succeed at *starting* with
         /// no error yet still fail later in the pipeline (Jibri crashing mid-capture, an upload

@@ -340,6 +340,28 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _sessionService.UpdateSummaryAsync(id, request.Summary, cancellationToken));
         }
 
+        /// <summary>The teacher's class status + note for the admin team, given after the class
+        /// ended (her "Feedback pending" list). Never sent to parents.</summary>
+        [HttpPut("{id:guid}/teacher-feedback")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<IActionResult> SubmitTeacherFeedback(
+            Guid id,
+            TeacherClassFeedbackRequest request,
+            CancellationToken cancellationToken)
+        {
+            await _sessionService.SubmitTeacherFeedbackAsync(id, request, cancellationToken);
+            return NoContent();
+        }
+
+        /// <summary>The calling teacher's completed classes (last 14 days) still missing her
+        /// class status / admin note.</summary>
+        [HttpGet("feedback-pending")]
+        [Authorize(Roles = nameof(UserRole.Teacher))]
+        public async Task<ActionResult<IReadOnlyList<FeedbackPendingSessionDto>>> FeedbackPending(CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.ListFeedbackPendingAsync(cancellationToken));
+        }
+
         /// <summary>
         /// Marks a teacher/student no-show: the payout impact accrues and a
         /// carried-forward replacement session is returned.

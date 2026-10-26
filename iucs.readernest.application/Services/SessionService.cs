@@ -614,7 +614,75 @@ namespace iucs.readernest.application.Services
             // is not enough — the caller must be this session's own teacher (or an Admin).
             await EnsureSessionParticipantAsync(session, cancellationToken);
 
+            if (request?.ClassStatus is { } classStatus)
+            {
+                ApplyTeacherFeedback(session, classStatus, request.AdminNote);
+            }
+
             return await CompleteCoreAsync(session, request?.Summary, null, cancellationToken);
+        }
+
+        /// <summary>Client request 26 Oct 2026: the admin team needs the teacher's own account of
+        /// how a class went (not just the system's "left early" guess from timestamps) before
+        /// deciding a short class's payout. Anything short of "completed fully" needs a note.</summary>
+        private static void ApplyTeacherFeedback(ClassSession session, TeacherClassStatus status, string? adminNote)
+        {
+            var note = adminNote?.Trim();
+            if (status != TeacherClassStatus.CompletedFully && string.IsNullOrEmpty(note))
+            {
+                throw new DomainValidationException("Please add a short note for the admin team explaining how the class went.");
+            }
+
+            session.TeacherClassStatus = status;
+            session.TeacherAdminNote = string.IsNullOrEmpty(note) ? null : note;
+            session.TeacherFeedbackAtUtc = DateTime.UtcNow;
+        }
+
+        public async Task SubmitTeacherFeedbackAsync(
+            Guid id,
+            TeacherClassFeedbackRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().TrackedQuery()
+                .FirstOrDefaultAsync(s => s.Id == id, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), id);
+
+            await EnsureSessionParticipantAsync(session, cancellationToken);
+
+            if (session.Status != SessionStatus.Completed)
+            {
+                throw new DomainValidationException("Class feedback can only be added to a completed class.");
+            }
+
+            ApplyTeacherFeedback(session, request.ClassStatus, request.AdminNote);
+            await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
+        public async Task<IReadOnlyList<FeedbackPendingSessionDto>> ListFeedbackPendingAsync(
+            CancellationToken cancellationToken = default)
+        {
+            var userId = _currentUser.UserId;
+            if (userId is null)
+            {
+                return [];
+            }
+
+            var since = DateTime.UtcNow.AddDays(-14);
+            return await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.TeacherProfile.UserId == userId
+                    && s.Status == SessionStatus.Completed
+                    && s.TeacherFeedbackAtUtc == null
+                    && s.ScheduledStartAtUtc >= since)
+                .OrderByDescending(s => s.ScheduledStartAtUtc)
+                .Select(s => new FeedbackPendingSessionDto
+                {
+                    SessionId = s.Id,
+                    ClassName = s.Batch != null ? s.Batch.Name : (s.Type == SessionType.Demo ? "Demo class" : "Class"),
+                    ScheduledStartAtUtc = s.ScheduledStartAtUtc,
+                    ScheduledEndAtUtc = s.ScheduledEndAtUtc,
+                })
+                .ToListAsync(cancellationToken);
         }
 
         public async Task<ClassSessionDto> CompleteAbandonedAsync(
@@ -1406,7 +1474,28 @@ namespace iucs.readernest.application.Services
             // there was previously no way to generate only the sessions actually still owed.
             var targetSessionCount = request.SessionCount ?? course.TotalSessions;
 
-            var starts = PlaceSessionStartTimes(request.StartDate, timeByDay, targetSessionCount, holidays);
+            // Live, 26 Oct 2026 (Mokshit Jain, Preet ma'am): one Friday of a 12-class block fell
+            // inside the teacher's approved 12-15 Nov leave, and EnsureTeacherIsFreeAsync below
+            // refused the WHOLE schedule ("teacher is on approved leave"), so the paid classes
+            // could not be booked at all. A class that would land in an approved (date-range)
+            // leave is now skipped like a holiday and the block runs on past it, so the child
+            // still gets every class. Class-wise leaves cover existing classes, not new ones.
+            var leaveWindows = await _unitOfWork.Repository<LeaveRequest>().Query()
+                .Where(l => l.TeacherProfileId == batch.TeacherProfileId
+                    && l.Status == LeaveStatus.Approved
+                    && !l.IsClassWise
+                    && l.EndAtUtc > now)
+                .Select(l => new { l.StartAtUtc, l.EndAtUtc })
+                .ToListAsync(cancellationToken);
+            bool InLeave(DateTime startUtc) =>
+                leaveWindows.Any(l => l.StartAtUtc < startUtc.AddMinutes(durationMinutes) && l.EndAtUtc > startUtc);
+
+            var starts = leaveWindows.Count == 0
+                ? PlaceSessionStartTimes(request.StartDate, timeByDay, targetSessionCount, holidays)
+                : PlaceSessionStartTimes(request.StartDate, timeByDay, targetSessionCount + 400, holidays)
+                    .Where(s => !InLeave(s))
+                    .Take(targetSessionCount)
+                    .ToList();
             if (starts.Count < targetSessionCount)
             {
                 throw new DomainValidationException("Could not place all sessions within two years; check the selected weekdays.");

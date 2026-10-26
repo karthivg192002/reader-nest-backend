@@ -117,6 +117,12 @@ namespace iucs.readernest.application.Dto.Payouts
 
         public DateTime? TeacherLeftAtUtc { get; set; }
 
+        /// <summary>The teacher's own class status from the End Class form (null = not given yet).</summary>
+        public TeacherClassStatus? TeacherClassStatus { get; set; }
+
+        /// <summary>The teacher's note for the admin team. Never shown to parents.</summary>
+        public string? TeacherAdminNote { get; set; }
+
         /// <summary>Minutes the teacher joined after the scheduled start (0 when on time).</summary>
         public int LateJoinMinutes { get; set; }
 

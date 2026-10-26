@@ -56,6 +56,18 @@ namespace iucs.readernest.application.Services
             string summary,
             CancellationToken cancellationToken = default);
 
+        /// <summary>Records the teacher's class status + admin note on a class that already ended
+        /// (from her "Feedback pending" list). Only that class's own teacher (or an Admin).</summary>
+        Task SubmitTeacherFeedbackAsync(
+            Guid id,
+            TeacherClassFeedbackRequest request,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>The calling teacher's completed classes from the last 14 days that still have
+        /// no class status / admin note -- her dashboard's "Feedback pending" list.</summary>
+        Task<IReadOnlyList<FeedbackPendingSessionDto>> ListFeedbackPendingAsync(
+            CancellationToken cancellationToken = default);
+
         Task<IReadOnlyList<ClassSessionDto>> GenerateScheduleAsync(
             Guid batchId,
             GenerateScheduleRequest request,
