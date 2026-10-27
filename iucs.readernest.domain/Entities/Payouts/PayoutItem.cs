@@ -53,5 +53,11 @@ namespace iucs.readernest.domain.Entities.Payouts
         public Guid? ReviewedByUserId { get; set; }
 
         public DateTime? ReviewedAtUtc { get; set; }
+
+        /// <summary>The teacher's stated reason for the class status, required when she ends a class that goes to review.</summary>
+        public TeacherReviewReason? TeacherReason { get; set; }
+
+        [MaxLength(1000)]
+        public string? TeacherReasonNote { get; set; }
     }
 }

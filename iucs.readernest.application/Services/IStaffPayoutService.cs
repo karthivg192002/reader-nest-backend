@@ -32,6 +32,15 @@ namespace iucs.readernest.application.Services
         /// amount, the new one, who changed it and why are kept in its history.</summary>
         Task<StaffPayoutDto> AdjustAsync(Guid staffPayoutId, AdjustStaffPayoutRequest request, CancellationToken cancellationToken = default);
 
+        /// <summary>Records cash a counselor collected offline; it counts toward their collection, salary and the monthly summary.</summary>
+        Task<ManualCollectionDto> AddManualCollectionAsync(AddManualCollectionRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>Manual cash entries, newest first, optionally for one counselor and/or one calendar month.</summary>
+        Task<IReadOnlyList<ManualCollectionDto>> ListManualCollectionsAsync(Guid? userId, int? year, int? month, CancellationToken cancellationToken = default);
+
+        /// <summary>Removes a mistaken entry (the removal is audited).</summary>
+        Task DeleteManualCollectionAsync(Guid id, CancellationToken cancellationToken = default);
+
         /// <summary>Every correction made to a frozen payout, newest first.</summary>
         Task<IReadOnlyList<PayoutChangeDto>> GetHistoryAsync(Guid staffPayoutId, CancellationToken cancellationToken = default);
     }

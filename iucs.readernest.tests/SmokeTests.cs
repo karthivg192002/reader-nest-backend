@@ -50,6 +50,21 @@ namespace iucs.readernest.tests
         private readonly EmailTemplateService _emailTemplates;
         private readonly NotificationService _notifications;
 
+        // Who is "in the classroom" for the join gate: a parent only gets a join token once the teacher is in.
+        private readonly ClassroomPresenceTracker _presence = new();
+
+        private void TeacherIsInClassroom(params Guid[] sessionIds)
+        {
+            foreach (var id in sessionIds)
+            {
+                _presence.UserJoined(id.ToString(), $"test-{id}", Guid.NewGuid(), "Teacher", "teacher");
+            }
+        }
+
+        /// <summary>A teacher ending a class that goes to review must say why; tests that don't care supply this.</summary>
+        private static CompleteSessionRequest WithReviewReason(string? summary = null) =>
+            new() { Summary = summary, ReviewReason = TeacherReviewReason.Other, ReviewNote = "test" };
+
         public SmokeTests()
         {
             _auditLog = new AuditLogService(_db.UnitOfWork, _db.CurrentUser);
@@ -85,10 +100,10 @@ namespace iucs.readernest.tests
         private ClassSessionEventLogService CreateEventLogService() => new(_db.UnitOfWork);
 
         private SessionService CreateSessionService() =>
-            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, new FakeJitsiTokenService(), CreateEventLogService(), new FakeTokenService());
+            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, new FakeJitsiTokenService(), CreateEventLogService(), new FakeTokenService(), _presence);
 
         private SessionService CreateSessionService(FakeJitsiTokenService jitsiTokens) =>
-            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, jitsiTokens, CreateEventLogService(), new FakeTokenService());
+            new(_db.UnitOfWork, _auditLog, CreatePayoutService(), _notifications, _db.CurrentUser, jitsiTokens, CreateEventLogService(), new FakeTokenService(), _presence);
 
         private BillingService CreateBillingService() =>
             new(_db.UnitOfWork, _auditLog, new FakePaymentGateway(), _notifications, _db.CurrentUser, _bulkFileReader, _invoicePdfGenerator);
@@ -429,7 +444,7 @@ namespace iucs.readernest.tests
             });
             // Deliberately no SessionAttendance row at all for this session.
 
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
 
             var item = Assert.Single(_db.Context.PayoutItems.ToList());
             Assert.Equal(PayoutItemType.SessionEarning, item.Type);
@@ -468,7 +483,7 @@ namespace iucs.readernest.tests
             });
             await _db.Context.SaveChangesAsync();
 
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
 
             var item = Assert.Single(_db.Context.PayoutItems.ToList());
             Assert.Equal(PayoutItemType.SessionEarning, item.Type);
@@ -504,12 +519,151 @@ namespace iucs.readernest.tests
             });
             await _db.Context.SaveChangesAsync();
 
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
 
             var item = Assert.Single(_db.Context.PayoutItems.ToList());
             Assert.True(item.RequiresReview);
             Assert.Equal(45, item.ScheduledMinutes);
             Assert.Equal(40, item.DeliveredMinutes);
+        }
+
+        /// <summary>
+        /// Late-joining rule: a 2-minute grace to join. A class the teacher taught in full (she ran over to
+        /// make up the time) goes to approval only when she joined after that grace -- 6:02 is fine, 6:03 is not.
+        /// </summary>
+        [Theory]
+        [InlineData(2, 40, false)] // joined at 6:02:40 for a 6:00 class -- still "6:02"
+        [InlineData(3, 0, true)]   // joined at 6:03 -- after the grace, needs approval
+        public async Task Complete_LateJoin_NeedsApprovalOnlyAfterTheTwoMinuteGrace(int lateMinutes, int lateSeconds, bool expectReview)
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1); // 45-minute session
+            await CreatePayoutService().SetRateAsync(new SavePayoutRateRequest
+            {
+                TeacherProfileId = session.TeacherProfileId,
+                RatePerMinute = 1000,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
+            });
+            var now = DateTime.UtcNow;
+            var start = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, DateTimeKind.Utc).AddHours(-2);
+            session.ScheduledStartAtUtc = start;
+            session.ScheduledEndAtUtc = start.AddMinutes(45);
+            var joinedAt = start.AddMinutes(lateMinutes).AddSeconds(lateSeconds);
+            _db.Context.SessionAttendances.Add(new SessionAttendance
+            {
+                ClassSessionId = session.Id,
+                ParticipantType = ParticipantType.Teacher,
+                TeacherProfileId = session.TeacherProfileId,
+                Status = AttendanceStatus.Present,
+                JoinedAtUtc = joinedAt,
+                LeftAtUtc = joinedAt.AddMinutes(46), // ran over: a full 45 minutes delivered
+            });
+            await _db.Context.SaveChangesAsync();
+
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
+
+            var item = Assert.Single(_db.Context.PayoutItems.ToList());
+            Assert.Equal(expectReview, item.RequiresReview);
+            if (expectReview)
+            {
+                Assert.Contains("Teacher joined 3 min after the scheduled start", item.Note);
+            }
+        }
+
+        /// <summary>A teacher ending a class that goes to admin review must say why -- and the reason lands on the approval.</summary>
+        [Fact]
+        public async Task Complete_ClassGoingToReview_RequiresTheTeachersReason_AndStoresIt()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1); // no attendance -> goes to review
+
+            var preview = await CreateSessionService().GetCompletionRequirementsAsync(session.Id);
+            Assert.True(preview.RequiresReview);
+
+            var noReason = await Assert.ThrowsAsync<DomainValidationException>(
+                () => CreateSessionService().CompleteAsync(session.Id, new CompleteSessionRequest()));
+            Assert.Contains("why", noReason.Message);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => CreateSessionService().CompleteAsync(
+                session.Id, new CompleteSessionRequest { ReviewReason = TeacherReviewReason.ShortDuration }));
+
+            // Nothing was saved by the refused attempts.
+            Assert.Empty(_db.Context.PayoutItems.ToList());
+
+            await CreateSessionService().CompleteAsync(session.Id, new CompleteSessionRequest
+            {
+                ReviewReason = TeacherReviewReason.ShortDuration,
+                ReviewNote = "Ran only 20 minutes: the child's connection dropped.",
+            });
+
+            var item = Assert.Single(_db.Context.PayoutItems.ToList());
+            Assert.True(item.RequiresReview);
+            Assert.Equal(TeacherReviewReason.ShortDuration, item.TeacherReason);
+            Assert.Equal("Ran only 20 minutes: the child's connection dropped.", item.TeacherReasonNote);
+        }
+
+        /// <summary>A class that doesn't go to review is ended without any reason being asked for.</summary>
+        [Fact]
+        public async Task Complete_ClassNotGoingToReview_NeedsNoReason()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            await SeedFullTeacherAttendanceAsync(session);
+
+            var preview = await CreateSessionService().GetCompletionRequirementsAsync(session.Id);
+            Assert.False(preview.RequiresReview);
+
+            await CreateSessionService().CompleteAsync(session.Id, new CompleteSessionRequest());
+
+            Assert.False(Assert.Single(_db.Context.PayoutItems.ToList()).RequiresReview);
+        }
+
+        /// <summary>
+        /// Only the teacher admits students: a parent/student gets no join token until the teacher is in the
+        /// room, otherwise Jitsi hands the host role to whoever connects first and the waiting room never starts.
+        /// </summary>
+        [Fact]
+        public async Task GetJitsiJoin_ParentBeforeTheTeacherIsInTheClassroom_IsToldToWait()
+        {
+            var parentEmail = $"lead-{Guid.NewGuid():N}@test.com";
+            var (session, _) = await SeedDemoSessionAsync(parentEmail, startAtUtc: DateTime.UtcNow.AddMinutes(5));
+            session.MeetingRoomId = "gate-room";
+            var parentUser = await _db.SeedUserAsync(parentEmail, "x", UserRole.Parent);
+            _db.Context.ParentProfiles.Add(new ParentProfile { UserId = parentUser.Id });
+            await _db.Context.SaveChangesAsync();
+
+            await Assert.ThrowsAsync<ConflictException>(() => CreateSessionService().GetJitsiJoinAsync(session.Id, parentUser.Id));
+
+            TeacherIsInClassroom(session.Id);
+            Assert.Equal("gate-room", (await CreateSessionService().GetJitsiJoinAsync(session.Id, parentUser.Id)).Room);
+        }
+
+        /// <summary>Cash an admin enters for a counselor counts in that counselor's monthly collection, and so in their salary.</summary>
+        [Fact]
+        public async Task StaffPayout_ManualCashCollection_CountsTowardTheCounselorsMonthlyCollectionAndSalary()
+        {
+            var counselor = await _db.SeedUserAsync($"counselor-cash-{Guid.NewGuid():N}@test.com", "x", UserRole.AdmissionTeam);
+            var service = new StaffPayoutService(_db.UnitOfWork, _auditLog);
+            await service.SetCompensationAsync(counselor.Id, new SaveStaffCompensationRequest
+            {
+                Basis = CompensationBasis.PercentOfMonthlyCollection,
+                CollectionPercentage = 10m,
+                EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-60)),
+            });
+
+            var added = await service.AddManualCollectionAsync(new AddManualCollectionRequest
+            {
+                UserId = counselor.Id, Amount = 25500m, Reference = "Rahul - Phonics Level 3",
+            });
+            Assert.Equal(25500m, added.Amount);
+
+            var earnings = await service.GetEarningsAsync(counselor.Id);
+            Assert.Equal(25500m, earnings.CurrentMonth.CollectionAmountRaw);
+            Assert.Equal(20000m, earnings.CurrentMonth.CollectionAmountRounded); // floored to the nearest 10,000
+            Assert.Equal(2000m, earnings.CurrentMonth.Amount);
+
+            await service.DeleteManualCollectionAsync(added.Id);
+            Assert.Equal(0m, (await service.GetEarningsAsync(counselor.Id)).CurrentMonth.CollectionAmountRaw);
+
+            await Assert.ThrowsAsync<DomainValidationException>(() => service.AddManualCollectionAsync(
+                new AddManualCollectionRequest { UserId = counselor.Id, Amount = 100m, CollectedOn = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(3)) }));
         }
 
         /// <summary>
@@ -552,7 +706,7 @@ namespace iucs.readernest.tests
             });
             _emailSender.Sent.Clear();
 
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
 
             var approval = Assert.Single(await payouts.ListApprovalsAsync(pending: true));
             Assert.Equal(30, approval.ScheduledMinutes);
@@ -593,7 +747,7 @@ namespace iucs.readernest.tests
                     TeacherProfileId = session.TeacherProfileId, RatePerMinute = 10,
                     EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
                 });
-                await CreateSessionService().CompleteAsync(session.Id);
+                await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
                 return (await payouts.ListApprovalsAsync(pending: true)).Single(a => a.ClassSessionId == session.Id);
             }
 
@@ -654,7 +808,7 @@ namespace iucs.readernest.tests
             await ops.CaptureLeaveAttendanceAsync(session.Id, teacherProfile!.UserId); // brief network drop, partway through
             await ops.CaptureJoinAttendanceAsync(session.Id, teacherProfile.UserId); // automatic reconnect moments later
 
-            await CreateSessionService().CompleteAsync(session.Id); // taught essentially the whole class
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason()); // taught essentially the whole class
 
             var item = Assert.Single(_db.Context.PayoutItems.ToList());
             Assert.False(item.RequiresReview);
@@ -689,7 +843,7 @@ namespace iucs.readernest.tests
                 LeftAtUtc = joinedAt.AddMinutes(10),
             });
             await _db.Context.SaveChangesAsync();
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
 
             var payout = await _db.Context.Payouts.AsNoTracking().FirstAsync();
             var flaggedItem = Assert.Single(_db.Context.PayoutItems.ToList());
@@ -742,7 +896,7 @@ namespace iucs.readernest.tests
                 EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
             });
             await SeedFullTeacherAttendanceAsync(session);
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
             var payout = await _db.Context.Payouts.AsNoTracking().FirstAsync();
             await payouts.AddItemAsync(payout.Id, new AddPayoutItemRequest { Amount = -75m, Reason = "Late by 10 minutes <twice>" });
             await payouts.AddItemAsync(payout.Id, new AddPayoutItemRequest { Amount = 200m, Reason = "Festival bonus" });
@@ -843,7 +997,7 @@ namespace iucs.readernest.tests
                 EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
             });
 
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
             var defaultPaid = Assert.Single(_db.Context.PayoutItems.ToList());
             Assert.Equal(PayoutItemType.SessionEarning, defaultPaid.Type);
             Assert.Equal(36000m, defaultPaid.Amount); // paid from the default card (800/min * 45 min)
@@ -868,7 +1022,7 @@ namespace iucs.readernest.tests
             _db.Context.ClassSessions.Add(second);
             await _db.Context.SaveChangesAsync();
 
-            await CreateSessionService().CompleteAsync(second.Id);
+            await CreateSessionService().CompleteAsync(second.Id, WithReviewReason());
             var overridden = _db.Context.PayoutItems.Single(i => i.ClassSessionId == second.Id);
             Assert.Equal(54000m, overridden.Amount); // 1200/min * 45 min
         }
@@ -887,7 +1041,7 @@ namespace iucs.readernest.tests
                 new Payout { TeacherProfileId = session.TeacherProfileId, PeriodYear = next.Year, PeriodMonth = next.Month, Status = PayoutStatus.Finalized });
             await _db.Context.SaveChangesAsync();
 
-            var completed = await CreateSessionService().CompleteAsync(session.Id); // must not throw
+            var completed = await CreateSessionService().CompleteAsync(session.Id, WithReviewReason()); // must not throw
 
             Assert.Equal(SessionStatus.Completed, completed.Status);
             var item = await _db.Context.PayoutItems.Include(i => i.Payout).FirstAsync(i => i.ClassSessionId == session.Id);
@@ -1774,6 +1928,7 @@ namespace iucs.readernest.tests
             _db.Context.ParentProfiles.Add(new ParentProfile { UserId = parentUser.Id });
             await _db.Context.SaveChangesAsync();
 
+            TeacherIsInClassroom(session.Id);
             var join = await CreateSessionService().GetJitsiJoinAsync(session.Id, parentUser.Id);
             Assert.Equal("demo-room", join.Room);
         }
@@ -2401,7 +2556,7 @@ namespace iucs.readernest.tests
                 EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
             });
 
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
 
             var approval = Assert.Single(await payouts.ListApprovalsAsync(pending: true));
             Assert.Equal(2, approval.RecordingCount);
@@ -3572,7 +3727,7 @@ namespace iucs.readernest.tests
                 EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
             });
             await SeedFullTeacherAttendanceAsync(session);
-            await CreateSessionService().CompleteAsync(session.Id); // accrues the earning
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason()); // accrues the earning
             var payout = await _db.Context.Payouts.FirstAsync();
             _db.Context.ChangeTracker.Clear(); // fresh request scope
 
@@ -6221,7 +6376,7 @@ namespace iucs.readernest.tests
             // and the partial amount used to be capped at that 0.
             var payouts = CreatePayoutService();
             var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1); // no rate, no attendance → flagged at 0
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
             var approval = (await payouts.ListApprovalsAsync(pending: true)).Single(a => a.ClassSessionId == session.Id);
             Assert.Equal(0m, approval.FullAmount);
 
@@ -6276,7 +6431,7 @@ namespace iucs.readernest.tests
         {
             var (batch, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
 
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
 
             var reloaded = await _db.Context.Batches.FindAsync(batch.Id);
             Assert.Equal(BatchStatus.Dormant, reloaded!.Status);
@@ -6296,7 +6451,7 @@ namespace iucs.readernest.tests
                 ],
             });
 
-            var completed = await CreateSessionService().CompleteAsync(session.Id); // no Summary in the request
+            var completed = await CreateSessionService().CompleteAsync(session.Id, WithReviewReason()); // no Summary in the request
 
             Assert.False(string.IsNullOrWhiteSpace(completed.Summary));
             // QuizAttempts (per GetEngagementSummaryAsync) sums BOTH QuizAttempt and QuizCorrect
@@ -6309,7 +6464,7 @@ namespace iucs.readernest.tests
         {
             var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
 
-            var completed = await CreateSessionService().CompleteAsync(session.Id);
+            var completed = await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
 
             Assert.False(string.IsNullOrWhiteSpace(completed.Summary));
         }
@@ -6320,7 +6475,7 @@ namespace iucs.readernest.tests
             var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
 
             var completed = await CreateSessionService().CompleteAsync(
-                session.Id, new CompleteSessionRequest { Summary = "Covered short vowels, both kids engaged well." });
+                session.Id, WithReviewReason("Covered short vowels, both kids engaged well."));
 
             Assert.Equal("Covered short vowels, both kids engaged well.", completed.Summary);
         }
@@ -7182,7 +7337,7 @@ namespace iucs.readernest.tests
                 EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)),
             });
 
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
 
             var payout = Assert.Single(_db.Context.Payouts.ToList());
             var item = Assert.Single(_db.Context.PayoutItems.ToList());
@@ -7293,7 +7448,7 @@ namespace iucs.readernest.tests
 
             // Completing accrues a payout against the session's OWN teacher, so an outsider
             // must not be able to trigger it by naming a session id.
-            await Assert.ThrowsAsync<ForbiddenException>(() => CreateSessionService().CompleteAsync(session.Id));
+            await Assert.ThrowsAsync<ForbiddenException>(() => CreateSessionService().CompleteAsync(session.Id, WithReviewReason()));
 
             var untouched = await _db.Context.ClassSessions.FindAsync(session.Id);
             Assert.Equal(SessionStatus.Scheduled, untouched!.Status);
@@ -7791,7 +7946,7 @@ namespace iucs.readernest.tests
             var userService2 = new UserService(
                 uow2, _hasher, notifications2, emailTemplates2, auditLog2, _emailSender, _whatsAppSender, _smsSender, _bulkFileReader, new AesGcmPinVault(Microsoft.Extensions.Options.Options.Create(new PinVaultOptions { Key = "test-key-test-key-test-key-test-key" })), NullLogger<UserService>.Instance);
             var sessionService2 = new SessionService(
-                uow2, auditLog2, CreatePayoutService(), notifications2, _db.CurrentUser, new FakeJitsiTokenService(), new ClassSessionEventLogService(uow2), new FakeTokenService());
+                uow2, auditLog2, CreatePayoutService(), notifications2, _db.CurrentUser, new FakeJitsiTokenService(), new ClassSessionEventLogService(uow2), new FakeTokenService(), new ClassroomPresenceTracker());
             var service1 = CreateStoreService();
             var service2 = new StoreService(
                 uow2, auditLog2,
@@ -8367,10 +8522,10 @@ namespace iucs.readernest.tests
             var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 3);
             var sessions = CreateSessionService();
 
-            await sessions.CompleteAsync(session.Id, new CompleteSessionRequest());
+            await sessions.CompleteAsync(session.Id, WithReviewReason());
 
             await Assert.ThrowsAsync<DomainValidationException>(() =>
-                sessions.CompleteAsync(session.Id, new CompleteSessionRequest()));
+                sessions.CompleteAsync(session.Id, WithReviewReason()));
             await Assert.ThrowsAsync<DomainValidationException>(() =>
                 sessions.MarkNoShowAsync(session.Id, new MarkNoShowRequest { Party = NoShowParty.Teacher }));
 
@@ -8392,7 +8547,7 @@ namespace iucs.readernest.tests
                 RatePerMinute = 500, EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1)),
             });
             await SeedFullTeacherAttendanceAsync(session);
-            await CreateSessionService().CompleteAsync(session.Id, new CompleteSessionRequest());
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
             var payout = await _db.Context.Payouts.AsNoTracking().FirstAsync();
 
             // Paying before finalizing skips the lock on the month's total.
@@ -9089,8 +9244,8 @@ namespace iucs.readernest.tests
             });
             await SeedFullTeacherAttendanceAsync(shortSession);
             await SeedFullTeacherAttendanceAsync(longSession);
-            await CreateSessionService().CompleteAsync(shortSession.Id, new CompleteSessionRequest());
-            await CreateSessionService().CompleteAsync(longSession.Id, new CompleteSessionRequest());
+            await CreateSessionService().CompleteAsync(shortSession.Id, WithReviewReason());
+            await CreateSessionService().CompleteAsync(longSession.Id, WithReviewReason());
 
             var shortItem = await _db.Context.PayoutItems.AsNoTracking().FirstAsync(i => i.ClassSessionId == shortSession.Id);
             var longItem = await _db.Context.PayoutItems.AsNoTracking().FirstAsync(i => i.ClassSessionId == longSession.Id);
@@ -9122,7 +9277,7 @@ namespace iucs.readernest.tests
             _db.CurrentUser.UserId = teacherUser.Id;
 
             await SeedFullTeacherAttendanceAsync(session);
-            await CreateSessionService().CompleteAsync(session.Id, new CompleteSessionRequest());
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
             Assert.Equal(0m, (await _db.Context.PayoutItems.AsNoTracking().FirstAsync(i => i.ClassSessionId == session.Id)).Amount);
 
             // The admin only now enters the batch's per-class payout.
@@ -9188,8 +9343,8 @@ namespace iucs.readernest.tests
 
             await SeedFullTeacherAttendanceAsync(oldSession);
             await SeedFullTeacherAttendanceAsync(newSession);
-            await CreateSessionService().CompleteAsync(oldSession.Id);
-            await CreateSessionService().CompleteAsync(newSession.Id);
+            await CreateSessionService().CompleteAsync(oldSession.Id, WithReviewReason());
+            await CreateSessionService().CompleteAsync(newSession.Id, WithReviewReason());
 
             var oldItem = await _db.Context.PayoutItems.AsNoTracking().FirstAsync(i => i.ClassSessionId == oldSession.Id);
             var newItem = await _db.Context.PayoutItems.AsNoTracking().FirstAsync(i => i.ClassSessionId == newSession.Id);
@@ -9212,7 +9367,7 @@ namespace iucs.readernest.tests
             });
             await SeedFullTeacherAttendanceAsync(session);
 
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
 
             var item = await _db.Context.PayoutItems.AsNoTracking().FirstAsync(i => i.ClassSessionId == session.Id);
             Assert.Equal(0m, item.Amount); // no rate is actually in force yet
@@ -9254,7 +9409,7 @@ namespace iucs.readernest.tests
             });
             await SeedFullTeacherAttendanceAsync(session);
 
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
 
             var item = await _db.Context.PayoutItems.AsNoTracking().FirstAsync(i => i.ClassSessionId == session.Id);
             Assert.Equal(300m, item.Amount); // 10/min * 30 min -- 30.5 rounds DOWN to the even number
@@ -9302,7 +9457,7 @@ namespace iucs.readernest.tests
                 EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1)),
             });
             // No attendance at all recorded -- flags for review per AccrueForSessionAsync.
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
 
             var payout = await _db.Context.Payouts.AsNoTracking().FirstAsync();
             var flaggedItem = Assert.Single(_db.Context.PayoutItems.ToList());
@@ -10776,7 +10931,7 @@ namespace iucs.readernest.tests
                 EffectiveFrom = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1)),
             });
             await SeedFullTeacherAttendanceAsync(session);
-            await CreateSessionService().CompleteAsync(session.Id);
+            await CreateSessionService().CompleteAsync(session.Id, WithReviewReason());
 
             var payout = await _db.Context.Payouts.AsNoTracking().SingleAsync(p => p.TeacherProfileId == session.TeacherProfileId);
             Assert.Equal(PayoutStatus.Pending, payout.Status); // sanity: not finalized/paid yet
@@ -11547,6 +11702,7 @@ namespace iucs.readernest.tests
         {
             var (parent, earlier, now) = await SeedBackToBackClassesAsync();
 
+            TeacherIsInClassroom(earlier.Id, now.Id);
             var join = await CreateSessionService().GetJitsiJoinAsync(earlier.Id, parent.Id);
 
             Assert.Equal(now.Id, join.SessionId);
@@ -11559,6 +11715,7 @@ namespace iucs.readernest.tests
             // The deliberate "rejoin after the class ended" grace keeps working.
             var (parent, earlier, _) = await SeedBackToBackClassesAsync(secondIsOnNow: false);
 
+            TeacherIsInClassroom(earlier.Id);
             var join = await CreateSessionService().GetJitsiJoinAsync(earlier.Id, parent.Id);
 
             Assert.Equal(earlier.Id, join.SessionId);
@@ -11573,6 +11730,7 @@ namespace iucs.readernest.tests
             _db.Context.Update(earlier);
             await _db.Context.SaveChangesAsync();
 
+            TeacherIsInClassroom(earlier.Id);
             Assert.Equal("trn-earlier", (await CreateSessionService().GetJitsiJoinAsync(earlier.Id, parent.Id)).Room);
         }
 
@@ -11619,6 +11777,7 @@ namespace iucs.readernest.tests
 
             // The parent's own portal tab still only knows the ORIGINAL id -- it was open
             // before the edit and never reloaded. That's the whole scenario.
+            TeacherIsInClassroom(replacement.Id);
             var join = await CreateSessionService().GetJitsiJoinAsync(original.Id, parentUser.Id);
 
             Assert.Equal(replacement.Id, join.SessionId);

@@ -3199,6 +3199,69 @@ namespace iucs.readernest.domain.Migrations
                     b.ToTable("floating_notes");
                 });
 
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Payouts.ManualCollection", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<decimal>("Amount")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("numeric(12,2)")
+                        .HasColumnName("amount");
+
+                    b.Property<DateTime>("CollectedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("collected_at_utc");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at_utc");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<string>("Note")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("note");
+
+                    b.Property<string>("Reference")
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)")
+                        .HasColumnName("reference");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_manual_collections");
+
+                    b.HasIndex("UserId")
+                        .HasDatabaseName("ix_manual_collections_user_id");
+
+                    b.ToTable("manual_collections");
+                });
+
             modelBuilder.Entity("iucs.readernest.domain.Entities.Payouts.Payout", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3425,6 +3488,16 @@ namespace iucs.readernest.domain.Migrations
                     b.Property<int?>("ScheduledMinutes")
                         .HasColumnType("integer")
                         .HasColumnName("scheduled_minutes");
+
+                    b.Property<string>("TeacherReason")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("teacher_reason");
+
+                    b.Property<string>("TeacherReasonNote")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("teacher_reason_note");
 
                     b.Property<string>("Type")
                         .IsRequired()
@@ -6325,6 +6398,18 @@ namespace iucs.readernest.domain.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("fk_floating_notes_users_user_id");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("iucs.readernest.domain.Entities.Payouts.ManualCollection", b =>
+                {
+                    b.HasOne("iucs.readernest.domain.Entities.Users.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_manual_collections_users_user_id");
 
                     b.Navigation("User");
                 });

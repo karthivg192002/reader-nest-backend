@@ -3,6 +3,7 @@ using System.Security.Claims;
 using iucs.readernest.api.Auth;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Academics;
+using iucs.readernest.application.Dto.Payouts;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Services;
 using iucs.readernest.domain.Enums;
@@ -324,6 +325,14 @@ namespace iucs.readernest.api.Controllers
             CancellationToken cancellationToken)
         {
             return Ok(await _sessionService.CompleteAsync(id, request, cancellationToken));
+        }
+
+        /// <summary>Whether ending the class now sends its payout for admin review, so the teacher is asked for the mandatory reason first.</summary>
+        [HttpGet("{id:guid}/completion-requirements")]
+        [Authorize(Roles = $"{nameof(UserRole.Admin)},{nameof(UserRole.Teacher)}")]
+        public async Task<ActionResult<ClassReviewPreviewDto>> GetCompletionRequirements(Guid id, CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.GetCompletionRequirementsAsync(id, cancellationToken));
         }
 
         /// <summary>Edits a completed session's notes after the fact -- teacher feedback: "the

@@ -2,6 +2,7 @@ using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
 using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Common;
+using iucs.readernest.application.Dto.Payouts;
 using iucs.readernest.application.Dto.Sessions;
 using iucs.readernest.application.Helper;
 using iucs.readernest.application.Mappings;
@@ -51,6 +52,7 @@ namespace iucs.readernest.application.Services
         private readonly IJitsiTokenService _jitsiTokenService;
         private readonly IClassSessionEventLogService _eventLog;
         private readonly ITokenService _tokenService;
+        private readonly IClassroomPresenceTracker _presenceTracker;
 
         public SessionService(
             IUnitOfWork unitOfWork,
@@ -60,8 +62,10 @@ namespace iucs.readernest.application.Services
             ICurrentUserService currentUser,
             IJitsiTokenService jitsiTokenService,
             IClassSessionEventLogService eventLog,
-            ITokenService tokenService)
+            ITokenService tokenService,
+            IClassroomPresenceTracker presenceTracker)
         {
+            _presenceTracker = presenceTracker;
             _unitOfWork = unitOfWork;
             _auditLog = auditLog;
             _payoutService = payoutService;
@@ -614,7 +618,40 @@ namespace iucs.readernest.application.Services
             // is not enough — the caller must be this session's own teacher (or an Admin).
             await EnsureSessionParticipantAsync(session, cancellationToken);
 
-            return await CompleteCoreAsync(session, request?.Summary, null, cancellationToken);
+            // A class that goes to admin review (short, late start, no attendance) cannot be
+            // ended by its teacher without saying why -- client requirement. An admin ending it
+            // on her behalf isn't asked; the class then shows in Payout Approvals without a reason.
+            var caller = await _unitOfWork.Repository<User>().GetByIdAsync(_currentUser.UserId!.Value, cancellationToken);
+            if (caller?.Role == UserRole.Teacher && !TerminalStatuses.Contains(session.Status)
+                && (await _payoutService.PreviewReviewAsync(session, cancellationToken)).RequiresReview)
+            {
+                var note = request?.ReviewNote?.Trim();
+                if (request?.ReviewReason is not { } reason)
+                {
+                    throw new DomainValidationException("Please tell us why the class ran this way (reason) before ending it -- it goes to the admin for review.");
+                }
+                if (reason is TeacherReviewReason.ShortDuration or TeacherReviewReason.Other && string.IsNullOrEmpty(note))
+                {
+                    throw new DomainValidationException(reason == TeacherReviewReason.ShortDuration
+                        ? "Please mention how many minutes the class ran and the reason."
+                        : "Please describe the reason for the class status.");
+                }
+            }
+
+            return await CompleteCoreAsync(session, request?.Summary, null, cancellationToken, request?.ReviewReason, request?.ReviewNote?.Trim());
+        }
+
+        /// <summary>Tells the teacher's End Class screen whether ending now sends the payout for admin review, so it can ask for the mandatory reason first.</summary>
+        public async Task<ClassReviewPreviewDto> GetCompletionRequirementsAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(id, cancellationToken)
+                ?? throw new NotFoundException(nameof(ClassSession), id);
+            await EnsureSessionParticipantAsync(session, cancellationToken);
+
+            // Only a real class that is still open, and only a regular earning, can be reviewed.
+            return TerminalStatuses.Contains(session.Status)
+                ? new ClassReviewPreviewDto()
+                : await _payoutService.PreviewReviewAsync(session, cancellationToken);
         }
 
         public async Task<ClassSessionDto> CompleteAbandonedAsync(
@@ -638,7 +675,9 @@ namespace iucs.readernest.application.Services
             ClassSession session,
             string? summary,
             DateTime? endedAtUtc,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            TeacherReviewReason? reviewReason = null,
+            string? reviewNote = null)
         {
             if (TerminalStatuses.Contains(session.Status))
             {
@@ -671,6 +710,11 @@ namespace iucs.readernest.application.Services
                 session, PayoutItemType.SessionEarning,
                 session.Type == SessionType.Demo ? "Demo session" : null,
                 cancellationToken);
+            if (earning.RequiresReview && reviewReason is not null)
+            {
+                earning.TeacherReason = reviewReason;
+                earning.TeacherReasonNote = string.IsNullOrWhiteSpace(reviewNote) ? null : reviewNote;
+            }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
@@ -2202,6 +2246,16 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException("This class has already ended.");
             }
 
+            // Only the teacher admits students (client): Jitsi hands the host role to whoever is
+            // first into an empty room, so a child arriving before the teacher became the
+            // moderator and the waiting room never switched on. A parent/student therefore gets
+            // no join token until the teacher is in the class; the classroom screen keeps asking
+            // until she arrives, and from then on the lobby holds them until she lets them in.
+            if (user.Role == UserRole.Parent && !IsTeacherInClassroom(session.Id))
+            {
+                throw new ConflictException("Waiting for the teacher to start the class. You'll be let in once the teacher is in the room.");
+            }
+
             var jitsiConfigJson = await _unitOfWork.Repository<Integration>().Query()
                 .Where(i => i.Key == "jitsi")
                 .Select(i => i.ConfigJson)
@@ -2270,6 +2324,11 @@ namespace iucs.readernest.application.Services
                 StaffNames = staffNames,
             };
         }
+
+        /// <summary>True while the session's own teacher (or an admin hosting it) is connected to the classroom.</summary>
+        private bool IsTeacherInClassroom(Guid sessionId) =>
+            _presenceTracker.GetLiveConnections().Any(c =>
+                c.SessionId == sessionId.ToString() && c.Role == "teacher");
 
         public async Task<IReadOnlyList<GuestLinkStudentDto>> GetGuestLinkStudentsAsync(Guid sessionId, CancellationToken cancellationToken = default)
         {

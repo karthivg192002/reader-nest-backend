@@ -145,6 +145,12 @@ namespace iucs.readernest.application.Dto.Sessions
         /// <summary>Optional class summary shown in session history.</summary>
         [MaxLength(2000)]
         public string? Summary { get; set; }
+
+        /// <summary>Required when the class goes to admin review (see ISessionService.GetCompletionRequirementsAsync): why it ran the way it did.</summary>
+        public TeacherReviewReason? ReviewReason { get; set; }
+
+        [MaxLength(1000)]
+        public string? ReviewNote { get; set; }
     }
 
     /// <summary>Editing a completed session's notes after the fact -- see

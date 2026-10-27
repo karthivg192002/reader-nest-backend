@@ -471,14 +471,21 @@ namespace iucs.readernest.application.Services
                 })
                 .ToListAsync(cancellationToken);
 
+            // Cash the admin team entered for this person counts alongside the portal payments.
+            var manual = await CollectionOwnership.ManualFor(_unitOfWork.Repository<ManualCollection>().Query(), userId)
+                .Where(m => m.CollectedAtUtc >= lastMonthStart)
+                .Select(m => new { PaidAtUtc = m.CollectedAtUtc, m.Amount, m.Reference })
+                .ToListAsync(cancellationToken);
+            var manualThisMonth = manual.Where(m => m.PaidAtUtc >= thisMonthStart).ToList();
+
             var thisMonth = payments.Where(p => p.PaidAtUtc >= thisMonthStart).ToList();
             return new MyCollectionsDto
             {
-                ThisMonth = thisMonth.Sum(p => p.Amount),
-                ThisMonthPayments = thisMonth.Count,
-                LastMonth = payments.Where(p => p.PaidAtUtc < thisMonthStart).Sum(p => p.Amount),
+                ThisMonth = thisMonth.Sum(p => p.Amount) + manualThisMonth.Sum(m => m.Amount),
+                ThisMonthPayments = thisMonth.Count + manualThisMonth.Count,
+                LastMonth = payments.Where(p => p.PaidAtUtc < thisMonthStart).Sum(p => p.Amount)
+                    + manual.Where(m => m.PaidAtUtc < thisMonthStart).Sum(m => m.Amount),
                 Payments = thisMonth
-                    .OrderByDescending(p => p.PaidAtUtc)
                     .Select(p => new MyCollectionPaymentDto
                     {
                         PaidAtUtc = DateTime.SpecifyKind(p.PaidAtUtc, DateTimeKind.Utc),
@@ -488,6 +495,16 @@ namespace iucs.readernest.application.Services
                         ChildName = p.ChildFirst is null ? null : $"{p.ChildFirst} {p.ChildLast}".Trim(),
                         Method = p.Method?.ToString(),
                     })
+                    .Concat(manualThisMonth.Select(m => new MyCollectionPaymentDto
+                    {
+                        PaidAtUtc = DateTime.SpecifyKind(m.PaidAtUtc, DateTimeKind.Utc),
+                        Amount = m.Amount,
+                        InvoiceNumber = "Cash (added by admin)",
+                        ParentName = m.Reference ?? "Cash collection",
+                        ChildName = null,
+                        Method = "Cash",
+                    }))
+                    .OrderByDescending(p => p.PaidAtUtc)
                     .ToList(),
             };
         }
@@ -524,6 +541,10 @@ namespace iucs.readernest.application.Services
             var totalCollected = await _unitOfWork.Repository<PaymentTransaction>().Query()
                 .Where(t => t.Status == TransactionStatus.Success && t.PaidAtUtc != null && t.PaidAtUtc >= monthStart && t.PaidAtUtc < monthEnd)
                 .SumAsync(t => (decimal?)t.Amount, cancellationToken) ?? 0m;
+            // Cash entered by hand for a counselor is real money collected this month too.
+            totalCollected += await _unitOfWork.Repository<ManualCollection>().Query()
+                .Where(m => m.CollectedAtUtc >= monthStart && m.CollectedAtUtc < monthEnd)
+                .SumAsync(m => (decimal?)m.Amount, cancellationToken) ?? 0m;
 
             // Counselor rows: the admission team, plus anyone paid a percentage of their own
             // collection. Everyone else's collections (an admin's manual invoice, say) are "Others".
@@ -547,6 +568,9 @@ namespace iucs.readernest.application.Services
                         counselor.Id)
                     .Where(t => t.Status == TransactionStatus.Success && t.PaidAtUtc != null && t.PaidAtUtc >= monthStart && t.PaidAtUtc < monthEnd)
                     .SumAsync(t => (decimal?)t.Amount, cancellationToken) ?? 0m;
+                collected += await CollectionOwnership.ManualFor(_unitOfWork.Repository<ManualCollection>().Query(), counselor.Id)
+                    .Where(m => m.CollectedAtUtc >= monthStart && m.CollectedAtUtc < monthEnd)
+                    .SumAsync(m => (decimal?)m.Amount, cancellationToken) ?? 0m;
                 var own = demos.Where(d => d.CreatedBy == counselor.Id).ToList();
                 var converted = own.Count(d => Converted(d.ConversionStatus));
 

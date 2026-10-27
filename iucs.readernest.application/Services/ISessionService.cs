@@ -1,3 +1,4 @@
+using iucs.readernest.application.Dto.Payouts;
 using iucs.readernest.application.Dto.Sessions;
 
 namespace iucs.readernest.application.Services
@@ -48,6 +49,9 @@ namespace iucs.readernest.application.Services
             Guid id,
             CompleteSessionRequest? request = null,
             CancellationToken cancellationToken = default);
+
+        /// <summary>Whether ending this class now sends its payout for admin review (and why) -- the teacher must then give a reason to CompleteAsync.</summary>
+        Task<ClassReviewPreviewDto> GetCompletionRequirementsAsync(Guid id, CancellationToken cancellationToken = default);
 
         /// <summary>Edits a completed session's notes after the fact — see the implementation's
         /// own doc comment for why this exists separately from CompleteAsync.</summary>

@@ -1,5 +1,6 @@
 using iucs.readernest.domain.Entities.Admission;
 using iucs.readernest.domain.Entities.Billing;
+using iucs.readernest.domain.Entities.Payouts;
 using iucs.readernest.domain.Enums;
 
 namespace iucs.readernest.application.Common
@@ -15,6 +16,14 @@ namespace iucs.readernest.application.Common
     /// </summary>
     public static class CollectionOwnership
     {
+        /// <summary>
+        /// Cash the admin team entered by hand for this counselor (see <see cref="ManualCollection"/>).
+        /// Always their own collection, whatever the month's invoices say, and it is added on top of
+        /// the portal payments everywhere the portal figure is used.
+        /// </summary>
+        public static IQueryable<ManualCollection> ManualFor(IQueryable<ManualCollection> manual, Guid userId) =>
+            manual.Where(m => m.UserId == userId);
+
         public static IQueryable<Invoice> OwnedBy(IQueryable<Invoice> invoices, IQueryable<DemoBooking> bookings, Guid userId) =>
             invoices.Where(i => bookings.Any(b => b.InvoiceId == i.Id && b.CreatedBy == userId)
                                 || (!bookings.Any(b => b.InvoiceId == i.Id) && i.CreatedBy == userId));

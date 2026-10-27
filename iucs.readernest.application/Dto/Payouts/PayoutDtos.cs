@@ -73,8 +73,21 @@ namespace iucs.readernest.application.Dto.Payouts
     }
 
     /// <summary>One short / unattended class awaiting (or given) a payout decision — a row on the Payout Approvals screen.</summary>
+    /// <summary>What ending a class would trigger: whether it needs the teacher's reason, and why.</summary>
+    public class ClassReviewPreviewDto
+    {
+        public bool RequiresReview { get; set; }
+
+        public List<string> Reasons { get; set; } = [];
+    }
+
     public class PayoutApprovalDto
     {
+        /// <summary>The teacher's own reason for the class status; null for a class that was completed without one (e.g. auto-completed).</summary>
+        public TeacherReviewReason? TeacherReason { get; set; }
+
+        public string? TeacherReasonNote { get; set; }
+
         public Guid ItemId { get; set; }
 
         public Guid PayoutId { get; set; }
@@ -261,5 +274,45 @@ namespace iucs.readernest.application.Dto.Payouts
         public decimal TotalAmount { get; set; }
 
         public IReadOnlyList<TeacherBatchEarningsDto> Batches { get; set; } = [];
+    }
+
+    public class ManualCollectionDto
+    {
+        public Guid Id { get; set; }
+
+        public Guid UserId { get; set; }
+
+        public string StaffName { get; set; } = null!;
+
+        public decimal Amount { get; set; }
+
+        public DateTime CollectedAtUtc { get; set; }
+
+        public string? Reference { get; set; }
+
+        public string? Note { get; set; }
+
+        /// <summary>The admin who entered it.</summary>
+        public string? EnteredByName { get; set; }
+
+        public DateTime CreatedAtUtc { get; set; }
+    }
+
+    public class AddManualCollectionRequest
+    {
+        [Required]
+        public Guid UserId { get; set; }
+
+        [Range(0.01, 100000000)]
+        public decimal Amount { get; set; }
+
+        /// <summary>The day the cash was received (defaults to today).</summary>
+        public DateOnly? CollectedOn { get; set; }
+
+        [MaxLength(300)]
+        public string? Reference { get; set; }
+
+        [MaxLength(1000)]
+        public string? Note { get; set; }
     }
 }

@@ -18,6 +18,9 @@ namespace iucs.readernest.application.Services
 {
     public class PayoutService : IPayoutService
     {
+        /// <summary>How long after the scheduled start a teacher can join before the class's payout needs admin approval.</summary>
+        public static readonly TimeSpan TeacherJoinGrace = TimeSpan.FromMinutes(2);
+
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditLogService _auditLog;
         private readonly INotificationService _notificationService;
@@ -291,38 +294,13 @@ namespace iucs.readernest.application.Services
             int? deliveredMinutes = null;
             if (type == PayoutItemType.SessionEarning && durationMinutes > 0)
             {
+                var review = await EvaluateReviewAsync(session, durationMinutes, cancellationToken);
+                requiresReview = review.RequiresReview;
                 scheduledMinutes = durationMinutes;
-                var attendance = await _unitOfWork.Repository<SessionAttendance>().Query()
-                    .Where(a => a.ClassSessionId == session.Id && a.TeacherProfileId == session.TeacherProfileId)
-                    .FirstOrDefaultAsync(cancellationToken);
-
-                if (attendance?.JoinedAtUtc is { } joinedAtUtc)
+                deliveredMinutes = review.DeliveredMinutes;
+                foreach (var reviewNote in review.Notes)
                 {
-                    deliveredMinutes = DeliveredMinutes(session, joinedAtUtc, attendance.LeftAtUtc ?? DateTime.UtcNow);
-
-                    // Core rule (client requirement): ANY class that ran for less than its
-                    // scheduled duration is flagged for payout approval — not only ones under
-                    // some percentage threshold, and never silently treated as a normal
-                    // completed class. Whole minutes, so a class that started a few seconds late
-                    // doesn't trip it.
-                    if (deliveredMinutes < durationMinutes)
-                    {
-                        requiresReview = true;
-                        var shortNote = $"Class ran {deliveredMinutes} of {durationMinutes} scheduled minutes ({durationMinutes - deliveredMinutes} min short) — awaiting payout approval.";
-                        note = string.IsNullOrEmpty(note) ? shortNote : $"{note} ({shortNote})";
-                    }
-                }
-                else
-                {
-                    // No SessionAttendance row at all (or one with no JoinedAtUtc) -- the
-                    // platform has zero evidence the teacher ever actually joined. Completing a
-                    // session doesn't require having joined the live classroom hub first (an
-                    // admin, or the teacher via a direct API call, can mark it done regardless),
-                    // so this is at least as worth a human's attention as attendance that fell
-                    // short -- arguably more, since here there is no attendance at all to weigh.
-                    requiresReview = true;
-                    const string noAttendanceNote = "No attendance was ever recorded for the teacher on this session — review before finalizing.";
-                    note = string.IsNullOrEmpty(note) ? noAttendanceNote : $"{note} ({noAttendanceNote})";
+                    note = string.IsNullOrEmpty(note) ? reviewNote : $"{note} ({reviewNote})";
                 }
             }
 
@@ -349,6 +327,83 @@ namespace iucs.readernest.application.Services
             payout.Items.Add(item);
             payout.TotalAmount += amount;
             return item;
+        }
+
+        private sealed record ReviewEvaluation(bool RequiresReview, int? DeliveredMinutes, List<string> Notes);
+
+        /// <summary>
+        /// Whether a completed class's payout has to go to Payout Approvals: it ran short of its
+        /// scheduled duration, the teacher joined after the grace period, or no attendance was
+        /// ever recorded. Shared by the accrual and by <see cref="PreviewReviewAsync"/>, so what
+        /// the teacher is asked before ending the class is exactly what then gets flagged.
+        /// </summary>
+        private async Task<ReviewEvaluation> EvaluateReviewAsync(
+            ClassSession session, int durationMinutes, CancellationToken cancellationToken)
+        {
+            var requiresReview = false;
+            int? deliveredMinutes = null;
+            var notes = new List<string>();
+            var attendance = await _unitOfWork.Repository<SessionAttendance>().Query()
+                .Where(a => a.ClassSessionId == session.Id && a.TeacherProfileId == session.TeacherProfileId)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (attendance?.JoinedAtUtc is { } joinedAtUtc)
+            {
+                deliveredMinutes = DeliveredMinutes(session, joinedAtUtc, attendance.LeftAtUtc ?? DateTime.UtcNow);
+
+                // Core rule (client requirement): ANY class that ran for less than its
+                // scheduled duration is flagged for payout approval -- not only ones under
+                // some percentage threshold, and never silently treated as a normal
+                // completed class. Whole minutes, so a class that started a few seconds late
+                // doesn't trip it.
+                if (deliveredMinutes < durationMinutes)
+                {
+                    requiresReview = true;
+                    notes.Add($"Class ran {deliveredMinutes} of {durationMinutes} scheduled minutes ({durationMinutes - deliveredMinutes} min short) — awaiting payout approval.");
+                }
+
+                // Late-joining rule (client requirement): a teacher has a 2-minute grace to
+                // join -- for a 6:00 PM class, joining by 6:02 PM needs no approval, after that
+                // the payment goes to the admin even if she taught on and delivered the full
+                // class. Judged on the clock minute she joined, so 6:02:40 still counts as 6:02.
+                var joinedMinute = new DateTime(joinedAtUtc.Year, joinedAtUtc.Month, joinedAtUtc.Day,
+                    joinedAtUtc.Hour, joinedAtUtc.Minute, 0, DateTimeKind.Utc);
+                if (joinedMinute > session.ScheduledStartAtUtc + TeacherJoinGrace)
+                {
+                    requiresReview = true;
+                    var lateBy = (int)Math.Floor((joinedMinute - session.ScheduledStartAtUtc).TotalMinutes);
+                    notes.Add($"Teacher joined {lateBy} min after the scheduled start (grace is {(int)TeacherJoinGrace.TotalMinutes} min) — awaiting payout approval.");
+                }
+            }
+            else
+            {
+                // No SessionAttendance row at all (or one with no JoinedAtUtc) -- the
+                // platform has zero evidence the teacher ever actually joined. Completing a
+                // session doesn't require having joined the live classroom hub first (an
+                // admin, or the teacher via a direct API call, can mark it done regardless),
+                // so this is at least as worth a human's attention as attendance that fell
+                // short -- arguably more, since here there is no attendance at all to weigh.
+                requiresReview = true;
+                notes.Add("No attendance was ever recorded for the teacher on this session — review before finalizing.");
+            }
+
+            return new ReviewEvaluation(requiresReview, deliveredMinutes, notes);
+        }
+
+        public async Task<ClassReviewPreviewDto> PreviewReviewAsync(ClassSession session, CancellationToken cancellationToken = default)
+        {
+            var durationMinutes = (int)Math.Round((session.ScheduledEndAtUtc - session.ScheduledStartAtUtc).TotalMinutes);
+            if (durationMinutes <= 0)
+            {
+                return new ClassReviewPreviewDto();
+            }
+
+            var review = await EvaluateReviewAsync(session, durationMinutes, cancellationToken);
+            return new ClassReviewPreviewDto
+            {
+                RequiresReview = review.RequiresReview,
+                Reasons = review.Notes,
+            };
         }
 
         /// <summary>
@@ -664,6 +719,8 @@ namespace iucs.readernest.application.Services
                     FullAmount = fullAmount,
                     ProRatedAmount = ProRate(fullAmount, i.ScheduledMinutes, delivered),
                     Amount = i.Amount,
+                    TeacherReason = i.TeacherReason,
+                    TeacherReasonNote = i.TeacherReasonNote,
                     Pending = i.RequiresReview,
                     Decision = i.ReviewDecision,
                     ReviewedByName = i.ReviewedByUserId is { } rid && reviewers.TryGetValue(rid, out var rn) ? rn : null,

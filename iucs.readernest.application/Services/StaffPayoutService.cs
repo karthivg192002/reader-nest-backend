@@ -183,6 +183,95 @@ namespace iucs.readernest.application.Services
             return payout.ToDto(name?.Trim());
         }
 
+        private static readonly TimeSpan IstOffset = TimeSpan.FromHours(5.5);
+
+        public async Task<ManualCollectionDto> AddManualCollectionAsync(
+            AddManualCollectionRequest request, CancellationToken cancellationToken = default)
+        {
+            var counselor = await _unitOfWork.Repository<User>().Query()
+                .FirstOrDefaultAsync(u => u.Id == request.UserId, cancellationToken)
+                ?? throw new NotFoundException("User not found.");
+            if (!EligibleRoles.Contains(counselor.Role))
+            {
+                throw new DomainValidationException("Cash can only be added to an admission counselor / staff member's collection.");
+            }
+            if (request.Amount <= 0)
+            {
+                throw new DomainValidationException("Enter an amount greater than zero.");
+            }
+
+            // The day the cash was received, taken as midday IST so it lands in that IST month
+            // whichever way the month boundary is cut.
+            var todayIst = DateOnly.FromDateTime(DateTime.UtcNow.Add(IstOffset));
+            var day = request.CollectedOn ?? todayIst;
+            if (day > todayIst)
+            {
+                throw new DomainValidationException("The collection date can't be in the future.");
+            }
+            var collectedAtUtc = DateTime.SpecifyKind(day.ToDateTime(new TimeOnly(12, 0)) - IstOffset, DateTimeKind.Utc);
+
+            var entry = new ManualCollection
+            {
+                UserId = counselor.Id,
+                Amount = request.Amount,
+                CollectedAtUtc = collectedAtUtc,
+                Reference = string.IsNullOrWhiteSpace(request.Reference) ? null : request.Reference.Trim(),
+                Note = string.IsNullOrWhiteSpace(request.Note) ? null : request.Note.Trim(),
+            };
+            await _unitOfWork.Repository<ManualCollection>().AddAsync(entry, cancellationToken);
+            await _auditLog.StageAsync(AuditAction.Create, nameof(ManualCollection), entry.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            return (await ListManualCollectionsCoreAsync(null, null, null, entry.Id, cancellationToken)).First();
+        }
+
+        public Task<IReadOnlyList<ManualCollectionDto>> ListManualCollectionsAsync(
+            Guid? userId, int? year, int? month, CancellationToken cancellationToken = default)
+            => ListManualCollectionsCoreAsync(userId, year, month, null, cancellationToken);
+
+        private async Task<IReadOnlyList<ManualCollectionDto>> ListManualCollectionsCoreAsync(
+            Guid? userId, int? year, int? month, Guid? onlyId, CancellationToken cancellationToken)
+        {
+            var query = _unitOfWork.Repository<ManualCollection>().Query();
+            if (onlyId is { } id) query = query.Where(m => m.Id == id);
+            if (userId is { } uid) query = query.Where(m => m.UserId == uid);
+            if (year is { } y && month is { } mo)
+            {
+                var start = new DateTime(y, mo, 1, 0, 0, 0, DateTimeKind.Utc).Subtract(IstOffset);
+                var end = start.AddMonths(1);
+                query = query.Where(m => m.CollectedAtUtc >= start && m.CollectedAtUtc < end);
+            }
+
+            var rows = await query.OrderByDescending(m => m.CollectedAtUtc).ThenByDescending(m => m.CreatedAtUtc).ToListAsync(cancellationToken);
+            var userIds = rows.Select(r => r.UserId).Concat(rows.Where(r => r.CreatedBy != null).Select(r => r.CreatedBy!.Value)).Distinct().ToList();
+            var names = await _unitOfWork.Repository<User>().Query()
+                .Where(u => userIds.Contains(u.Id))
+                .Select(u => new { u.Id, Name = u.FirstName + " " + u.LastName })
+                .ToDictionaryAsync(u => u.Id, u => u.Name.Trim(), cancellationToken);
+
+            return rows.Select(r => new ManualCollectionDto
+            {
+                Id = r.Id,
+                UserId = r.UserId,
+                StaffName = names.GetValueOrDefault(r.UserId) ?? "",
+                Amount = r.Amount,
+                CollectedAtUtc = r.CollectedAtUtc,
+                Reference = r.Reference,
+                Note = r.Note,
+                EnteredByName = r.CreatedBy is { } by ? names.GetValueOrDefault(by) : null,
+                CreatedAtUtc = r.CreatedAtUtc,
+            }).ToList();
+        }
+
+        public async Task DeleteManualCollectionAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            var entry = await _unitOfWork.Repository<ManualCollection>().FirstOrDefaultAsync(m => m.Id == id, cancellationToken)
+                ?? throw new NotFoundException(nameof(ManualCollection), id);
+            _unitOfWork.Repository<ManualCollection>().Remove(entry);
+            await _auditLog.StageAsync(AuditAction.Delete, nameof(ManualCollection), entry.Id.ToString(), cancellationToken: cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
         public async Task<IReadOnlyList<PayoutChangeDto>> GetHistoryAsync(Guid staffPayoutId, CancellationToken cancellationToken = default)
         {
             var changes = await _unitOfWork.Repository<PayoutChange>().Query()
@@ -246,6 +335,11 @@ namespace iucs.readernest.application.Services
                     .Where(t => t.Status == TransactionStatus.Success
                         && t.PaidAtUtc != null && t.PaidAtUtc >= monthStart && t.PaidAtUtc < monthEnd)
                     .SumAsync(t => (decimal?)t.Amount, cancellationToken) ?? 0m;
+
+                // Cash the admin team entered for them counts the same as a portal payment.
+                collectionRaw += await CollectionOwnership.ManualFor(_unitOfWork.Repository<ManualCollection>().Query(), user.Id)
+                    .Where(m => m.CollectedAtUtc >= monthStart && m.CollectedAtUtc < monthEnd)
+                    .SumAsync(m => (decimal?)m.Amount, cancellationToken) ?? 0m;
 
                 // Floored DOWN to the nearest ₹10,000 before the percentage is applied (client
                 // requirement) — ₹4,64,000 and ₹4,69,000 both count as ₹4,60,000; only reaching

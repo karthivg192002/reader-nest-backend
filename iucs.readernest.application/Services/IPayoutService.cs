@@ -37,6 +37,13 @@ namespace iucs.readernest.application.Services
         Task<PayoutItem> AccrueForSessionAsync(ClassSession session, PayoutItemType type, string? note, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Would ending this class right now send its payout to Payout Approvals (ran short, teacher
+        /// joined after the grace period, no attendance)? Read-only -- lets the teacher be asked for
+        /// the mandatory reason before the class is completed.
+        /// </summary>
+        Task<ClassReviewPreviewDto> PreviewReviewAsync(ClassSession session, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Emails Admin and every payout approver (Management / Founder) that a class ran short
         /// and is waiting in Payout Approvals — scheduled time, scheduled vs actual duration,
         /// shortfall, teacher and batch/students. Call after the item has been saved.

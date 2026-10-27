@@ -76,6 +76,32 @@ namespace iucs.readernest.api.Controllers
             return Ok(await _staffPayoutService.GetHistoryAsync(id, cancellationToken));
         }
 
+        /// <summary>Admin enters cash a counselor collected outside the portal so it counts toward their collection and salary.</summary>
+        [HttpPost("manual-collections")]
+        [HasPermission(PermissionModule.Payouts, PermissionAction.Edit)]
+        public async Task<ActionResult<ManualCollectionDto>> AddManualCollection(AddManualCollectionRequest request, CancellationToken cancellationToken)
+        {
+            return Ok(await _staffPayoutService.AddManualCollectionAsync(request, cancellationToken));
+        }
+
+        /// <summary>Manual cash entries, newest first; filter by counselor and/or month.</summary>
+        [HttpGet("manual-collections")]
+        [HasPermission(PermissionModule.Payouts, PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<ManualCollectionDto>>> ListManualCollections(
+            [FromQuery] Guid? userId, [FromQuery] int? year, [FromQuery] int? month, CancellationToken cancellationToken)
+        {
+            return Ok(await _staffPayoutService.ListManualCollectionsAsync(userId, year, month, cancellationToken));
+        }
+
+        /// <summary>Removes a mistaken manual cash entry.</summary>
+        [HttpDelete("manual-collections/{id:guid}")]
+        [HasPermission(PermissionModule.Payouts, PermissionAction.Edit)]
+        public async Task<IActionResult> DeleteManualCollection(Guid id, CancellationToken cancellationToken)
+        {
+            await _staffPayoutService.DeleteManualCollectionAsync(id, cancellationToken);
+            return NoContent();
+        }
+
         /// <summary>Marks a frozen (past-month) payout as paid.</summary>
         [HttpPost("{id:guid}/mark-paid")]
         [HasPermission(PermissionModule.Payouts, PermissionAction.Edit)]
