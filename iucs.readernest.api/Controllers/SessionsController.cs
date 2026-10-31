@@ -107,11 +107,27 @@ namespace iucs.readernest.api.Controllers
                 try
                 {
                     await _classroomHub.Clients.Group(ClassroomHub.GroupFor(join.SessionId))
-                        .SendAsync("StaffJoining", join.DisplayName, cancellationToken);
+                        .SendAsync("StaffJoining", join.DisplayName, join.IsSessionTeacher, cancellationToken);
                 }
                 catch (Exception)
                 {
                     // Best-effort: without it the monitor simply knocks like anyone else.
+                }
+            }
+            else if (!string.IsNullOrWhiteSpace(join.DisplayName))
+            {
+                // A parent/student has just been authorized and is about to land in the waiting
+                // room. Tell the teacher's screen straight away, so a child stuck at the door is
+                // visible to her (and she can admit them) instead of the first minutes of the
+                // class going by with an empty room.
+                try
+                {
+                    await _classroomHub.Clients.Group(ClassroomHub.GroupFor(join.SessionId))
+                        .SendAsync("ParticipantArriving", join.DisplayName, cancellationToken);
+                }
+                catch (Exception)
+                {
+                    // Best-effort: the teacher's own lobby-knock listener still shows them.
                 }
             }
 
