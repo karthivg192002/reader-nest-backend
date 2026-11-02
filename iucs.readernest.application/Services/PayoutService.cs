@@ -713,6 +713,8 @@ namespace iucs.readernest.application.Services
                     RecordedMinutes = recordedMinutes,
                     TeacherJoinedAtUtc = attendance?.JoinedAtUtc,
                     TeacherLeftAtUtc = attendance?.LeftAtUtc,
+                    TeacherClassStatus = session?.TeacherClassStatus,
+                    TeacherAdminNote = session?.TeacherAdminNote,
                     LateJoinMinutes = lateJoin,
                     EarlyEndMinutes = earlyEnd,
                     ShortfallReason = shortfallReason,
