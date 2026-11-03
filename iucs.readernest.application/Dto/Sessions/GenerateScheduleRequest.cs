@@ -38,4 +38,18 @@ namespace iucs.readernest.application.Dto.Sessions
         [Range(1, 500)]
         public int? SessionCount { get; set; }
     }
+
+    /// <summary>A slot on the requested pattern that already has a non-cancelled session, so generating leaves it alone.</summary>
+    public class SkippedSessionSlotDto
+    {
+        public DateTime StartAtUtc { get; set; }
+        public string Status { get; set; } = string.Empty;
+    }
+
+    /// <summary>What a generate would do — shown for confirmation before anything is created.</summary>
+    public class GenerateSchedulePreviewDto
+    {
+        public List<DateTime> ToCreate { get; set; } = [];
+        public List<SkippedSessionSlotDto> SkippedExisting { get; set; } = [];
+    }
 }
