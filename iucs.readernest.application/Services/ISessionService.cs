@@ -72,6 +72,13 @@ namespace iucs.readernest.application.Services
         Task<IReadOnlyList<FeedbackPendingSessionDto>> ListFeedbackPendingAsync(
             CancellationToken cancellationToken = default);
 
+        /// <summary>Dry run of GenerateScheduleAsync: what would be created, and which existing
+        /// sessions' slots would be left alone. Writes nothing.</summary>
+        Task<GenerateSchedulePreviewDto> PreviewGenerateScheduleAsync(
+            Guid batchId,
+            GenerateScheduleRequest request,
+            CancellationToken cancellationToken = default);
+
         Task<IReadOnlyList<ClassSessionDto>> GenerateScheduleAsync(
             Guid batchId,
             GenerateScheduleRequest request,

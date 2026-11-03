@@ -239,6 +239,7 @@ namespace iucs.readernest.application.Services
 
             await EnsureTeacherIsFreeAsync(
                 request.TeacherProfileId, request.ScheduledStartAtUtc, request.ScheduledEndAtUtc, cancellationToken);
+            await EnsureBatchSlotFreeAsync(request.BatchId, request.ScheduledStartAtUtc, null, cancellationToken);
 
             // Confirmed live via a client screen recording: a Demo scheduled from this generic
             // Sessions-page dialog (as opposed to Admission's dedicated Demo Booking flow, which
@@ -269,7 +270,16 @@ namespace iucs.readernest.application.Services
             };
             await _unitOfWork.Repository<ClassSession>().AddAsync(session, cancellationToken);
             await _auditLog.StageAsync(AuditAction.Create, nameof(ClassSession), session.Id.ToString(), cancellationToken: cancellationToken);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            try
+            {
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains(
+                "ix_class_sessions_batch_id_scheduled_start_at_utc", StringComparison.Ordinal) == true)
+            {
+                // Backstop for EnsureBatchSlotFreeAsync's check-then-insert race.
+                throw new DomainValidationException("This batch already has a session at that date and time.");
+            }
 
             await SendBookingConfirmationAsync(session, cancellationToken);
 
@@ -338,6 +348,7 @@ namespace iucs.readernest.application.Services
             await EnsureTeacherIsFreeAsync(
                 newTeacherId, request.ScheduledStartAtUtc, request.ScheduledEndAtUtc,
                 cancellationToken, excludeSessionId: original.Id);
+            await EnsureBatchSlotFreeAsync(newBatchId, request.ScheduledStartAtUtc, original.Id, cancellationToken);
 
             if (!missedDemo)
             {
@@ -1473,10 +1484,31 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
-        public async Task<IReadOnlyList<ClassSessionDto>> GenerateScheduleAsync(
+        public async Task<GenerateSchedulePreviewDto> PreviewGenerateScheduleAsync(
             Guid batchId,
             GenerateScheduleRequest request,
             CancellationToken cancellationToken = default)
+        {
+            var plan = await PlanScheduleAsync(batchId, request, cancellationToken);
+            return new GenerateSchedulePreviewDto
+            {
+                ToCreate = plan.Starts,
+                SkippedExisting = plan.Skipped,
+            };
+        }
+
+        private sealed record SchedulePlan(
+            Batch Batch,
+            int DurationMinutes,
+            List<DateTime> Starts,
+            List<SkippedSessionSlotDto> Skipped);
+
+        /// <summary>Works out which sessions a generate would create and which pattern slots
+        /// it would leave alone because the batch already has a session there. Writes nothing.</summary>
+        private async Task<SchedulePlan> PlanScheduleAsync(
+            Guid batchId,
+            GenerateScheduleRequest request,
+            CancellationToken cancellationToken)
         {
             var batch = await _unitOfWork.Repository<Batch>().GetByIdAsync(batchId, cancellationToken)
                 ?? throw new NotFoundException(nameof(Batch), batchId);
@@ -1536,9 +1568,24 @@ namespace iucs.readernest.application.Services
             bool InLeave(DateTime startUtc) =>
                 leaveWindows.Any(l => l.StartAtUtc < startUtc.AddMinutes(durationMinutes) && l.EndAtUtc > startUtc);
 
+            // Live, 3 Nov 2026 (Jashwika Sree, Phonics L2/3, Mon/Wed/Fri): extending a finished
+            // 12-class block failed because a non-cancelled session (a Rescheduled/Completed/
+            // NoShow row — not "upcoming", so the check above doesn't see it) already sat on one
+            // of the new slots. The unique (batch, start) index then rejected the whole insert.
+            // Those slots are already covered, so place the new sessions around them, same as
+            // UpdateFutureScheduleAsync does.
+            var startDateUtc = request.StartDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+            var occupiedRows = await sessionRepository.Query()
+                .Where(s => s.BatchId == batchId
+                    && s.Status != SessionStatus.Cancelled
+                    && s.ScheduledStartAtUtc >= startDateUtc)
+                .Select(s => new { s.ScheduledStartAtUtc, s.Status })
+                .ToListAsync(cancellationToken);
+            var occupiedStarts = occupiedRows.Select(o => o.ScheduledStartAtUtc).ToHashSet();
+
             var starts = leaveWindows.Count == 0
-                ? PlaceSessionStartTimes(request.StartDate, timeByDay, targetSessionCount, holidays)
-                : PlaceSessionStartTimes(request.StartDate, timeByDay, targetSessionCount + 400, holidays)
+                ? PlaceSessionStartTimes(request.StartDate, timeByDay, targetSessionCount, holidays, occupiedStarts)
+                : PlaceSessionStartTimes(request.StartDate, timeByDay, targetSessionCount + 400, holidays, occupiedStarts)
                     .Where(s => !InLeave(s))
                     .Take(targetSessionCount)
                     .ToList();
@@ -1546,6 +1593,29 @@ namespace iucs.readernest.application.Services
             {
                 throw new DomainValidationException("Could not place all sessions within two years; check the selected weekdays.");
             }
+
+            // Pattern slots up to the last new session that were left alone because the batch
+            // already has a session there — shown to the admin to confirm before anything is created.
+            var lastStart = starts.Count == 0 ? DateTime.MinValue : starts.Max();
+            var skipped = occupiedRows
+                .Where(o => o.ScheduledStartAtUtc <= lastStart
+                    && timeByDay.TryGetValue(o.ScheduledStartAtUtc.DayOfWeek, out var t)
+                    && TimeOnly.FromDateTime(o.ScheduledStartAtUtc) == t
+                    && !holidays.Contains(DateOnly.FromDateTime(o.ScheduledStartAtUtc)))
+                .OrderBy(o => o.ScheduledStartAtUtc)
+                .Select(o => new SkippedSessionSlotDto { StartAtUtc = o.ScheduledStartAtUtc, Status = o.Status.ToString() })
+                .ToList();
+
+            return new SchedulePlan(batch, durationMinutes, starts, skipped);
+        }
+
+        public async Task<IReadOnlyList<ClassSessionDto>> GenerateScheduleAsync(
+            Guid batchId,
+            GenerateScheduleRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var (batch, durationMinutes, starts, _) = await PlanScheduleAsync(batchId, request, cancellationToken);
+            var sessionRepository = _unitOfWork.Repository<ClassSession>();
 
             DateOnly? lastDate = null;
             foreach (var startUtc in starts)
@@ -1965,6 +2035,34 @@ namespace iucs.readernest.application.Services
             if (onLeave)
             {
                 throw new DomainValidationException("The teacher is on approved leave during this slot.");
+            }
+        }
+
+        /// <summary>
+        /// The unique (batch, start) index covers every non-cancelled session, so booking a slot a
+        /// batch already has a session on (e.g. a completed or rescheduled one) used to surface as
+        /// a bare 500 ("Something went wrong on our side"). Fails with the actual reason instead.
+        /// </summary>
+        private async Task EnsureBatchSlotFreeAsync(
+            Guid? batchId, DateTime startUtc, Guid? excludeSessionId, CancellationToken cancellationToken)
+        {
+            if (batchId is null)
+            {
+                return;
+            }
+
+            var existing = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.BatchId == batchId
+                    && s.Id != excludeSessionId
+                    && s.Status != SessionStatus.Cancelled
+                    && s.ScheduledStartAtUtc == startUtc)
+                .Select(s => new { s.Status })
+                .FirstOrDefaultAsync(cancellationToken);
+            if (existing is not null)
+            {
+                throw new DomainValidationException(
+                    $"This batch already has a {existing.Status} session at {DateTimeDisplay.ToLocal(startUtc)}. " +
+                    "Pick a different time, or cancel that session first.");
             }
         }
 

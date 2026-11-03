@@ -63,6 +63,17 @@ namespace iucs.readernest.api.Controllers
             return NoContent();
         }
 
+        /// <summary>Dry run of generate-schedule: the sessions it would create and the existing ones it would skip.</summary>
+        [HttpPost("{id:guid}/generate-schedule/preview")]
+        [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Create)]
+        public async Task<ActionResult<GenerateSchedulePreviewDto>> PreviewGenerateSchedule(
+            Guid id,
+            GenerateScheduleRequest request,
+            CancellationToken cancellationToken)
+        {
+            return Ok(await _sessionService.PreviewGenerateScheduleAsync(id, request, cancellationToken));
+        }
+
         /// <summary>Automated scheduling: places every course session on the chosen weekdays, skipping holidays.</summary>
         [HttpPost("{id:guid}/generate-schedule")]
         [HasPermission(PermissionModule.SessionCalendarManagement, PermissionAction.Create)]
