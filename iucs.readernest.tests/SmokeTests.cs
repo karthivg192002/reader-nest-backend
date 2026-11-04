@@ -158,6 +158,63 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task TeacherNoShow_OnAnOffPatternDay_CarriesForwardOntoTheBatchsOwnClassDay()
+        {
+            // Live, 4 Nov 2026 (Riya, Mon/Tue/Fri): a make-up on a Wednesday was itself missed,
+            // and its "same time next week" make-up landed on another Wednesday -- a day the
+            // batch never meets -- so the teacher waited alone.
+            var (batch, _, seeded) = await SeedBatchWithSessionAsync(totalSessions: 20);
+            seeded.Status = SessionStatus.Cancelled; // keep only the pattern built below
+            var monday = DateTime.UtcNow.Date.AddDays(7);
+            while (monday.DayOfWeek != DayOfWeek.Monday) monday = monday.AddDays(1);
+            var tenAm = TimeSpan.FromHours(10);
+            for (var week = 0; week < 3; week++)
+            {
+                foreach (var dayOffset in new[] { 0, 4 }) // Monday and Friday
+                {
+                    var start = monday.AddDays(week * 7 + dayOffset).Add(tenAm);
+                    _db.Context.Add(new ClassSession { BatchId = batch.Id, TeacherProfileId = seeded.TeacherProfileId, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(45), MeetingRoomId = $"r-{week}-{dayOffset}" });
+                }
+            }
+            var wednesday = monday.AddDays(2).Add(tenAm);
+            var offPattern = new ClassSession { BatchId = batch.Id, TeacherProfileId = seeded.TeacherProfileId, ScheduledStartAtUtc = wednesday, ScheduledEndAtUtc = wednesday.AddMinutes(45), MeetingRoomId = "r-wed" };
+            _db.Context.Add(offPattern);
+            await _db.Context.SaveChangesAsync();
+
+            var carried = await CreateSessionService().MarkNoShowAsync(offPattern.Id, new MarkNoShowRequest { Party = NoShowParty.Teacher });
+
+            var makeUp = carried.ScheduledStartAtUtc;
+            Assert.Contains(makeUp.DayOfWeek, new[] { DayOfWeek.Monday, DayOfWeek.Friday });
+            Assert.Equal(tenAm, makeUp.TimeOfDay);
+            // Into the first free slot of the pattern: after the batch's last regular class.
+            Assert.Equal(monday.AddDays(3 * 7).Add(tenAm), makeUp);
+        }
+
+        [Fact]
+        public async Task LowSessionsDigest_ListsActiveBatchesWithTwoOrFewerClassesLeft()
+        {
+            var (running, _, session) = await SeedBatchWithSessionAsync(totalSessions: 12); // 1 upcoming class
+            var (_, enrollment) = await SeedFolderParentEnrolledAsync(running.Id);
+            var (healthy, _, healthySession) = await SeedBatchWithSessionAsync(totalSessions: 12);
+            await SeedFolderParentEnrolledAsync(healthy.Id);
+            for (var i = 1; i <= 3; i++)
+            {
+                _db.Context.Add(new ClassSession { BatchId = healthy.Id, TeacherProfileId = healthySession.TeacherProfileId, ScheduledStartAtUtc = DateTime.UtcNow.AddDays(i * 2), ScheduledEndAtUtc = DateTime.UtcNow.AddDays(i * 2).AddMinutes(45), MeetingRoomId = $"h-{i}" });
+            }
+            await _db.Context.SaveChangesAsync();
+            running.Name = "Running Out Batch";
+            healthy.Name = "Healthy Batch";
+            _db.Context.UpdateRange(running, healthy);
+            await _db.Context.SaveChangesAsync();
+
+            var lines = await iucs.readernest.api.Services.BatchLowSessionsAlertBackgroundService.FindRunningOutAsync(_db.UnitOfWork, DateTime.UtcNow, CancellationToken.None);
+
+            Assert.Contains(lines, l => l.StartsWith("Running Out Batch — 1 left"));
+            Assert.DoesNotContain(lines, l => l.StartsWith("Healthy Batch"));
+            Assert.NotNull(enrollment);
+        }
+
+        [Fact]
         public async Task GetJitsiJoin_RejectsAFarFutureOrAlreadyEndedSession_EvenForAValidParticipant()
         {
             // The UI's Join button only disables itself outside the window (parent/utils.ts

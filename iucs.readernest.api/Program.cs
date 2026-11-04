@@ -127,6 +127,7 @@ builder.Services.AddHostedService<DemoFollowUpBackgroundService>();
 // Catches a completed class that never received a recording — auto-record can start
 // with no error yet still fail later in the pipeline, which nothing else catches
 builder.Services.AddHostedService<RecordingReconciliationBackgroundService>();
+builder.Services.AddHostedService<BatchLowSessionsAlertBackgroundService>();
 // CRM integration: lead webhooks, no-op until Integrations:CrmWebhookUrl is set
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<ICrmNotifier, WebhookCrmNotifier>();
