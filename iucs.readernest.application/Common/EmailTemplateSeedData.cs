@@ -331,6 +331,17 @@ namespace iucs.readernest.application.Common
                     """,
                     "TeacherName", "StartAtLocal"),
 
+                New("batch-low-sessions-digest", "Batches Running Out of Classes (Admin / RM)",
+                    "Daily 9 AM IST list of active batches with 2 or fewer upcoming classes, so the next set can be scheduled before a child is left without a class.",
+                    NotificationType.General, "{{Count}} batch(es) running out of classes",
+                    """
+                    <p>These active batches have <strong>2 or fewer classes left</strong>. Please schedule the
+                    next set (Batches → Manage → Adjust remaining schedule / Generate) once the family's
+                    renewal or payment is confirmed, so the child is never left without a class:</p>
+                    <p>{{BatchList}}</p>
+                    """,
+                    "Count", "BatchList"),
+
                 New("class-summary", "Class Summary (Parent)",
                     "Sent to the parent after the teacher writes a class summary for a completed session.",
                     NotificationType.PerformanceSummary, "Class summary — {{SessionDate}}",

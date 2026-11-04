@@ -1116,6 +1116,22 @@ namespace iucs.readernest.application.Services
         private async Task<DateTime> NextAvailableCarryForwardSlotAsync(
             DateTime candidateUtc, Guid? batchId, TimeSpan duration, CancellationToken cancellationToken)
         {
+            // Live, 4 Nov 2026 (Riya, Mon/Tue/Fri batch): a make-up placed "same time next week"
+            // landed on a Wednesday -- not one of the batch's days -- because the missed class was
+            // itself an earlier make-up on a Wednesday. Teacher and family didn't expect it; the
+            // teacher waited alone. When the batch has a regular weekly pattern, the make-up now
+            // goes into the first free slot of THAT pattern (on/after the candidate), so it always
+            // falls on the batch's own day and time.
+            if (batchId is Guid patternBatchId
+                && await RegularWeeklySlotsAsync(patternBatchId, candidateUtc, cancellationToken) is { Count: > 0 } pattern)
+            {
+                var placed = await NextFreePatternSlotAsync(patternBatchId, candidateUtc, pattern, duration, cancellationToken);
+                if (placed is { } patternStart)
+                {
+                    return patternStart;
+                }
+            }
+
             // The whole 14-day window is fetched in one query rather than probed a day at a
             // time — the walk itself is unchanged, but it no longer costs up to 14 sequential
             // round trips (one per candidate day) to find a date that is usually the first one.
@@ -1170,6 +1186,78 @@ namespace iucs.readernest.application.Services
             // search forever. The unique index on (batch_id, scheduled_start_at_utc) still
             // prevents an actual duplicate row from being committed even in this fallback case.
             return candidateUtc;
+        }
+
+        /// <summary>The batch's regular weekly slots (UTC weekday + time of day): those its own
+        /// regular classes -- not make-ups, not reschedules, not cancelled -- used at least twice in
+        /// the 8 weeks either side of <paramref name="aroundUtc"/>. Empty when there's no clear
+        /// pattern (e.g. a brand-new batch), in which case callers keep the old placement.</summary>
+        private async Task<List<(DayOfWeek Day, TimeSpan Time)>> RegularWeeklySlotsAsync(
+            Guid batchId, DateTime aroundUtc, CancellationToken cancellationToken)
+        {
+            var from = aroundUtc.AddDays(-56);
+            var to = aroundUtc.AddDays(56);
+            var starts = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.BatchId == batchId
+                    && s.CarriedForwardFromSessionId == null
+                    && s.RescheduledFromSessionId == null
+                    && s.Status != SessionStatus.Cancelled
+                    && s.Status != SessionStatus.Rescheduled
+                    && s.ScheduledStartAtUtc >= from
+                    && s.ScheduledStartAtUtc < to)
+                .Select(s => s.ScheduledStartAtUtc)
+                .ToListAsync(cancellationToken);
+
+            return starts
+                .GroupBy(s => (s.DayOfWeek, s.TimeOfDay))
+                .Where(g => g.Count() >= 2)
+                .Select(g => (g.Key.DayOfWeek, g.Key.TimeOfDay))
+                .ToList();
+        }
+
+        /// <summary>First slot of the batch's weekly pattern, on/after <paramref name="fromUtc"/>
+        /// and within 26 weeks, that isn't a holiday and doesn't collide with any of the batch's
+        /// own sessions (any status -- the unique index forbids a second row at the same start).
+        /// Null if none is free in that window.</summary>
+        private async Task<DateTime?> NextFreePatternSlotAsync(
+            Guid batchId, DateTime fromUtc, IReadOnlyList<(DayOfWeek Day, TimeSpan Time)> pattern,
+            TimeSpan duration, CancellationToken cancellationToken)
+        {
+            var firstDay = DateOnly.FromDateTime(fromUtc);
+            var lastDay = firstDay.AddDays(26 * 7);
+            var holidays = (await _unitOfWork.Repository<Holiday>().Query()
+                    .Where(h => h.Date >= firstDay && h.Date <= lastDay)
+                    .Select(h => h.Date)
+                    .ToListAsync(cancellationToken))
+                .ToHashSet();
+            var windowStart = firstDay.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+            var windowEnd = lastDay.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc).AddDays(1);
+            var taken = await _unitOfWork.Repository<ClassSession>().Query()
+                .Where(s => s.BatchId == batchId && s.ScheduledStartAtUtc >= windowStart && s.ScheduledStartAtUtc < windowEnd)
+                .Select(s => new { s.ScheduledStartAtUtc, s.ScheduledEndAtUtc })
+                .ToListAsync(cancellationToken);
+
+            for (var day = firstDay; day <= lastDay; day = day.AddDays(1))
+            {
+                if (holidays.Contains(day))
+                {
+                    continue;
+                }
+
+                foreach (var slot in pattern.Where(p => p.Day == day.DayOfWeek).OrderBy(p => p.Time))
+                {
+                    var start = day.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc).Add(slot.Time);
+                    var end = start.Add(duration);
+                    if (start < fromUtc || taken.Any(t => t.ScheduledStartAtUtc < end && t.ScheduledEndAtUtc > start))
+                    {
+                        continue;
+                    }
+
+                    return start;
+                }
+            }
+
+            return null;
         }
 
         public async Task<SessionRecordingDto> AddRecordingAsync(
