@@ -20,6 +20,10 @@ namespace iucs.readernest.application.Common.Interfaces
 
         /// <summary>Every currently-connected classroom participant, for an admin "who's live right now" view.</summary>
         IReadOnlyList<LivePresenceEntry> GetLiveConnections();
+        /// <summary>True when someone with this role is connected to the session now, or was within
+        /// <paramref name="grace"/> -- a teacher whose connection blinks (weak Wi-Fi, laptop sleep, a page
+        /// refresh) still counts as in the class for a few minutes, instead of locking children out.</summary>
+        bool IsPresentOrRecentlyLeft(string sessionId, string role, TimeSpan grace);
     }
 
     /// <summary>One connected participant. SessionId is the raw string ClassroomHub joins with (a ClassSession Guid as text).</summary>

@@ -14,11 +14,17 @@ namespace iucs.readernest.application.Services
             room[connectionId] = new LivePresenceEntry(sessionId, userId, name, role, DateTime.UtcNow);
         }
 
+        // When each role was last connected to each session -- see IsPresentOrRecentlyLeft.
+        private readonly ConcurrentDictionary<(string SessionId, string Role), DateTime> _lastLeftUtc = new();
+
         public void UserLeft(string sessionId, string connectionId)
         {
             if (_rooms.TryGetValue(sessionId, out var room))
             {
-                room.TryRemove(connectionId, out _);
+                if (room.TryRemove(connectionId, out var left))
+                {
+                    _lastLeftUtc[(sessionId, left.Role)] = DateTime.UtcNow;
+                }
                 if (room.IsEmpty)
                 {
                     _rooms.TryRemove(sessionId, out _);
@@ -41,5 +47,15 @@ namespace iucs.readernest.application.Services
             _rooms.Values.SelectMany(room => room.Values).Where(IsRealPerson).ToList();
 
         private static bool IsRealPerson(LivePresenceEntry entry) => entry.Role != "observer";
+
+        public bool IsPresentOrRecentlyLeft(string sessionId, string role, TimeSpan grace)
+        {
+            if (_rooms.TryGetValue(sessionId, out var room) && room.Values.Any(e => e.Role == role))
+            {
+                return true;
+            }
+
+            return _lastLeftUtc.TryGetValue((sessionId, role), out var leftAt) && DateTime.UtcNow - leftAt <= grace;
+        }
     }
 }

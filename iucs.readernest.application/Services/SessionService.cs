@@ -2602,10 +2602,14 @@ namespace iucs.readernest.application.Services
             };
         }
 
-        /// <summary>True while the session's own teacher (or an admin hosting it) is connected to the classroom.</summary>
+        /// <summary>True while the session's own teacher (or an admin hosting it) is connected to the
+        /// classroom -- or was, within the last few minutes. Live, 6 Nov 2026: a parent waited 7 minutes
+        /// on "Waiting for the teacher" while the teacher could see the child arriving; her classroom
+        /// connection had blinked, and every 4-second retry was refused until it came back.</summary>
         private bool IsTeacherInClassroom(Guid sessionId) =>
-            _presenceTracker.GetLiveConnections().Any(c =>
-                c.SessionId == sessionId.ToString() && c.Role == "teacher");
+            _presenceTracker.IsPresentOrRecentlyLeft(sessionId.ToString(), "teacher", TeacherPresenceGrace);
+
+        private static readonly TimeSpan TeacherPresenceGrace = TimeSpan.FromMinutes(5);
 
         public async Task<IReadOnlyList<GuestLinkStudentDto>> GetGuestLinkStudentsAsync(Guid sessionId, CancellationToken cancellationToken = default)
         {
