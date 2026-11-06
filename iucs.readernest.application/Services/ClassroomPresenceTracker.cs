@@ -24,6 +24,7 @@ namespace iucs.readernest.application.Services
                 if (room.TryRemove(connectionId, out var left))
                 {
                     _lastLeftUtc[(sessionId, left.Role)] = DateTime.UtcNow;
+                    PruneLastLeft();
                 }
                 if (room.IsEmpty)
                 {
@@ -47,6 +48,25 @@ namespace iucs.readernest.application.Services
             _rooms.Values.SelectMany(room => room.Values).Where(IsRealPerson).ToList();
 
         private static bool IsRealPerson(LivePresenceEntry entry) => entry.Role != "observer";
+
+        // Only the last few minutes ever matter; drop entries older than a day so this in-memory map
+        // can't keep growing (a few entries per class) for as long as the API runs.
+        private void PruneLastLeft()
+        {
+            if (_lastLeftUtc.Count < 500)
+            {
+                return;
+            }
+
+            var cutoff = DateTime.UtcNow.AddDays(-1);
+            foreach (var entry in _lastLeftUtc)
+            {
+                if (entry.Value < cutoff)
+                {
+                    _lastLeftUtc.TryRemove(entry.Key, out _);
+                }
+            }
+        }
 
         public bool IsPresentOrRecentlyLeft(string sessionId, string role, TimeSpan grace)
         {
