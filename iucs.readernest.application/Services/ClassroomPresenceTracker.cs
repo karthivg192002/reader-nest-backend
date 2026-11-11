@@ -14,11 +14,18 @@ namespace iucs.readernest.application.Services
             room[connectionId] = new LivePresenceEntry(sessionId, userId, name, role, DateTime.UtcNow);
         }
 
+        // When each role was last connected to each session -- see IsPresentOrRecentlyLeft.
+        private readonly ConcurrentDictionary<(string SessionId, string Role), DateTime> _lastLeftUtc = new();
+
         public void UserLeft(string sessionId, string connectionId)
         {
             if (_rooms.TryGetValue(sessionId, out var room))
             {
-                room.TryRemove(connectionId, out _);
+                if (room.TryRemove(connectionId, out var left))
+                {
+                    _lastLeftUtc[(sessionId, left.Role)] = DateTime.UtcNow;
+                    PruneLastLeft();
+                }
                 if (room.IsEmpty)
                 {
                     _rooms.TryRemove(sessionId, out _);
@@ -41,5 +48,34 @@ namespace iucs.readernest.application.Services
             _rooms.Values.SelectMany(room => room.Values).Where(IsRealPerson).ToList();
 
         private static bool IsRealPerson(LivePresenceEntry entry) => entry.Role != "observer";
+
+        // Only the last few minutes ever matter; drop entries older than a day so this in-memory map
+        // can't keep growing (a few entries per class) for as long as the API runs.
+        private void PruneLastLeft()
+        {
+            if (_lastLeftUtc.Count < 500)
+            {
+                return;
+            }
+
+            var cutoff = DateTime.UtcNow.AddDays(-1);
+            foreach (var entry in _lastLeftUtc)
+            {
+                if (entry.Value < cutoff)
+                {
+                    _lastLeftUtc.TryRemove(entry.Key, out _);
+                }
+            }
+        }
+
+        public bool IsPresentOrRecentlyLeft(string sessionId, string role, TimeSpan grace)
+        {
+            if (_rooms.TryGetValue(sessionId, out var room) && room.Values.Any(e => e.Role == role))
+            {
+                return true;
+            }
+
+            return _lastLeftUtc.TryGetValue((sessionId, role), out var leftAt) && DateTime.UtcNow - leftAt <= grace;
+        }
     }
 }
