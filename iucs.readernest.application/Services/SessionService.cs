@@ -2814,6 +2814,7 @@ namespace iucs.readernest.application.Services
                 Token = jitsiToken,
                 DisplayName = displayName,
                 SkipPrejoin = childId is not null || isNamedGuest,
+                IsDemoGuest = isNamedGuest,
                 HubToken = hubToken.AccessToken,
             };
         }
