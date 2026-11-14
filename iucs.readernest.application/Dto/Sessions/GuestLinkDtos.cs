@@ -79,6 +79,10 @@ namespace iucs.readernest.application.Dto.Sessions
         /// generic guest link, which asks the opener to type their own name first.</summary>
         public bool SkipPrejoin { get; set; }
 
+        /// <summary>True for a named-guest link (a demo lead's own join link). A demo is a conversation
+        /// with the teacher, so the page joins this person with the microphone on instead of muted.</summary>
+        public bool IsDemoGuest { get; set; }
+
         /// <summary>
         /// ClassroomHub-only token (see JwtTokenService.CreateGuestClassroomHubToken) — lets the
         /// guest-join landing page render the full in-app interactive classroom (whiteboard,
