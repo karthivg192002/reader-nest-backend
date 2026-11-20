@@ -1785,8 +1785,10 @@ namespace iucs.readernest.tests
             var enrolled = await Book(megha, "Aarav", new DateTime(2026, 10, 8, 10, 30, 0, DateTimeKind.Utc), SessionStatus.Completed);
             enrolled.ConversionStatus = ConversionStatus.Enrolled;
             enrolled.InvoiceId = paidInvoice.Id;
-            await Book(megha, "Diya", new DateTime(2026, 10, 2, 10, 30, 0, DateTimeKind.Utc), SessionStatus.TeacherNoShow);
-            await Book(parul, "Kabir", new DateTime(2026, 10, 20, 12, 0, 0, DateTimeKind.Utc), SessionStatus.Cancelled);
+            var missed = await Book(megha, "Diya", new DateTime(2026, 10, 2, 10, 30, 0, DateTimeKind.Utc), SessionStatus.TeacherNoShow);
+            missed.ConversionStatus = ConversionStatus.PaymentPending;
+            var cancelled = await Book(parul, "Kabir", new DateTime(2026, 10, 20, 12, 0, 0, DateTimeKind.Utc), SessionStatus.Cancelled);
+            cancelled.ConversionStatus = ConversionStatus.ReadyForEnrollment;
             await Book(parul, "September kid", new DateTime(2026, 9, 30, 18, 0, 0, DateTimeKind.Utc), SessionStatus.Completed);
             await Book(parul, "November kid", new DateTime(2026, 10, 31, 19, 0, 0, DateTimeKind.Utc), SessionStatus.Scheduled);
             await _db.Context.SaveChangesAsync();
@@ -1810,6 +1812,23 @@ namespace iucs.readernest.tests
 
             var pdf = new iucs.readernest.api.Services.DemoReportPdfGenerator().Generate(report);
             Assert.Equal("%PDF", System.Text.Encoding.ASCII.GetString(pdf, 0, 4));
+
+            _db.Context.DemoBookings.Add(new DemoBooking
+            {
+                ClassSessionId = enrolled.ClassSessionId,
+                ParentName = "Another parent",
+                ParentEmail = "another-parent@test.com",
+                ChildName = "Another child",
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var monthlyNumbers = await new ReportsService(_db.UnitOfWork, _notifications)
+                .GetMonthlyFinanceSummaryAsync(2026, 10);
+            Assert.Equal(1, monthlyNumbers.DemosConducted);
+            Assert.Equal(1, monthlyNumbers.DemosConverted);
+            Assert.Equal(100d, monthlyNumbers.ConversionRatePercent);
+            Assert.Equal(1, Assert.Single(monthlyNumbers.Counselors, c => c.UserId == megha.Id).DemosConducted);
+            Assert.Equal(0, Assert.Single(monthlyNumbers.Counselors, c => c.UserId == parul.Id).DemosConducted);
         }
 
         [Fact]
