@@ -6912,6 +6912,24 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task GenerateSchedule_SkipsTheAcademyHolidayAcrossUtcMidnight()
+        {
+            var (batch, _, _) = await SeedBatchWithSessionAsync(totalSessions: 2, includeSession: false);
+            var utcStartDate = new DateOnly(2026, 8, 2);
+            _db.Context.Holidays.Add(new Holiday { Name = "Monday holiday", Date = utcStartDate.AddDays(1) });
+            await _db.Context.SaveChangesAsync();
+
+            var sessions = await CreateSessionService().GenerateScheduleAsync(batch.Id, new GenerateScheduleRequest
+            {
+                StartDate = utcStartDate,
+                Slots = [new GenerateScheduleSlot { DayOfWeek = DayOfWeek.Sunday, StartTimeUtc = new TimeOnly(20, 30) }],
+            });
+
+            Assert.Equal(2, sessions.Count);
+            Assert.Equal(utcStartDate.AddDays(7), DateOnly.FromDateTime(sessions[0].ScheduledStartAtUtc));
+        }
+
+        [Fact]
         public async Task GenerateSchedule_SkipsClassesInsideTheTeachersApprovedLeave_AndStillPlacesThemAll()
         {
             // Live, 26 Oct 2026 (Mokshit Jain): one class of a 12-class Mon/Wed/Fri block fell in
