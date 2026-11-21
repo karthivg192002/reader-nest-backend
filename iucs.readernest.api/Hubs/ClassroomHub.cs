@@ -48,6 +48,10 @@ namespace iucs.readernest.api.Hubs
         // so late joiners (especially the Jibri recording observer) otherwise keep showing the
         // video grid even though the live class is looking at the board.
         private static readonly ConcurrentDictionary<string, string> CurrentTeacherActivity = new();
+        // A teacher/monitor authorization is announced before their Jitsi page knocks. Keep the
+        // short-lived announcement so an existing participant whose SignalR connection happens
+        // to be reconnecting at that exact moment receives it upon rejoining the hub.
+        private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, StaffArrival>> PendingStaffArrivals = new();
 
         // Whichever participant the teacher currently has spotlighted/pinned in their own
         // Jitsi view (null = nobody pinned) — see SetPinned's own doc comment for why this
@@ -77,6 +81,15 @@ namespace iucs.readernest.api.Hubs
         }
 
         public record ParticipantState(string Name, string Role, bool HandRaised);
+        private record StaffArrival(string DisplayName, bool IsTeacher, DateTime ExpiresAtUtc);
+
+        public static void RememberStaffArrival(Guid sessionId, string displayName, bool isTeacher)
+        {
+            if (string.IsNullOrWhiteSpace(displayName)) return;
+            var arrivals = PendingStaffArrivals.GetOrAdd(sessionId.ToString(), _ => new());
+            arrivals[displayName.Trim().ToLowerInvariant()] = new StaffArrival(
+                displayName.Trim(), isTeacher, DateTime.UtcNow.AddMinutes(3));
+        }
 
         private static string Group(string sessionId) => $"classroom-{sessionId}";
 
@@ -236,6 +249,22 @@ namespace iucs.readernest.api.Hubs
             _presenceTracker.UserJoined(sessionId, Context.ConnectionId, userId, name, role);
             await BroadcastRosterAsync(sessionId);
             await SendLeaderboardAsync(sessionId);
+
+            if (PendingStaffArrivals.TryGetValue(sessionId, out var arrivals))
+            {
+                foreach (var entry in arrivals.ToArray())
+                {
+                    if (entry.Value.ExpiresAtUtc > DateTime.UtcNow)
+                    {
+                        await Clients.Caller.SendAsync("StaffJoining", entry.Value.DisplayName, entry.Value.IsTeacher);
+                    }
+                    else
+                    {
+                        arrivals.TryRemove(entry.Key, out _);
+                    }
+                }
+                if (arrivals.IsEmpty) PendingStaffArrivals.TryRemove(sessionId, out _);
+            }
 
             // Catch this connection up on whatever's already been drawn — see BoardHistory's
             // own doc comment. Sent one op at a time through the same "Board" event a live op
@@ -675,6 +704,7 @@ namespace iucs.readernest.api.Hubs
                     BoardHistory.TryRemove(sessionId, out _);
                     CurrentSlide.TryRemove(sessionId, out _);
                     CurrentTeacherActivity.TryRemove(sessionId, out _);
+                    PendingStaffArrivals.TryRemove(sessionId, out _);
                     PinnedParticipant.TryRemove(sessionId, out _);
                     foreach (var key in AnsweredQuestions.Keys.Where(k => k.StartsWith($"{sessionId}:", StringComparison.Ordinal)))
                     {

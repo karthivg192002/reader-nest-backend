@@ -105,6 +105,7 @@ namespace iucs.readernest.api.Controllers
             // admits her straight back.
             if ((join.IsMonitor || join.IsSessionTeacher) && !string.IsNullOrWhiteSpace(join.DisplayName))
             {
+                ClassroomHub.RememberStaffArrival(join.SessionId, join.DisplayName, join.IsSessionTeacher);
                 try
                 {
                     await _classroomHub.Clients.Group(ClassroomHub.GroupFor(join.SessionId))
