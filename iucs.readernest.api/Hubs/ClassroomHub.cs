@@ -43,6 +43,11 @@ namespace iucs.readernest.api.Hubs
         // Next/Previous clicks have gotten to, so JoinSession can land a mid-class joiner on the
         // right slide instead of always page 0.
         private static readonly ConcurrentDictionary<string, int> CurrentSlide = new();
+        // Which teaching surface the teacher most recently selected. Unlike a board stroke or
+        // slide-page change, opening an existing/blank whiteboard creates no content operation,
+        // so late joiners (especially the Jibri recording observer) otherwise keep showing the
+        // video grid even though the live class is looking at the board.
+        private static readonly ConcurrentDictionary<string, string> CurrentTeacherActivity = new();
 
         // Whichever participant the teacher currently has spotlighted/pinned in their own
         // Jitsi view (null = nobody pinned) — see SetPinned's own doc comment for why this
@@ -257,6 +262,11 @@ namespace iucs.readernest.api.Hubs
                 await Clients.Caller.SendAsync("Slide", pageIndex);
             }
 
+            if (CurrentTeacherActivity.TryGetValue(sessionId, out var activity))
+            {
+                await Clients.Caller.SendAsync("TeacherActivity", activity);
+            }
+
             // Same idea again for whoever the teacher currently has pinned/spotlighted — a
             // student who joins after the teacher already pinned themselves (or anyone else)
             // should land on that same view, not the room's default tile layout with no pin.
@@ -367,6 +377,19 @@ namespace iucs.readernest.api.Hubs
 
             CurrentSlide[sessionId] = pageIndex;
             await Clients.OthersInGroup(Group(sessionId)).SendAsync("Slide", pageIndex);
+        }
+
+        /// <summary>Teacher-only view selection, including a blank/already-drawn whiteboard.
+        /// Kept for late joiners so the recording observer captures the same teaching surface.</summary>
+        public async Task SetTeacherActivity(string sessionId, string activity)
+        {
+            if (!IsTeacherInRoom(sessionId) || activity is not ("board" or "slides" or "quiz"))
+            {
+                return;
+            }
+
+            CurrentTeacherActivity[sessionId] = activity;
+            await Clients.OthersInGroup(Group(sessionId)).SendAsync("TeacherActivity", activity);
         }
 
         // ---- pin / spotlight sync ----
@@ -651,6 +674,7 @@ namespace iucs.readernest.api.Hubs
                     BoardAccessGrants.TryRemove(sessionId, out _);
                     BoardHistory.TryRemove(sessionId, out _);
                     CurrentSlide.TryRemove(sessionId, out _);
+                    CurrentTeacherActivity.TryRemove(sessionId, out _);
                     PinnedParticipant.TryRemove(sessionId, out _);
                     foreach (var key in AnsweredQuestions.Keys.Where(k => k.StartsWith($"{sessionId}:", StringComparison.Ordinal)))
                     {
