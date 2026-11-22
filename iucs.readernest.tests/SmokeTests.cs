@@ -12610,6 +12610,27 @@ namespace iucs.readernest.tests
         }
 
         [Fact]
+        public async Task SupportTickets_CountsExcludeTicketsHiddenByDeletedParent()
+        {
+            var parent = await _db.SeedUserAsync($"st-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);
+            var service = CreateSupportTicketService();
+            await service.CreateAsync(parent.Id, new CreateSupportTicketRequest
+            {
+                Category = SupportTicketCategory.Other,
+                Subject = "Question from parent",
+                Message = "Please help",
+            });
+
+            parent.IsDeleted = true;
+            await _db.Context.SaveChangesAsync();
+
+            var counts = await service.GetCountsAsync();
+            Assert.Equal(0, counts.Open);
+            Assert.Equal(0, counts.AwaitingReply);
+            Assert.Empty(await service.ListForStaffAsync(null, null));
+        }
+
+        [Fact]
         public async Task SupportTickets_ParentCannotSeeOrReplyToAnotherFamilysTicket_OrTagSomeoneElsesChild()
         {
             var owner = await _db.SeedUserAsync($"st-{Guid.NewGuid():N}@test.com", "x", UserRole.Parent);

@@ -232,7 +232,12 @@ namespace iucs.readernest.application.Services
 
         public static string ReferenceFor(Guid id) => $"T-{id.ToString("N")[..8].ToUpperInvariant()}";
 
-        private IQueryable<SupportTicket> BaseQuery() => _unitOfWork.Repository<SupportTicket>().Query();
+        // ParentUser is a required navigation and User has the app-wide soft-delete filter.
+        // EF therefore drops tickets belonging to deleted parents when a list projection reads
+        // ParentUser, while a bare aggregate (such as the KPI counts) would otherwise retain
+        // them. Apply the same visibility rule at the root so counts and rows cannot diverge.
+        private IQueryable<SupportTicket> BaseQuery() =>
+            _unitOfWork.Repository<SupportTicket>().Query().Where(t => !t.ParentUser.IsDeleted);
 
         private static async Task<IReadOnlyList<SupportTicketSummaryDto>> SummaryQuery(
             IQueryable<SupportTicket> query, CancellationToken cancellationToken)
