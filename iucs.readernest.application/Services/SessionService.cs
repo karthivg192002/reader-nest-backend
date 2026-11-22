@@ -1761,17 +1761,22 @@ namespace iucs.readernest.application.Services
             IReadOnlyDictionary<DayOfWeek, TimeOnly> timeByDay,
             int targetCount,
             IReadOnlySet<DateOnly> holidays,
-            IReadOnlySet<DateTime>? occupiedStarts = null)
+            IReadOnlySet<DateTime>? occupiedStarts = null,
+            DateTime? earliestStartUtc = null)
         {
             var result = new List<DateTime>();
             var date = startDate;
             var safetyLimit = startDate.AddYears(2);
+            var holidayZone = TimeZoneInfo.FindSystemTimeZoneById(DateTimeDisplay.DefaultTimeZoneId);
             while (result.Count < targetCount && date < safetyLimit)
             {
-                if (timeByDay.TryGetValue(date.DayOfWeek, out var timeForDay) && !holidays.Contains(date))
+                if (timeByDay.TryGetValue(date.DayOfWeek, out var timeForDay))
                 {
                     var start = date.ToDateTime(timeForDay, DateTimeKind.Utc);
-                    if (occupiedStarts is null || !occupiedStarts.Contains(start))
+                    var localDate = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(start, holidayZone));
+                    if ((!earliestStartUtc.HasValue || start >= earliestStartUtc.Value)
+                        && !holidays.Contains(localDate)
+                        && (occupiedStarts is null || !occupiedStarts.Contains(start)))
                     {
                         result.Add(start);
                     }
@@ -1908,7 +1913,7 @@ namespace iucs.readernest.application.Services
                         .Select(s => s.ScheduledStartAtUtc)
                         .ToListAsync(cancellationToken))
                     .ToHashSet();
-                var newStarts = PlaceSessionStartTimes(today, timeByDay, targetCount, holidays, occupiedStarts);
+                var newStarts = PlaceSessionStartTimes(today, timeByDay, targetCount, holidays, occupiedStarts, now);
                 if (newStarts.Count < targetCount)
                 {
                     throw new DomainValidationException("Could not place all remaining sessions within two years; check the selected weekdays.");

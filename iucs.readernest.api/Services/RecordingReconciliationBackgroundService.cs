@@ -1,5 +1,6 @@
 using iucs.readernest.application.Helper;
 using iucs.readernest.application.Services;
+using iucs.readernest.domain.Entities.Academics;
 using iucs.readernest.domain.Entities.Sessions;
 using iucs.readernest.domain.Entities.Users;
 using iucs.readernest.domain.Enums;
@@ -14,16 +15,16 @@ namespace iucs.readernest.api.Services
     /// and still never produce a recording — Jibri crashing mid-capture, an upload failure, the
     /// finalize webhook never reaching this app. Confirmed as a real, silent gap: a parent found
     /// no recording for a class with nothing anywhere having flagged it. Runs every 30 minutes;
-    /// each cycle looks at Completed sessions whose scheduled end is 1-48 hours in the past
-    /// (past normal Jibri upload/finalize latency, but not so old the alert is useless), have no
-    /// registered SessionRecording, and haven't already been alerted on — one alert per session,
-    /// ever, via RecordingMissingAlertSentAtUtc.
+    /// each cycle looks at recently completed classes for missing or unusually short recordings.
+    /// The 1–48 hour window allows time for upload and registration. The session timestamp
+    /// limits alerts to one per class.
     /// </summary>
     public class RecordingReconciliationBackgroundService : BackgroundService
     {
         private static readonly TimeSpan Interval = TimeSpan.FromMinutes(30);
         private static readonly TimeSpan MinAge = TimeSpan.FromHours(1);
         private static readonly TimeSpan MaxAge = TimeSpan.FromHours(48);
+        private static readonly TimeSpan MinimumShortfall = TimeSpan.FromMinutes(5);
 
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly ILogger<RecordingReconciliationBackgroundService> _logger;
@@ -80,8 +81,8 @@ namespace iucs.readernest.api.Services
                             // and has no actual start time) has nothing to record -- not a missing recording.
                             && s.ActualStartAtUtc != null
                             && s.RecordingMissingAlertSentAtUtc == null
-                            && s.ScheduledEndAtUtc >= windowStart
-                            && s.ScheduledEndAtUtc <= windowEnd)
+                            && (s.ActualEndAtUtc ?? s.ScheduledEndAtUtc) >= windowStart
+                            && (s.ActualEndAtUtc ?? s.ScheduledEndAtUtc) <= windowEnd)
                 .ToListAsync(cancellationToken);
 
             if (candidates.Count == 0)
@@ -94,9 +95,20 @@ namespace iucs.readernest.api.Services
             {
                 try
                 {
-                    var hasRecording = await unitOfWork.Repository<SessionRecording>()
-                        .ExistsAsync(r => r.ClassSessionId == session.Id, cancellationToken);
-                    if (hasRecording)
+                    var recordings = await unitOfWork.Repository<SessionRecording>().Query()
+                        .Where(r => r.ClassSessionId == session.Id)
+                        .Select(r => new { r.StorageUrl, r.DurationSeconds })
+                        .ToListAsync(cancellationToken);
+                    var segmentDurations = recordings.GroupBy(r => r.StorageUrl, StringComparer.Ordinal)
+                        .Select(g => g.Max(r => r.DurationSeconds))
+                        .ToList();
+                    var recordedSeconds = segmentDurations.Sum(seconds => (long)(seconds ?? 0));
+                    var classDuration = (session.ActualEndAtUtc - session.ActualStartAtUtc).GetValueOrDefault();
+                    var isShort = segmentDurations.Count > 0
+                        && segmentDurations.All(seconds => seconds > 0)
+                        && recordedSeconds < classDuration.TotalSeconds / 2
+                        && classDuration.TotalSeconds - recordedSeconds >= MinimumShortfall.TotalSeconds;
+                    if (recordings.Count > 0 && !isShort)
                     {
                         continue;
                     }
@@ -107,9 +119,29 @@ namespace iucs.readernest.api.Services
                     var admins = await unitOfWork.Repository<User>().Query()
                         .Where(u => u.Role == UserRole.Admin && u.Status == UserStatus.Active)
                         .ToListAsync(cancellationToken);
+                    var teacherName = teacher?.User is { } u ? $"{u.FirstName} {u.LastName}".Trim() : "Unknown teacher";
+                    var batchName = isShort && session.BatchId is { } batchId
+                        ? await unitOfWork.Repository<Batch>().Query().Where(b => b.Id == batchId)
+                            .Select(b => b.Name).FirstOrDefaultAsync(cancellationToken)
+                        : null;
 
                     foreach (var admin in admins)
                     {
+                        var startAtLocal = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc, admin.TimeZoneId);
+                        if (isShort)
+                        {
+                            var classLabel = batchName is null ? teacherName : $"{batchName} ({teacherName})";
+                            var details = System.Net.WebUtility.HtmlEncode(
+                                $"The class for {classLabel}, scheduled at {startAtLocal}, " +
+                                $"has {TimeSpan.FromSeconds(recordedSeconds):g} of registered recording " +
+                                $"for a class lasting {classDuration:g}. Session ID: {session.Id}.");
+                            await notificationService.SendEmailAsync(admin.Id, admin.Email, NotificationType.General,
+                                "Class recording may be incomplete",
+                                $"<p>{details}</p><p>Check the recording files and the recorder and upload logs.</p>",
+                                cancellationToken: cancellationToken);
+                            continue;
+                        }
+
                         await notificationService.SendTemplatedEmailAsync(
                             admin.Id,
                             admin.Email,
@@ -117,8 +149,8 @@ namespace iucs.readernest.api.Services
                             "recording-missing-alert",
                             new Dictionary<string, string>
                             {
-                                ["TeacherName"] = teacher?.User is { } u ? $"{u.FirstName} {u.LastName}".Trim() : "Unknown teacher",
-                                ["StartAtLocal"] = DateTimeDisplay.ToLocal(session.ScheduledStartAtUtc, admin.TimeZoneId),
+                                ["TeacherName"] = teacherName,
+                                ["StartAtLocal"] = startAtLocal,
                             },
                             cancellationToken);
                     }
@@ -142,7 +174,7 @@ namespace iucs.readernest.api.Services
             if (flagged > 0)
             {
                 _logger.LogInformation(
-                    "Recording reconciliation: {Flagged} completed session(s) had no recording, out of {Candidates} checked.",
+                    "Recording reconciliation: {Flagged} completed session(s) had missing or short recordings, out of {Candidates} checked.",
                     flagged, candidates.Count);
             }
         }

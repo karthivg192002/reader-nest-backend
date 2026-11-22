@@ -43,6 +43,15 @@ namespace iucs.readernest.api.Hubs
         // Next/Previous clicks have gotten to, so JoinSession can land a mid-class joiner on the
         // right slide instead of always page 0.
         private static readonly ConcurrentDictionary<string, int> CurrentSlide = new();
+        // Which teaching surface the teacher most recently selected. Unlike a board stroke or
+        // slide-page change, opening an existing/blank whiteboard creates no content operation,
+        // so late joiners (especially the Jibri recording observer) otherwise keep showing the
+        // video grid even though the live class is looking at the board.
+        private static readonly ConcurrentDictionary<string, string> CurrentTeacherActivity = new();
+        // A teacher/monitor authorization is announced before their Jitsi page knocks. Keep the
+        // short-lived announcement so an existing participant whose SignalR connection happens
+        // to be reconnecting at that exact moment receives it upon rejoining the hub.
+        private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, StaffArrival>> PendingStaffArrivals = new();
 
         // Whichever participant the teacher currently has spotlighted/pinned in their own
         // Jitsi view (null = nobody pinned) — see SetPinned's own doc comment for why this
@@ -72,6 +81,15 @@ namespace iucs.readernest.api.Hubs
         }
 
         public record ParticipantState(string Name, string Role, bool HandRaised);
+        private record StaffArrival(string DisplayName, bool IsTeacher, DateTime ExpiresAtUtc);
+
+        public static void RememberStaffArrival(Guid sessionId, string displayName, bool isTeacher)
+        {
+            if (string.IsNullOrWhiteSpace(displayName)) return;
+            var arrivals = PendingStaffArrivals.GetOrAdd(sessionId.ToString(), _ => new());
+            arrivals[displayName.Trim().ToLowerInvariant()] = new StaffArrival(
+                displayName.Trim(), isTeacher, DateTime.UtcNow.AddMinutes(3));
+        }
 
         private static string Group(string sessionId) => $"classroom-{sessionId}";
 
@@ -232,6 +250,22 @@ namespace iucs.readernest.api.Hubs
             await BroadcastRosterAsync(sessionId);
             await SendLeaderboardAsync(sessionId);
 
+            if (PendingStaffArrivals.TryGetValue(sessionId, out var arrivals))
+            {
+                foreach (var entry in arrivals.ToArray())
+                {
+                    if (entry.Value.ExpiresAtUtc > DateTime.UtcNow)
+                    {
+                        await Clients.Caller.SendAsync("StaffJoining", entry.Value.DisplayName, entry.Value.IsTeacher);
+                    }
+                    else
+                    {
+                        arrivals.TryRemove(entry.Key, out _);
+                    }
+                }
+                if (arrivals.IsEmpty) PendingStaffArrivals.TryRemove(sessionId, out _);
+            }
+
             // Catch this connection up on whatever's already been drawn — see BoardHistory's
             // own doc comment. Sent one op at a time through the same "Board" event a live op
             // arrives on (SignalR preserves per-connection delivery order), so the client-side
@@ -255,6 +289,11 @@ namespace iucs.readernest.api.Hubs
             if (CurrentSlide.TryGetValue(sessionId, out var pageIndex))
             {
                 await Clients.Caller.SendAsync("Slide", pageIndex);
+            }
+
+            if (CurrentTeacherActivity.TryGetValue(sessionId, out var activity))
+            {
+                await Clients.Caller.SendAsync("TeacherActivity", activity);
             }
 
             // Same idea again for whoever the teacher currently has pinned/spotlighted — a
@@ -367,6 +406,19 @@ namespace iucs.readernest.api.Hubs
 
             CurrentSlide[sessionId] = pageIndex;
             await Clients.OthersInGroup(Group(sessionId)).SendAsync("Slide", pageIndex);
+        }
+
+        /// <summary>Teacher-only view selection, including a blank/already-drawn whiteboard.
+        /// Kept for late joiners so the recording observer captures the same teaching surface.</summary>
+        public async Task SetTeacherActivity(string sessionId, string activity)
+        {
+            if (!IsTeacherInRoom(sessionId) || activity is not ("board" or "slides" or "quiz"))
+            {
+                return;
+            }
+
+            CurrentTeacherActivity[sessionId] = activity;
+            await Clients.OthersInGroup(Group(sessionId)).SendAsync("TeacherActivity", activity);
         }
 
         // ---- pin / spotlight sync ----
@@ -651,6 +703,8 @@ namespace iucs.readernest.api.Hubs
                     BoardAccessGrants.TryRemove(sessionId, out _);
                     BoardHistory.TryRemove(sessionId, out _);
                     CurrentSlide.TryRemove(sessionId, out _);
+                    CurrentTeacherActivity.TryRemove(sessionId, out _);
+                    PendingStaffArrivals.TryRemove(sessionId, out _);
                     PinnedParticipant.TryRemove(sessionId, out _);
                     foreach (var key in AnsweredQuestions.Keys.Where(k => k.StartsWith($"{sessionId}:", StringComparison.Ordinal)))
                     {

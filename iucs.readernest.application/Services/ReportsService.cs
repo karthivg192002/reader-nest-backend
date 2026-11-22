@@ -521,21 +521,21 @@ namespace iucs.readernest.application.Services
             var monthStart = TimeZoneInfo.ConvertTimeToUtc(localMonthStart, zone);
             var monthEnd = TimeZoneInfo.ConvertTimeToUtc(localMonthStart.AddMonths(1), zone);
 
-            // A demo counts as conducted once its class completed or the lead moved past
-            // "scheduled" -- same stage set as the dashboard funnel's "Demo Completed".
-            ConversionStatus[] pastDemo =
-            [
-                ConversionStatus.DemoCompleted, ConversionStatus.FollowUpInProgress, ConversionStatus.PaymentPending,
-                ConversionStatus.PartiallyPaid, ConversionStatus.PaymentReceived, ConversionStatus.ReadyForEnrollment,
-                ConversionStatus.Enrolled,
-            ];
-            var demos = await _unitOfWork.Repository<DemoBooking>().Query()
+            var completedBookings = await _unitOfWork.Repository<DemoBooking>().Query()
                 .Where(b => b.ClassSession != null
                     && b.ClassSession.ScheduledStartAtUtc >= monthStart && b.ClassSession.ScheduledStartAtUtc < monthEnd
-                    && (b.ClassSession.Status == SessionStatus.Completed || pastDemo.Contains(b.ConversionStatus)))
-                .Select(b => new { b.CreatedBy, b.ConversionStatus })
+                    && b.ClassSession.Status == SessionStatus.Completed)
+                .OrderBy(b => b.CreatedAtUtc).ThenBy(b => b.Id)
+                .Select(b => new { b.ClassSessionId, b.CreatedBy, b.ConversionStatus })
                 .ToListAsync(cancellationToken);
-            static bool Converted(ConversionStatus s) => s is ConversionStatus.Enrolled or ConversionStatus.ReadyForEnrollment;
+            // A shared session counts once, attributed to its original booking creator.
+            var demos = completedBookings.GroupBy(b => b.ClassSessionId)
+                .Select(g => new
+                {
+                    g.First().CreatedBy,
+                    Converted = g.Any(b => b.ConversionStatus is ConversionStatus.Enrolled or ConversionStatus.ReadyForEnrollment),
+                })
+                .ToList();
             static double Rate(int converted, int conducted) => conducted == 0 ? 0 : Math.Round(100.0 * converted / conducted, 1);
 
             var totalCollected = await _unitOfWork.Repository<PaymentTransaction>().Query()
@@ -572,7 +572,7 @@ namespace iucs.readernest.application.Services
                     .Where(m => m.CollectedAtUtc >= monthStart && m.CollectedAtUtc < monthEnd)
                     .SumAsync(m => (decimal?)m.Amount, cancellationToken) ?? 0m;
                 var own = demos.Where(d => d.CreatedBy == counselor.Id).ToList();
-                var converted = own.Count(d => Converted(d.ConversionStatus));
+                var converted = own.Count(d => d.Converted);
 
                 // Someone who has left and did nothing this month is just noise in the table.
                 if (counselor.Status != UserStatus.Active && collected == 0m && own.Count == 0)
@@ -592,7 +592,7 @@ namespace iucs.readernest.application.Services
             }
 
             var counselorCollected = rows.Sum(r => r.AmountCollected);
-            var demosConverted = demos.Count(d => Converted(d.ConversionStatus));
+            var demosConverted = demos.Count(d => d.Converted);
             return new MonthlyFinanceSummaryDto
             {
                 Year = year,
