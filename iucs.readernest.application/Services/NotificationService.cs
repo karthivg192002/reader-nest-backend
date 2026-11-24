@@ -41,7 +41,7 @@ namespace iucs.readernest.application.Services
                 recipientUserId, recipientEmail, type, subject, body, null, bulkEmailRecipientId, cancellationToken);
         }
 
-        public async Task SendTemplatedEmailAsync(
+        public async Task<NotificationStatus> SendTemplatedEmailAsync(
             Guid recipientUserId,
             string recipientEmail,
             NotificationType type,
@@ -50,7 +50,7 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default)
         {
             var (subject, body) = await _emailTemplateService.RenderAsync(templateKey, tokens, cancellationToken);
-            await SendRenderedEmailAsync(recipientUserId, recipientEmail, type, subject, body, templateKey, null, cancellationToken);
+            return await SendRenderedEmailAsync(recipientUserId, recipientEmail, type, subject, body, templateKey, null, cancellationToken);
         }
 
         private async Task<NotificationStatus> SendRenderedEmailAsync(
@@ -82,7 +82,10 @@ namespace iucs.readernest.application.Services
 
             try
             {
-                await _emailSender.SendAsync(recipientEmail, subject, body, cancellationToken);
+                if (templateKey == "parent-enrollment-welcome")
+                    await _emailSender.SendRequiredAsync(recipientEmail, subject, body, cancellationToken);
+                else
+                    await _emailSender.SendAsync(recipientEmail, subject, body, cancellationToken);
                 notification.Status = NotificationStatus.Sent;
                 notification.SentAtUtc = DateTime.UtcNow;
             }

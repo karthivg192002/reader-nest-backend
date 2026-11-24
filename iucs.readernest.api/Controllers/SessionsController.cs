@@ -565,18 +565,35 @@ namespace iucs.readernest.api.Controllers
             IFormFile file,
             CancellationToken cancellationToken)
         {
+            if (User.FindFirstValue("purpose") == "guest-classroom") return Forbid();
+
             if (file.Length == 0)
             {
                 return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "The uploaded file is empty." });
             }
+            var mediaType = PresentationMediaType(file.FileName);
             var isPdf = string.Equals(Path.GetExtension(file.FileName), ".pdf", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(file.ContentType, "application/pdf", StringComparison.OrdinalIgnoreCase);
-            if (!isPdf)
-            {
-                return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "Only PDF decks are supported — export your slides to PDF first." });
-            }
 
             await using var stream = file.OpenReadStream();
+            if (!isPdf)
+            {
+                var header = new byte[8];
+                var read = await stream.ReadAtLeastAsync(header, header.Length, throwOnEndOfStream: false, cancellationToken: cancellationToken);
+                var isImage = mediaType switch
+                {
+                    "image/png" => read == 8 && header.AsSpan().SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }),
+                    "image/jpeg" => read >= 3 && header[0] == 255 && header[1] == 216 && header[2] == 255,
+                    _ => false,
+                };
+                if (!isImage)
+                {
+                    return BadRequest(new ProblemDetails { Status = 400, Title = "Bad Request", Detail = "Upload a PDF, JPEG or PNG presentation." });
+                }
+
+                stream.Position = 0;
+            }
+
             var stored = await _fileStorage.StoreAsync(stream, file.FileName, cancellationToken);
 
             var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
@@ -590,7 +607,7 @@ namespace iucs.readernest.api.Controllers
         [Authorize]
         public async Task<ActionResult<SessionPresentationDto?>> GetPresentation(Guid id, CancellationToken cancellationToken)
         {
-            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            if (!TryGetPresentationReader(id, out var userId)) return Forbid();
             return Ok(await _sessionService.GetPresentationAsync(id, userId, cancellationToken));
         }
 
@@ -600,7 +617,7 @@ namespace iucs.readernest.api.Controllers
         [Authorize]
         public async Task<IActionResult> DownloadPresentation(Guid id, CancellationToken cancellationToken)
         {
-            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            if (!TryGetPresentationReader(id, out var userId)) return Forbid();
             var presentation = await _sessionService.GetPresentationForDownloadAsync(id, userId, cancellationToken);
             var stream = await _fileStorage.OpenReadAsync(presentation.StorageUrl, cancellationToken);
 
@@ -609,8 +626,32 @@ namespace iucs.readernest.api.Controllers
                 return NotFound(new ProblemDetails { Status = 404, Title = "Not Found", Detail = "The stored file is missing." });
             }
 
-            return File(stream, "application/pdf", presentation.OriginalFileName);
+            return File(stream, PresentationMediaType(presentation.OriginalFileName), presentation.OriginalFileName);
         }
+
+        // A guest has no User row. Only the two read actions above accept their
+        // classroom credential, and only when it was issued for this session.
+        private bool TryGetPresentationReader(Guid sessionId, out Guid? userId)
+        {
+            userId = null;
+            var purpose = User.FindFirstValue("purpose");
+            if (purpose == "guest-classroom")
+                return Guid.TryParse(User.FindFirstValue("sessionId"), out var tokenSessionId)
+                    && tokenSessionId == sessionId;
+            if (purpose == "recording-observer"
+                || !Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var participantId))
+                return false;
+
+            userId = participantId;
+            return true;
+        }
+
+        private static string PresentationMediaType(string fileName) => Path.GetExtension(fileName).ToLowerInvariant() switch
+        {
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            _ => "application/pdf",
+        };
 
         /// <summary>Engagement signals from the live classroom (quiz, activity, whiteboard, attention).</summary>
         [HttpPost("{id:guid}/engagement")]

@@ -1,5 +1,10 @@
+using System.Security.Claims;
+using iucs.readernest.api.Controllers;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
+using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Academics;
 using iucs.readernest.application.Dto.Admission;
 using iucs.readernest.application.Dto.Auth;
@@ -132,6 +137,67 @@ namespace iucs.readernest.tests
         private QuizQuestionService CreateQuizQuestionService() => new(_db.UnitOfWork, _auditLog, CreateSessionService(), _bulkFileReader);
 
         private AccessRequestService CreateAccessRequestService() => new(_db.UnitOfWork, _auditLog, _notifications);
+
+        [Fact]
+        public async Task GuestPresentation_OnlyReadsTheSessionNamedByItsCredential()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var (_, _, otherSession) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            _db.Context.Set<SessionPresentation>().Add(new SessionPresentation
+            {
+                ClassSessionId = session.Id,
+                StorageUrl = "test/slide.png",
+                OriginalFileName = "slide.png",
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var guestId = Guid.NewGuid();
+            var httpContext = new DefaultHttpContext();
+            var controller = new SessionsController(CreateSessionService(), new PresentationTestStorage(), null!, null!)
+            {
+                ControllerContext = new ControllerContext { HttpContext = httpContext },
+            };
+            httpContext.User = new ClaimsPrincipal(new ClaimsIdentity(
+            [
+                new Claim(ClaimTypes.NameIdentifier, guestId.ToString()),
+                new Claim("purpose", "guest-classroom"),
+                new Claim("sessionId", session.Id.ToString()),
+            ], "test"));
+
+            var ownPresentation = await controller.GetPresentation(session.Id, default);
+            var ok = Assert.IsType<OkObjectResult>(ownPresentation.Result);
+            Assert.Equal("slide.png", Assert.IsType<SessionPresentationDto>(ok.Value).OriginalFileName);
+            var file = Assert.IsType<FileStreamResult>(await controller.DownloadPresentation(session.Id, default));
+            await using var fileStream = file.FileStream;
+            Assert.Equal("image/png", file.ContentType);
+            Assert.Equal("slide.png", file.FileDownloadName);
+            Assert.Equal(3, fileStream.Length);
+
+            var otherPresentation = await controller.GetPresentation(otherSession.Id, default);
+            Assert.IsType<ForbidResult>(otherPresentation.Result);
+            Assert.IsType<ForbidResult>(await controller.DownloadPresentation(otherSession.Id, default));
+            Assert.IsType<ForbidResult>((await controller.UploadPresentation(session.Id, null!, default)).Result);
+
+            var teacher = await _db.Context.TeacherProfiles.SingleAsync(profile => profile.Id == session.TeacherProfileId);
+            httpContext.User = new ClaimsPrincipal(new ClaimsIdentity(
+                [new Claim(ClaimTypes.NameIdentifier, teacher.UserId.ToString())], "test"));
+            var teacherPresentation = await controller.GetPresentation(session.Id, default);
+            Assert.IsType<OkObjectResult>(teacherPresentation.Result);
+
+            var unrelatedParent = await _db.SeedUserAsync("unrelated-presentation@test.com", "x", UserRole.Parent);
+            httpContext.User = new ClaimsPrincipal(new ClaimsIdentity(
+                [new Claim(ClaimTypes.NameIdentifier, unrelatedParent.Id.ToString())], "test"));
+            await Assert.ThrowsAsync<ForbiddenException>(() => controller.GetPresentation(session.Id, default));
+        }
+
+        private sealed class PresentationTestStorage : IFileStorage
+        {
+            public Task<StoredFile> StoreAsync(Stream content, string originalFileName, CancellationToken cancellationToken = default)
+                => throw new NotSupportedException();
+
+            public Task<Stream?> OpenReadAsync(string relativePath, CancellationToken cancellationToken = default)
+                => Task.FromResult<Stream?>(relativePath == "test/slide.png" ? new MemoryStream([1, 2, 3]) : null);
+        }
 
         // ---- WBS business-rule coverage (Reader_Nest_LMS.pdf pp.28–32) ----
 
@@ -5002,6 +5068,56 @@ namespace iucs.readernest.tests
             Assert.Contains("Forgot your PIN", welcome.Body);
             var user = await _db.Context.Users.SingleAsync(u => u.Email == "nisha.rao@example.com");
             Assert.Contains(await CreateUserService().RevealPinAsync(user.Id), welcome.Body);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task EnrollmentWelcome_AlwaysProvidesThePinOrHandsItToStaff(bool smtpFails)
+        {
+            var template = await _db.Context.Set<EmailTemplate>()
+                .SingleAsync(t => t.Key == "parent-enrollment-welcome");
+            template.HtmlBody = "<p>Welcome! Please sign in.</p>";
+            var teacherUser = await _db.SeedUserAsync("teacher-welcome@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var notifications = smtpFails
+                ? new NotificationService(_db.UnitOfWork, new ThrowingEmailSender(), _emailTemplates, NullLogger<NotificationService>.Instance)
+                : _notifications;
+            var demoService = new DemoBookingService(
+                _db.UnitOfWork, _auditLog, _emailSender, _emailTemplates,
+                new FakeCrmNotifier(), new FakeJitsiTokenService(), notifications, CreateUserService(), CreateSessionService(),
+                new ConfigurationBuilder().Build(), NullLogger<DemoBookingService>.Instance);
+            var start = DateTime.UtcNow.AddDays(1);
+            const string email = "parent-welcome@test.com";
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Test Parent", ParentEmail = email, ChildName = "Child",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+            _emailSender.Sent.Clear();
+
+            var enrolled = await demoService.UpdateConversionStatusAsync(demo.Id,
+                new UpdateConversionStatusRequest { ConversionStatus = ConversionStatus.ReadyForEnrollment });
+
+            var user = await _db.Context.Users.SingleAsync(u => u.Email == email);
+            var pin = await CreateUserService().RevealPinAsync(user.Id);
+            var notification = await _db.Context.Set<Notification>().SingleAsync(n =>
+                n.RecipientUserId == user.Id && n.TemplateKey == "parent-enrollment-welcome");
+            Assert.Equal(smtpFails ? NotificationStatus.Failed : NotificationStatus.Sent, notification.Status);
+            if (smtpFails)
+            {
+                Assert.Empty(_emailSender.Sent);
+                Assert.Equal(email, enrolled.IssuedLogin?.LoginId);
+                Assert.Equal(pin, enrolled.IssuedLogin?.TemporaryPin);
+            }
+            else
+            {
+                Assert.Null(enrolled.IssuedLogin);
+                Assert.Contains($"PIN: {pin}", Assert.Single(_emailSender.Sent).Body);
+            }
         }
 
         [Fact]
@@ -12263,6 +12379,16 @@ namespace iucs.readernest.tests
             var partInvoice = await _db.Context.Invoices.AsNoTracking().SingleAsync(i => i.Id == invoiceId);
             Assert.Equal(InvoiceStatus.PartiallyPaid, partInvoice.Status);
             Assert.Equal(4000, partInvoice.AmountPaid);
+
+            var failedNotifications = new NotificationService(
+                _db.UnitOfWork, new ThrowingEmailSender(), _emailTemplates, NullLogger<NotificationService>.Instance);
+            var failedDelivery = new AdmissionPaymentService(
+                _db.UnitOfWork, demoService, CreateUserService(), billing, failedNotifications, _auditLog,
+                new ConfigurationBuilder().Build());
+            var error = await Assert.ThrowsAsync<DomainValidationException>(() => failedDelivery.VerifyAndEnrollAsync(demo.Id));
+            Assert.Contains("welcome email could not be sent", error.Message);
+            Assert.Equal(ConversionStatus.PaymentReceived, (await demoService.GetAsync(demo.Id)).ConversionStatus);
+            Assert.Equal(4000, (await _db.Context.Invoices.AsNoTracking().SingleAsync(i => i.Id == invoiceId)).AmountPaid);
 
             // Counsellor clicks Enroll: the welcome email goes out automatically.
             _emailSender.Sent.Clear();

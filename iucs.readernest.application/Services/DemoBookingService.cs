@@ -590,10 +590,10 @@ namespace iucs.readernest.application.Services
                 booking.NextFollowUpOn = request.NextFollowUpOn;
             }
 
-            Guid? createdParentId = null;
+            Guid? parentNeedingManualDelivery = null;
             if (enteringReadyForEnrollment)
             {
-                createdParentId = await EnsureParentAccountAsync(booking, cancellationToken);
+                parentNeedingManualDelivery = await EnsureParentAccountAsync(booking, cancellationToken);
             }
 
             await _auditLog.StageAsync(AuditAction.Update, nameof(DemoBooking), booking.Id.ToString(), cancellationToken: cancellationToken);
@@ -636,15 +636,12 @@ namespace iucs.readernest.application.Services
 
             var result = await GetAsync(booking.Id, cancellationToken);
 
-            // A parent with no email just got a mobile-number login, but no email can carry the
-            // PIN (and WhatsApp sending may be off) -- hand it to the staff member once, now, so
-            // they can send it on WhatsApp. Never for an email parent: their PIN went by email.
-            if (createdParentId is { } parentUserId && ParentLogin.IsPlaceholderEmail(booking.ParentEmail))
+            if (parentNeedingManualDelivery is { } parentUserId)
             {
                 var pin = await _userService.RevealPinAsync(parentUserId, cancellationToken);
-                await _unitOfWork.SaveChangesAsync(cancellationToken);
                 var loginUrl = (_configuration["Frontend:BaseUrl"] ?? "https://thereadernest.in").TrimEnd('/') + "/login";
-                var loginId = booking.ParentPhone ?? string.Empty;
+                var loginId = ParentLogin.IsPlaceholderEmail(booking.ParentEmail)
+                    ? booking.ParentPhone ?? string.Empty : booking.ParentEmail;
                 result.IssuedLogin = new IssuedParentLoginDto
                 {
                     LoginId = loginId,
@@ -674,7 +671,7 @@ namespace iucs.readernest.application.Services
         /// demo, or a repeat lead): reuses it silently, no duplicate account and no re-sent
         /// credentials for someone who can already log in.
         /// </summary>
-        /// <returns>The new account's user id, or null when one already existed.</returns>
+        /// <returns>The new account ID when staff need to share the PIN manually.</returns>
         private async Task<Guid?> EnsureParentAccountAsync(DemoBooking booking, CancellationToken cancellationToken)
         {
             // A no-email parent's booking already carries their internal login key
@@ -707,7 +704,7 @@ namespace iucs.readernest.application.Services
             {
                 var pin = await _userService.RevealPinAsync(created.Id, cancellationToken);
                 var portalUrl = (_configuration["Frontend:BaseUrl"] ?? "https://thereadernest.in").TrimEnd('/');
-                await _notificationService.SendTemplatedEmailAsync(
+                var delivery = await _notificationService.SendTemplatedEmailAsync(
                     created.Id,
                     email,
                     NotificationType.General,
@@ -721,6 +718,7 @@ namespace iucs.readernest.application.Services
                         ["LoginUrl"] = portalUrl + "/login",
                     },
                     cancellationToken);
+                if (delivery == NotificationStatus.Sent) return null;
             }
 
             return created.Id;
