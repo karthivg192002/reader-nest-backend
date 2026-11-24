@@ -28,13 +28,20 @@ namespace iucs.readernest.api.Services
             _logger = logger;
         }
 
-        public async Task SendAsync(string toEmail, string subject, string body, CancellationToken cancellationToken = default)
+        public Task SendAsync(string toEmail, string subject, string body, CancellationToken cancellationToken = default)
+            => SendCoreAsync(toEmail, subject, body, false, cancellationToken);
+
+        public Task SendRequiredAsync(string toEmail, string subject, string body, CancellationToken cancellationToken = default)
+            => SendCoreAsync(toEmail, subject, body, true, cancellationToken);
+
+        private async Task SendCoreAsync(string toEmail, string subject, string body, bool required, CancellationToken cancellationToken)
         {
             // A parent with no email (demo booked by phone, or a no-email account's internal
             // login key) has nothing to deliver to — skip quietly rather than bounce or fail the
             // caller's own action. They're reached on WhatsApp instead.
             if (!application.Common.ParentLogin.IsDeliverable(toEmail))
             {
+                if (required) throw new InvalidOperationException("The recipient has no deliverable email address.");
                 return;
             }
 
@@ -46,6 +53,7 @@ namespace iucs.readernest.api.Services
 
             if (integration is null || !integration.IsEnabled || string.IsNullOrWhiteSpace(host))
             {
+                if (required) throw new InvalidOperationException("SMTP integration is disabled or unconfigured.");
                 // Never log the rendered body: it routinely carries a temporary password
                 // (welcome-credentials), review notes, or other content not meant for the
                 // log aggregator — subject/recipient is enough to see delivery was skipped.

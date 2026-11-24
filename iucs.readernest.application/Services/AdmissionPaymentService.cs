@@ -383,7 +383,7 @@ namespace iucs.readernest.application.Services
             {
                 // Sent BEFORE the status moves, so a failed send leaves the lead un-enrolled for the
                 // counsellor to retry rather than "enrolled" with a parent who never got a login.
-                await _notificationService.SendTemplatedEmailAsync(
+                var delivery = await _notificationService.SendTemplatedEmailAsync(
                     user.Id,
                     user.Email,
                     NotificationType.General,
@@ -397,6 +397,8 @@ namespace iucs.readernest.application.Services
                         ["LoginUrl"] = BaseUrl() + "/login",
                     },
                     cancellationToken);
+                if (delivery != NotificationStatus.Sent)
+                    throw new DomainValidationException("The welcome email could not be sent. Check email delivery settings and retry enrollment. The verified payment is retained.");
             }
 
             var tracked = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()

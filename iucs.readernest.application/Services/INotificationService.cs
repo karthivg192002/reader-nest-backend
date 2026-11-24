@@ -26,7 +26,7 @@ namespace iucs.readernest.application.Services
         /// automated system email should use; SendEmailAsync remains for admin-authored
         /// freeform content (e.g. Bulk Email) that has no template to render.
         /// </summary>
-        Task SendTemplatedEmailAsync(
+        Task<NotificationStatus> SendTemplatedEmailAsync(
             Guid recipientUserId,
             string recipientEmail,
             NotificationType type,

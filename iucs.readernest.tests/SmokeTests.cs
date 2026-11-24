@@ -5004,6 +5004,56 @@ namespace iucs.readernest.tests
             Assert.Contains(await CreateUserService().RevealPinAsync(user.Id), welcome.Body);
         }
 
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task EnrollmentWelcome_AlwaysProvidesThePinOrHandsItToStaff(bool smtpFails)
+        {
+            var template = await _db.Context.Set<EmailTemplate>()
+                .SingleAsync(t => t.Key == "parent-enrollment-welcome");
+            template.HtmlBody = "<p>Welcome! Please sign in.</p>";
+            var teacherUser = await _db.SeedUserAsync("teacher-welcome@test.com", "x", UserRole.Teacher);
+            var teacher = new TeacherProfile { UserId = teacherUser.Id };
+            _db.Context.TeacherProfiles.Add(teacher);
+            await _db.Context.SaveChangesAsync();
+
+            var notifications = smtpFails
+                ? new NotificationService(_db.UnitOfWork, new ThrowingEmailSender(), _emailTemplates, NullLogger<NotificationService>.Instance)
+                : _notifications;
+            var demoService = new DemoBookingService(
+                _db.UnitOfWork, _auditLog, _emailSender, _emailTemplates,
+                new FakeCrmNotifier(), new FakeJitsiTokenService(), notifications, CreateUserService(), CreateSessionService(),
+                new ConfigurationBuilder().Build(), NullLogger<DemoBookingService>.Instance);
+            var start = DateTime.UtcNow.AddDays(1);
+            const string email = "parent-welcome@test.com";
+            var demo = await demoService.CreateAsync(new CreateDemoBookingRequest
+            {
+                ParentName = "Test Parent", ParentEmail = email, ChildName = "Child",
+                TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
+            });
+            _emailSender.Sent.Clear();
+
+            var enrolled = await demoService.UpdateConversionStatusAsync(demo.Id,
+                new UpdateConversionStatusRequest { ConversionStatus = ConversionStatus.ReadyForEnrollment });
+
+            var user = await _db.Context.Users.SingleAsync(u => u.Email == email);
+            var pin = await CreateUserService().RevealPinAsync(user.Id);
+            var notification = await _db.Context.Set<Notification>().SingleAsync(n =>
+                n.RecipientUserId == user.Id && n.TemplateKey == "parent-enrollment-welcome");
+            Assert.Equal(smtpFails ? NotificationStatus.Failed : NotificationStatus.Sent, notification.Status);
+            if (smtpFails)
+            {
+                Assert.Empty(_emailSender.Sent);
+                Assert.Equal(email, enrolled.IssuedLogin?.LoginId);
+                Assert.Equal(pin, enrolled.IssuedLogin?.TemporaryPin);
+            }
+            else
+            {
+                Assert.Null(enrolled.IssuedLogin);
+                Assert.Contains($"PIN: {pin}", Assert.Single(_emailSender.Sent).Body);
+            }
+        }
+
         [Fact]
         public async Task AdmissionInvoices_StopBeingExemptOnceTheLeadIsEnrolled()
         {
@@ -12263,6 +12313,16 @@ namespace iucs.readernest.tests
             var partInvoice = await _db.Context.Invoices.AsNoTracking().SingleAsync(i => i.Id == invoiceId);
             Assert.Equal(InvoiceStatus.PartiallyPaid, partInvoice.Status);
             Assert.Equal(4000, partInvoice.AmountPaid);
+
+            var failedNotifications = new NotificationService(
+                _db.UnitOfWork, new ThrowingEmailSender(), _emailTemplates, NullLogger<NotificationService>.Instance);
+            var failedDelivery = new AdmissionPaymentService(
+                _db.UnitOfWork, demoService, CreateUserService(), billing, failedNotifications, _auditLog,
+                new ConfigurationBuilder().Build());
+            var error = await Assert.ThrowsAsync<DomainValidationException>(() => failedDelivery.VerifyAndEnrollAsync(demo.Id));
+            Assert.Contains("welcome email could not be sent", error.Message);
+            Assert.Equal(ConversionStatus.PaymentReceived, (await demoService.GetAsync(demo.Id)).ConversionStatus);
+            Assert.Equal(4000, (await _db.Context.Invoices.AsNoTracking().SingleAsync(i => i.Id == invoiceId)).AmountPaid);
 
             // Counsellor clicks Enroll: the welcome email goes out automatically.
             _emailSender.Sent.Clear();

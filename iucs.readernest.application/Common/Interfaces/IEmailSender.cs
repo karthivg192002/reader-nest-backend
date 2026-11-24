@@ -7,5 +7,8 @@ namespace iucs.readernest.application.Common.Interfaces
     public interface IEmailSender
     {
         Task SendAsync(string toEmail, string subject, string body, CancellationToken cancellationToken = default);
+
+        Task SendRequiredAsync(string toEmail, string subject, string body, CancellationToken cancellationToken = default)
+            => SendAsync(toEmail, subject, body, cancellationToken);
     }
 }

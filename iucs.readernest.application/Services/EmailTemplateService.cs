@@ -114,6 +114,16 @@ namespace iucs.readernest.application.Services
 
             var brandName = await BrandSettings.GetNameAsync(_unitOfWork, cancellationToken);
 
+            if (key == "parent-enrollment-welcome"
+                && (snapshot is null || !snapshot.IsActive
+                    || !TokenPattern.Matches(snapshot.HtmlBody).Any(match => match.Groups[1].Value == "TemporaryPin")))
+            {
+                return ($"Your {brandName} parent portal login", SubstituteHtml(
+                    "<p>Hello {{FirstName}},</p><p>Sign in at {{LoginUrl}}.</p>"
+                    + "<p>Login: {{Email}}<br>PIN: {{TemporaryPin}}</p>"
+                    + "<p>After signing in, please fill in your child's details.</p>", tokens));
+            }
+
             if (snapshot is null || !snapshot.IsActive)
             {
                 // A missing/disabled template must never block the underlying business

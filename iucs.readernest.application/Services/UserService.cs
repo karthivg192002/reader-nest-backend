@@ -680,7 +680,10 @@ namespace iucs.readernest.application.Services
                         break;
 
                     default:
-                        await _emailSender.SendAsync(user.Email, subject, emailHtmlBody, cancellationToken);
+                        if (user.Role == UserRole.Parent)
+                            await _emailSender.SendRequiredAsync(user.Email, subject, emailHtmlBody, cancellationToken);
+                        else
+                            await _emailSender.SendAsync(user.Email, subject, emailHtmlBody, cancellationToken);
                         break;
                 }
             }
