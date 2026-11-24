@@ -1,5 +1,10 @@
+using System.Security.Claims;
+using iucs.readernest.api.Controllers;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using iucs.readernest.application.Common;
 using iucs.readernest.application.Common.Exceptions;
+using iucs.readernest.application.Common.Interfaces;
 using iucs.readernest.application.Dto.Academics;
 using iucs.readernest.application.Dto.Admission;
 using iucs.readernest.application.Dto.Auth;
@@ -132,6 +137,67 @@ namespace iucs.readernest.tests
         private QuizQuestionService CreateQuizQuestionService() => new(_db.UnitOfWork, _auditLog, CreateSessionService(), _bulkFileReader);
 
         private AccessRequestService CreateAccessRequestService() => new(_db.UnitOfWork, _auditLog, _notifications);
+
+        [Fact]
+        public async Task GuestPresentation_OnlyReadsTheSessionNamedByItsCredential()
+        {
+            var (_, _, session) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            var (_, _, otherSession) = await SeedBatchWithSessionAsync(totalSessions: 1);
+            _db.Context.Set<SessionPresentation>().Add(new SessionPresentation
+            {
+                ClassSessionId = session.Id,
+                StorageUrl = "test/slide.png",
+                OriginalFileName = "slide.png",
+            });
+            await _db.Context.SaveChangesAsync();
+
+            var guestId = Guid.NewGuid();
+            var httpContext = new DefaultHttpContext();
+            var controller = new SessionsController(CreateSessionService(), new PresentationTestStorage(), null!, null!)
+            {
+                ControllerContext = new ControllerContext { HttpContext = httpContext },
+            };
+            httpContext.User = new ClaimsPrincipal(new ClaimsIdentity(
+            [
+                new Claim(ClaimTypes.NameIdentifier, guestId.ToString()),
+                new Claim("purpose", "guest-classroom"),
+                new Claim("sessionId", session.Id.ToString()),
+            ], "test"));
+
+            var ownPresentation = await controller.GetPresentation(session.Id, default);
+            var ok = Assert.IsType<OkObjectResult>(ownPresentation.Result);
+            Assert.Equal("slide.png", Assert.IsType<SessionPresentationDto>(ok.Value).OriginalFileName);
+            var file = Assert.IsType<FileStreamResult>(await controller.DownloadPresentation(session.Id, default));
+            await using var fileStream = file.FileStream;
+            Assert.Equal("image/png", file.ContentType);
+            Assert.Equal("slide.png", file.FileDownloadName);
+            Assert.Equal(3, fileStream.Length);
+
+            var otherPresentation = await controller.GetPresentation(otherSession.Id, default);
+            Assert.IsType<ForbidResult>(otherPresentation.Result);
+            Assert.IsType<ForbidResult>(await controller.DownloadPresentation(otherSession.Id, default));
+            Assert.IsType<ForbidResult>((await controller.UploadPresentation(session.Id, null!, default)).Result);
+
+            var teacher = await _db.Context.TeacherProfiles.SingleAsync(profile => profile.Id == session.TeacherProfileId);
+            httpContext.User = new ClaimsPrincipal(new ClaimsIdentity(
+                [new Claim(ClaimTypes.NameIdentifier, teacher.UserId.ToString())], "test"));
+            var teacherPresentation = await controller.GetPresentation(session.Id, default);
+            Assert.IsType<OkObjectResult>(teacherPresentation.Result);
+
+            var unrelatedParent = await _db.SeedUserAsync("unrelated-presentation@test.com", "x", UserRole.Parent);
+            httpContext.User = new ClaimsPrincipal(new ClaimsIdentity(
+                [new Claim(ClaimTypes.NameIdentifier, unrelatedParent.Id.ToString())], "test"));
+            await Assert.ThrowsAsync<ForbiddenException>(() => controller.GetPresentation(session.Id, default));
+        }
+
+        private sealed class PresentationTestStorage : IFileStorage
+        {
+            public Task<StoredFile> StoreAsync(Stream content, string originalFileName, CancellationToken cancellationToken = default)
+                => throw new NotSupportedException();
+
+            public Task<Stream?> OpenReadAsync(string relativePath, CancellationToken cancellationToken = default)
+                => Task.FromResult<Stream?>(relativePath == "test/slide.png" ? new MemoryStream([1, 2, 3]) : null);
+        }
 
         // ---- WBS business-rule coverage (Reader_Nest_LMS.pdf pp.28–32) ----
 

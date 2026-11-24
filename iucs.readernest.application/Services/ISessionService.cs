@@ -251,10 +251,10 @@ namespace iucs.readernest.application.Services
             CancellationToken cancellationToken = default);
 
         /// <summary>Metadata only (no storage path) — null if nothing's been uploaded for this session yet.</summary>
-        Task<SessionPresentationDto?> GetPresentationAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default);
+        Task<SessionPresentationDto?> GetPresentationAsync(Guid sessionId, Guid? userId, CancellationToken cancellationToken = default);
 
         /// <summary>Resolves the stored file for download — same participant gate as viewing metadata.</summary>
-        Task<SessionPresentationDownloadDto> GetPresentationForDownloadAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default);
+        Task<SessionPresentationDownloadDto> GetPresentationForDownloadAsync(Guid sessionId, Guid? userId, CancellationToken cancellationToken = default);
 
         /// <summary>The session's batch roster for the "Copy Guest Link" student picker — see
         /// GuestLinkStudentDto for why this is scoped off the session's own permission rather

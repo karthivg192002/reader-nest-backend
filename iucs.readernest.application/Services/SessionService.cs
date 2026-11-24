@@ -2956,11 +2956,11 @@ namespace iucs.readernest.application.Services
             return ToPresentationDto(existing);
         }
 
-        public async Task<SessionPresentationDto?> GetPresentationAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default)
+        public async Task<SessionPresentationDto?> GetPresentationAsync(Guid sessionId, Guid? userId, CancellationToken cancellationToken = default)
         {
             var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken)
                 ?? throw new NotFoundException(nameof(ClassSession), sessionId);
-            if (!await IsSessionParticipantAsync(session, userId, cancellationToken))
+            if (userId is { } participantId && !await IsSessionParticipantAsync(session, participantId, cancellationToken))
             {
                 throw new ForbiddenException("You do not have access to this session.");
             }
@@ -2978,11 +2978,11 @@ namespace iucs.readernest.application.Services
             CreatedAtUtc = presentation.CreatedAtUtc,
         };
 
-        public async Task<SessionPresentationDownloadDto> GetPresentationForDownloadAsync(Guid sessionId, Guid userId, CancellationToken cancellationToken = default)
+        public async Task<SessionPresentationDownloadDto> GetPresentationForDownloadAsync(Guid sessionId, Guid? userId, CancellationToken cancellationToken = default)
         {
             var session = await _unitOfWork.Repository<ClassSession>().GetByIdAsync(sessionId, cancellationToken)
                 ?? throw new NotFoundException(nameof(ClassSession), sessionId);
-            if (!await IsSessionParticipantAsync(session, userId, cancellationToken))
+            if (userId is { } participantId && !await IsSessionParticipantAsync(session, participantId, cancellationToken))
             {
                 throw new ForbiddenException("You do not have access to this session.");
             }
