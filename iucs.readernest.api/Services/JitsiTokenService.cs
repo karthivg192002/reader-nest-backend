@@ -1,5 +1,6 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using iucs.readernest.application.Common.Interfaces;
@@ -80,11 +81,28 @@ namespace iucs.readernest.api.Services
                 payload["purpose"] = purpose;
             }
 
-            var credentials = new SigningCredentials(
-                new SymmetricSecurityKey(Encoding.UTF8.GetBytes(appSecret)),
-                SecurityAlgorithms.HmacSha256);
-            var token = new JwtSecurityToken(new JwtHeader(credentials), payload);
-            return new JwtSecurityTokenHandler().WriteToken(token);
+            var secretBytes = Encoding.UTF8.GetBytes(appSecret);
+            if (secretBytes.Length >= 16)
+            {
+                var credentials = new SigningCredentials(
+                    new SymmetricSecurityKey(secretBytes),
+                    SecurityAlgorithms.HmacSha256);
+                var token = new JwtSecurityToken(new JwtHeader(credentials), payload);
+                return new JwtSecurityTokenHandler().WriteToken(token);
+            }
+
+            // IdentityModel 8 rejects HS256 secrets shorter than 128 bits before signing.
+            // Some long-running self-hosted Jitsi installations still use a legacy secret
+            // below that threshold. Prosody accepts it and changing only this API's copy
+            // would invalidate every room token. Sign that legacy configuration directly
+            // until the coordinated Jitsi + tenant-integration secret rotation is complete.
+            const string headerJson = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+            var header = Base64UrlEncoder.Encode(headerJson);
+            var body = Base64UrlEncoder.Encode(payload.SerializeToJson());
+            var unsignedToken = $"{header}.{body}";
+            using var hmac = new HMACSHA256(secretBytes);
+            var signature = Base64UrlEncoder.Encode(hmac.ComputeHash(Encoding.ASCII.GetBytes(unsignedToken)));
+            return $"{unsignedToken}.{signature}";
         }
 
         public bool ValidateFinalizeToken(string? bearerToken, string? jitsiConfigJson, string expectedRoom)
