@@ -2666,6 +2666,11 @@ namespace iucs.readernest.tests
 
             var listed = await CreateBillingService().ListInvoicesAsync(null, parentProfile.Id, page: 1, pageSize: 10);
             Assert.Equal("Karthik R", Assert.Single(listed.Items).ChildName);
+
+            var searched = await CreateBillingService().ListInvoicesAsync(
+                null, parentProfile.Id, page: 1, pageSize: 10, search: "  kArThIk r ");
+            Assert.Equal(1, searched.TotalCount);
+            Assert.Equal(listed.Items[0].Id, Assert.Single(searched.Items).Id);
         }
 
         [Fact]
@@ -2743,6 +2748,12 @@ namespace iucs.readernest.tests
 
             var third = await billing.ListInvoicesAsync(null, parentProfile.Id, page: 3, pageSize: 2);
             Assert.Single(third.Items);
+
+            var oldest = third.Items.Single();
+            var searched = await billing.ListInvoicesAsync(
+                null, parentProfile.Id, page: 1, pageSize: 2, search: oldest.InvoiceNumber.ToLowerInvariant());
+            Assert.Equal(1, searched.TotalCount);
+            Assert.Equal(oldest.Id, Assert.Single(searched.Items).Id);
 
             // A caller asking for the whole table gets a bounded page back, not a table scan.
             var greedy = await billing.ListInvoicesAsync(null, parentProfile.Id, page: 1, pageSize: 100_000);

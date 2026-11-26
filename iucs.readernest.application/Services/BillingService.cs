@@ -408,7 +408,8 @@ namespace iucs.readernest.application.Services
             Guid? parentProfileId,
             int page,
             int pageSize,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            string? search = null)
         {
             page = Math.Max(page, 1);
             pageSize = Math.Clamp(pageSize, 1, MaxInvoicePageSize);
@@ -432,8 +433,24 @@ namespace iucs.readernest.application.Services
                 query = CollectionOwnership.OwnedBy(query, _unitOfWork.Repository<DemoBooking>().Query(), callerId);
             }
 
-            // Counted before the includes matter: EF translates this to a COUNT over the
-            // filtered set, so the joins cost nothing on this half of the round trip.
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var term = search.Trim().ToLowerInvariant();
+                // Follow the same child, subscription child, and family fallback as the invoice DTO.
+                query = query.Where(i => i.InvoiceNumber.ToLower().Contains(term)
+                    || (i.ParentProfile.User.FirstName + " " + i.ParentProfile.User.LastName).ToLower().Contains(term)
+                    || i.ParentProfile.User.Email.ToLower().Contains(term)
+                    || i.Department.Name.ToLower().Contains(term)
+                    || (i.Course != null && i.Course.Name.ToLower().Contains(term))
+                    || (i.Course == null && i.Subscription != null && i.Subscription.PackagePlan.Course != null
+                        && i.Subscription.PackagePlan.Course.Name.ToLower().Contains(term))
+                    || (i.Child != null
+                        ? (i.Child.FirstName + " " + i.Child.LastName).ToLower().Contains(term)
+                        : i.Subscription != null && i.Subscription.Child != null
+                            ? (i.Subscription.Child.FirstName + " " + i.Subscription.Child.LastName).ToLower().Contains(term)
+                            : i.ParentProfile.Children.Any(c => (c.FirstName + " " + c.LastName).ToLower().Contains(term))));
+            }
+
             var totalCount = await query.CountAsync(cancellationToken);
 
             var invoices = await query

@@ -39,9 +39,10 @@ namespace iucs.readernest.api.Controllers
             [FromQuery] Guid? parentProfileId,
             [FromQuery] int page = 1,
             [FromQuery] int pageSize = 50,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            [FromQuery] string? search = null)
         {
-            return Ok(await _billingService.ListInvoicesAsync(status, parentProfileId, page, pageSize, cancellationToken));
+            return Ok(await _billingService.ListInvoicesAsync(status, parentProfileId, page, pageSize, cancellationToken, search));
         }
 
         /// <summary>Downloadable "Bill of Supply" PDF for this invoice, matching the org's own template.</summary>
