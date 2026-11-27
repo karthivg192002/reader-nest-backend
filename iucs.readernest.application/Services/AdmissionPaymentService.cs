@@ -350,17 +350,15 @@ namespace iucs.readernest.application.Services
                     "No payment has been received for this lead yet. Enroll as soon as the parent's payment comes in.");
             }
 
-            var email = booking.ParentEmail.Trim().ToLowerInvariant();
-            var user = await _unitOfWork.Repository<User>().Query()
-                .FirstOrDefaultAsync(u => u.Email == email, cancellationToken);
-            if (user is null)
+            var invoiceParent = await _unitOfWork.Repository<ParentProfile>().Query()
+                .Include(parent => parent.User)
+                .FirstOrDefaultAsync(parent => parent.Id == booking.Invoice.ParentProfileId, cancellationToken);
+            var user = invoiceParent?.User;
+            if (user is null || user.Role != UserRole.Parent
+                || !string.Equals(user.Email, booking.ParentEmail.Trim(), StringComparison.OrdinalIgnoreCase))
             {
-                await EnsureParentProfileAsync(booking, cancellationToken);
-                user = await _unitOfWork.Repository<User>().Query().FirstAsync(u => u.Email == email, cancellationToken);
-            }
-            if (user.Role != UserRole.Parent)
-            {
-                throw new DomainValidationException("That email belongs to a staff account, not a parent.");
+                throw new DomainValidationException(
+                    "The admission contact and the paid invoice belong to different parent accounts. Resolve the invoice ownership before enrolling.");
             }
 
             // The PIN the silent account was created with. A sibling's earlier account may be past

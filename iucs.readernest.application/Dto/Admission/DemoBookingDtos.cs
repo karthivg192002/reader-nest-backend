@@ -75,10 +75,11 @@ namespace iucs.readernest.application.Dto.Admission
     /// </summary>
     public class CreateDirectAdmissionLeadRequest
     {
-        /// <summary>The demo/lead of the sibling this child sat in with. When set, the parent's
-        /// details are copied from it (so both children land on the same parent account) and the
-        /// parent fields below are ignored.</summary>
+        /// <summary>The lead for the shared demo. Its parent is reused by default for siblings.</summary>
         public Guid? SiblingOfBookingId { get; set; }
+
+        /// <summary>Use the supplied contact details for a different family on the shared demo.</summary>
+        public bool UseDifferentParent { get; set; }
 
         [MaxLength(200)]
         public string? ParentName { get; set; }
