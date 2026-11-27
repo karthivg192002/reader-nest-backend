@@ -5319,8 +5319,10 @@ namespace iucs.readernest.tests
         }
 
         /// <summary>Client request 2026-10-02: two kids in one demo each need their own payment link.</summary>
-        [Fact]
-        public async Task DirectAdmission_ForSiblingFromADemo_GetsItsOwnPaymentLinkOnTheSameParent()
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task DirectAdmission_FromSharedDemo_UsesTheConfirmedGuardian(bool differentFamily)
         {
             var teacherUser = await _db.SeedUserAsync($"t-{Guid.NewGuid():N}@test.com", "x", UserRole.Teacher);
             var teacher = new TeacherProfile { UserId = teacherUser.Id };
@@ -5339,18 +5341,22 @@ namespace iucs.readernest.tests
             {
                 ParentName = "Ravi Iyer", ParentEmail = "ravi.iyer@example.com", ParentPhone = "9777777777", ChildName = "Anu",
                 TeacherProfileId = teacher.Id, ScheduledStartAtUtc = start, ScheduledEndAtUtc = start.AddMinutes(30),
-                Participants = [new DemoParticipantDto { Name = "Kavi", IsChild = true }],
+                Participants =
+                [
+                    new DemoParticipantDto { Name = "Kavi", IsChild = true },
+                    new DemoParticipantDto { Name = "Other Parent", Email = "other@example.com", Phone = "9888888888" },
+                ],
             });
 
             var sibling = await demoService.CreateDirectAdmissionLeadAsync(new CreateDirectAdmissionLeadRequest
             {
                 SiblingOfBookingId = demo.Id, ChildName = "Kavi",
-                // Ignored: a sibling always takes the original lead's parent.
-                ParentName = "Someone Else", ParentEmail = "other@example.com",
+                UseDifferentParent = differentFamily,
+                ParentName = "Other Parent", ParentEmail = "other@example.com", ParentPhone = "9888888888",
             });
 
-            Assert.Equal("ravi.iyer@example.com", sibling.ParentEmail);
-            Assert.Equal("Ravi Iyer", sibling.ParentName);
+            Assert.Equal(differentFamily ? "other@example.com" : "ravi.iyer@example.com", sibling.ParentEmail);
+            Assert.Equal(differentFamily ? "Other Parent" : "Ravi Iyer", sibling.ParentName);
             Assert.Null(sibling.ClassSessionId);
             Assert.Equal(0m, sibling.PayableAmount);
 
@@ -5363,8 +5369,24 @@ namespace iucs.readernest.tests
             Assert.NotEqual(first.Booking.InvoiceId, second.Booking.InvoiceId);
             Assert.Contains("Kavi", second.ShareMessage);
             var invoices = await _db.Context.Invoices.Where(i => i.Id == first.Booking.InvoiceId || i.Id == second.Booking.InvoiceId).ToListAsync();
-            Assert.Single(invoices.Select(i => i.ParentProfileId).Distinct());
+            Assert.Equal(differentFamily ? 2 : 1, invoices.Select(i => i.ParentProfileId).Distinct().Count());
             Assert.All(invoices, i => Assert.NotEqual(InvoiceStatus.Cancelled, i.Status));
+            if (!differentFamily) return;
+
+            await CreateBillingService().RecordPaymentAsync(second.Booking.InvoiceId!.Value, new RecordPaymentRequest { Amount = 4000 });
+            _emailSender.Sent.Clear();
+            var lead = await _db.Context.DemoBookings.SingleAsync(b => b.Id == sibling.Id);
+            lead.ParentEmail = "ravi.iyer@example.com";
+            await _db.Context.SaveChangesAsync();
+            await Assert.ThrowsAsync<DomainValidationException>(() => admission.VerifyAndEnrollAsync(sibling.Id));
+            Assert.Empty(_emailSender.Sent);
+
+            lead.ParentEmail = "other@example.com";
+            await _db.Context.SaveChangesAsync();
+            await admission.VerifyAndEnrollAsync(sibling.Id);
+            var welcome = Assert.Single(_emailSender.Sent);
+            Assert.Equal("other@example.com", welcome.To);
+            Assert.Contains("PIN", welcome.Body);
         }
 
         /// <summary>Client request 2026-10-02: a family that wants to enroll without a demo.</summary>

@@ -242,15 +242,15 @@ namespace iucs.readernest.application.Services
             string parentEmail;
             string? parentPhone;
             Guid? departmentId = request.DepartmentId;
-            if (request.SiblingOfBookingId is { } siblingId)
+            var sourceLead = request.SiblingOfBookingId is { } sourceId
+                ? await GetAsync(sourceId, cancellationToken) : null;
+            departmentId ??= sourceLead?.DepartmentId;
+
+            if (sourceLead is not null && !request.UseDifferentParent)
             {
-                // Same visibility as every other lead screen; the parent is copied verbatim so both
-                // children's payment links land on the one parent account (Terms asked only once).
-                var sibling = await GetAsync(siblingId, cancellationToken);
-                parentName = sibling.ParentName;
-                parentEmail = sibling.ParentEmail;
-                parentPhone = sibling.ParentPhone;
-                departmentId ??= sibling.DepartmentId;
+                parentName = sourceLead.ParentName;
+                parentEmail = sourceLead.ParentEmail;
+                parentPhone = sourceLead.ParentPhone;
             }
             else
             {
@@ -288,7 +288,7 @@ namespace iucs.readernest.application.Services
             await _unitOfWork.Repository<DemoBooking>().AddAsync(booking, cancellationToken);
             await _auditLog.StageAsync(AuditAction.Create, nameof(DemoBooking), booking.Id.ToString(),
                 request.SiblingOfBookingId is { } fromId
-                    ? $"{{\"note\":\"Direct admission (no demo) for a sibling from lead {fromId}\"}}"
+                    ? $"{{\"note\":\"Direct admission (no demo) for another child from lead {fromId}\"}}"
                     : "{\"note\":\"Direct admission (no demo)\"}",
                 cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
