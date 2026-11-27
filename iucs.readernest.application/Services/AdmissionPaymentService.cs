@@ -178,11 +178,11 @@ namespace iucs.readernest.application.Services
             await _demoBookingService.GetAsync(demoBookingId, cancellationToken);
 
             var booking = await _unitOfWork.Repository<DemoBooking>().TrackedQuery()
-                .Include(b => b.Invoice)
+                .Include(b => b.Invoice).ThenInclude(invoice => invoice!.Course)
                 .Include(b => b.Course)
                 .FirstOrDefaultAsync(b => b.Id == demoBookingId, cancellationToken)
                 ?? throw new NotFoundException(nameof(DemoBooking), demoBookingId);
-            if (booking.PaymentToken is null || booking.Invoice is null || booking.Course is null)
+            if (booking.Invoice is null || (booking.PaymentToken is null && string.IsNullOrWhiteSpace(booking.PaymentLinkUrl)))
             {
                 throw new DomainValidationException("No payment link has been sent for this lead yet -- use Send payment link first.");
             }
@@ -191,40 +191,56 @@ namespace iucs.readernest.application.Services
                 throw new DomainValidationException($"This invoice is already {booking.Invoice.Status}, so there's nothing to pay.");
             }
 
-            // A brand-new link, valid for another 48 hours; the old one stops working.
-            booking.PaymentToken = NewToken();
-            booking.PaymentLinkUrl = $"{BaseUrl()}/pay/{booking.PaymentToken}";
-            booking.TermsAcceptedAtUtc = null;
-            booking.Invoice.PaymentLinkExpiresAtUtc = PaymentLinkRules.NewExpiryUtc();
+            string token;
+            if (booking.PaymentToken is null)
+            {
+                // Manual admissions already have an invoice. Renew through its portal link,
+                // keeping the same invoice and leaving the lead on the manual admission path.
+                token = InvoicePayToken.Issue(booking.Invoice, _configuration["Jwt:SigningKey"]);
+            }
+            else
+            {
+                token = NewToken();
+                booking.PaymentToken = token;
+                booking.TermsAcceptedAtUtc = null;
+                booking.Invoice.PaymentLinkExpiresAtUtc = PaymentLinkRules.NewExpiryUtc();
+            }
+            booking.PaymentLinkUrl = $"{BaseUrl()}/pay/{token}";
             await _auditLog.StageAsync(AuditAction.Update, nameof(DemoBooking), booking.Id.ToString(),
                 "{\"note\":\"Admission payment link regenerated\"}", cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             var outstanding = booking.Invoice.Amount - booking.Invoice.AmountPaid;
-            return await BuildLinkResultAsync(booking, booking.Course, booking.Invoice.Currency, outstanding, cancellationToken);
+            return await BuildLinkResultAsync(booking, booking.Course ?? booking.Invoice.Course, booking.Invoice.Currency, outstanding, cancellationToken);
         }
 
         private async Task<AdmissionPaymentLinkDto> BuildLinkResultAsync(
-            DemoBooking booking, Course course, string currency, decimal amount, CancellationToken cancellationToken)
+            DemoBooking booking, Course? course, string currency, decimal amount, CancellationToken cancellationToken)
         {
+            var courseName = course?.Name ?? "Course fee";
+            var invoiceBased = booking.PaymentToken is null;
             var shareMessage = string.Join("\n",
                 $"Hello {booking.ParentName},",
                 "",
-                booking.ClassSessionId is null
-                    ? $"Thank you for choosing The Reader Nest. To confirm {booking.ChildName}'s admission for {course.Name}, please complete the payment of {currency} {amount:0.##} here:"
-                    : $"Thank you for attending the demo class. To confirm {booking.ChildName}'s admission for {course.Name}, please complete the payment of {currency} {amount:0.##} here:",
+                invoiceBased
+                    ? $"The outstanding payment for {booking.ChildName} is {currency} {amount:0.##}. Please use this link:"
+                    : booking.ClassSessionId is null
+                    ? $"Thank you for choosing The Reader Nest. To confirm {booking.ChildName}'s admission for {courseName}, please complete the payment of {currency} {amount:0.##} here:"
+                    : $"Thank you for attending the demo class. To confirm {booking.ChildName}'s admission for {courseName}, please complete the payment of {currency} {amount:0.##} here:",
                 booking.PaymentLinkUrl,
                 "",
                 PaymentLinkRules.ValidityNote,
                 "",
-                "You'll be asked to accept our Terms & Conditions before paying. Once we verify your payment, your login details will be emailed to you automatically.");
+                invoiceBased
+                    ? "If you have not accepted the Terms & Conditions, the payment page will ask you to do so before checkout."
+                    : "You'll be asked to accept our Terms & Conditions before paying. Once we verify your payment, your login details will be emailed to you automatically.");
 
             return new AdmissionPaymentLinkDto
             {
                 Booking = await _demoBookingService.GetAsync(booking.Id, cancellationToken),
                 PaymentUrl = booking.PaymentLinkUrl!,
-                CourseName = course.Name,
-                ListPrice = course.Price,
+                CourseName = courseName,
+                ListPrice = course?.Price ?? booking.Invoice?.Amount ?? amount,
                 Amount = amount,
                 Currency = currency,
                 ShareMessage = shareMessage,

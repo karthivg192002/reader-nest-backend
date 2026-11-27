@@ -4927,7 +4927,31 @@ namespace iucs.readernest.tests
             // Part payment keeps it pending; the full fee makes it a real enrollment.
             await billing.RecordPaymentAsync(result.InvoiceId!.Value, new RecordPaymentRequest { Amount = 500 });
             Assert.Equal(ConversionStatus.PaymentPending, (await demoService.GetAsync(demo.Id)).ConversionStatus);
+
+            var paymentLinks = new AdmissionPaymentService(_db.UnitOfWork, demoService, CreateUserService(),
+                billing, _notifications, _auditLog, new ConfigurationBuilder().Build());
+            var invoice = await _db.Context.Invoices.SingleAsync(i => i.Id == result.InvoiceId);
+            var oldToken = result.PaymentLinkUrl!.Split("/pay/")[1];
+            Assert.Equal(500, (await paymentLinks.GetPublicPaymentAsync(oldToken)).AmountPaid);
+            invoice.PaymentLinkExpiresAtUtc = DateTime.UtcNow.AddDays(-1);
+            await _db.Context.SaveChangesAsync();
+
+            var fresh = await paymentLinks.RegenerateLinkAsync(demo.Id);
+            Assert.Equal(result.InvoiceId, fresh.Booking.InvoiceId);
+            Assert.Equal(1500, fresh.Amount);
+            Assert.Equal(500, fresh.Booking.InvoiceAmountPaid);
+            Assert.Equal(ConversionStatus.PaymentPending, fresh.Booking.ConversionStatus);
+            Assert.Equal(fresh.PaymentUrl, fresh.Booking.PaymentLinkUrl);
+            Assert.True(fresh.Booking.PaymentLinkExpiresAtUtc > DateTime.UtcNow.AddHours(47));
+            Assert.Null((await _db.Context.DemoBookings.SingleAsync(b => b.Id == demo.Id)).PaymentToken);
+            await Assert.ThrowsAsync<NotFoundException>(() => paymentLinks.GetPublicPaymentAsync(oldToken));
+            var freshPage = await paymentLinks.GetPublicPaymentAsync(fresh.PaymentUrl.Split("/pay/")[1]);
+            Assert.Equal(2000, freshPage.Amount);
+            Assert.Equal(500, freshPage.AmountPaid);
+            Assert.False(freshPage.TermsRequired);
+
             await billing.RecordPaymentAsync(result.InvoiceId!.Value, new RecordPaymentRequest { Amount = 1500 });
+            await Assert.ThrowsAsync<DomainValidationException>(() => paymentLinks.RegenerateLinkAsync(demo.Id));
             Assert.Equal(ConversionStatus.Enrolled, (await demoService.GetAsync(demo.Id)).ConversionStatus);
         }
 
